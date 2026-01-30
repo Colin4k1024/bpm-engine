@@ -1,115 +1,124 @@
-# Rust BPM Engine
+# bpm-engine
 
-> A native Rust BPM runtime engine for long-running, stateful workflows.
+A native Rust BPM engine with strong correctness guarantees.
 
-**Rust BPM Engine** is a lightweight, embeddable **Business Process Management (BPM) runtime**, designed for executing long-running workflows with **parallelism, timers, retries, human tasks, and Saga compensation** — without relying on BPMN XML or heavyweight platforms.
-
-This project focuses on the **execution engine**, not visual modeling or low-code tooling.
+This project focuses on **execution semantics, persistence correctness, and crash safety**, rather than UI or low-code features. It is designed as a **token-driven, persistence-first BPM engine** with deterministic replay and formally defined invariants.
 
 ---
 
-## Why This Project
+## What is this?
 
-The Rust ecosystem lacks a production-grade BPM runtime that:
+`bpm-engine` is a **workflow / BPM execution engine** implemented in Rust.
 
-- Works natively in Rust
-- Supports long-running business processes
-- Handles failures, retries, and compensation correctly
-- Does not depend on JVM, BPMN XML, or external workflow servers
+At its core, it executes processes as **persistent token state machines**, where:
 
-This project fills that gap.
+- Every execution step is driven by database state
+- Every state transition is recorded as history
+- Every execution can be replayed and verified
+- Concurrency, retries, and crashes are first-class concerns
+
+This makes the engine suitable for **long-running, distributed, and failure-prone workflows**.
 
 ---
 
-## What This Is (and Is Not)
+## Why another BPM engine?
 
-### ✅ This is
+Most BPM engines optimize for **features and modeling UX**.
 
-- A **BPM runtime engine**
-- Token-based execution model
-- Event-driven core
-- Crash-safe and resumable
-- Designed for backend systems and orchestration
+This engine optimizes for **correctness**.
 
-### ❌ This is NOT
+Specifically:
 
-- A BPMN modeler
-- A low-code platform
-- A workflow UI tool
-- A distributed workflow SaaS (yet)
+- Token state is **explicit and persisted**
+- Execution is **crash-safe by construction**
+- External tasks use **lease-based execution**
+- Timers are **fully persistent**
+- All executions are **auditable and replayable**
+- Core behavior is protected by **formal invariants**
+
+If you care about _why_ a process reached a certain state — not just _that_ it did — this engine is for you.
 
 ---
 
 ## Core Concepts
 
-### Token-based Execution
+### Process & Instance
 
-- **Token** is the unit of execution
-- Parallelism is achieved by multiple tokens, not threads
-- Each token advances independently through the process graph
+- A **process definition** is an immutable execution graph
+- A **process instance** is a container for runtime tokens
 
-### Event-driven Engine
+### Token
 
-- All state transitions are triggered by events
-- Event handlers are deterministic and transactional
-- Engine progression is observable and replayable
+A token represents a unit of execution.
 
-### Saga Compensation
+- Each token has a clear lifecycle
+- State transitions are persisted
+- Parallelism is modeled via token forking and joining
 
-- Long-running transactions are handled via Saga
-- Only successfully completed steps are compensated
-- Compensation executes in reverse order using dedicated tokens
+### External Task
 
-### Crash Recovery
+External tasks allow work to be executed by external workers:
 
-- Engine state is fully persisted
-- Tokens can be safely resumed after crashes
-- No in-memory assumptions
+- Workers fetch tasks by topic
+- Tasks are protected by **leases**
+- Retries, timeouts, and crashes are handled by the engine
+
+### Timer
+
+Timers are persistent and scheduler-driven:
+
+- No in-memory timers
+- Safe across restarts
+- Naturally scalable
+
+### History & Replay
+
+- Every state change emits a history event
+- Execution can be replayed deterministically
+- History can be used for debugging, auditing, and verification
+
+### Invariants
+
+The engine enforces formal invariants such as:
+
+- A token can only reach a final state once
+- Join nodes only complete when all branches complete
+- External tasks have exactly one owner at a time
+- Retries are monotonic
+
+See [docs/invariants.md](docs/invariants.md) for details.
 
 ---
 
-## Key Features
-
-- 🧠 Token-based workflow execution
-- 🔀 Parallel fork / join support
-- ⏱ Timers, delays, and timeouts
-- 🔁 Retry with backoff
-- 👤 Human task integration
-- 📦 **External Task Worker** (pull-based fetch-and-lock / complete / fail; Worker SDK for Rust)
-- 🔄 Saga compensation (long transactions)
-- 💾 Persistent state & crash recovery
-- ⚙️ Native Rust, async-friendly design
-
----
-
-## High-level Architecture
+## Architecture Overview
 
 ```
++-------------------+
+| Process Engine    |
+| ----------------- |
+| Scheduler         |
+| Token Executor    |
+| Invariants        |
++-------------------+
+        |
+        v
++-------------------+
+| Persistence       |
+| (in-memory / DB)  |
+| Runtime Tables    |
+| History / Timers  |
++-------------------+
 
-API / Adapter
-↓
-Application Services
-↓
-BPM Engine Core
-
-* Event Dispatcher
-* Token Scheduler
-* Node Executor
-* Saga Coordinator
-  ↓
-  Persistence Layer
-  ↓
-  Infrastructure (DB / Clock / Logger)
-
+External Workers (fetch / lock / complete via API)
 ```
 
-For detailed design, see the architecture documentation.
+The persistence layer is the **single source of truth**. The default backend is **in-memory** (no database required for quick start). The engine can recover by re-running its schedulers. For a persistence-oriented deployment with PostgreSQL, see [docs/docs_recovery.md](docs/docs_recovery.md) and [docs/docs_database_schema.md](docs/docs_database_schema.md).
 
 ---
 
-## Getting Started
+## Getting Started (5 minutes)
 
-**Prerequisites:** Rust 1.70+ (`rustup`).
+**Requirements:** Rust (stable). No Docker required for the default in-memory backend.
 
 ```bash
 git clone https://github.com/fanjia1024/bpm-engine.git
@@ -117,15 +126,7 @@ cd bpm-engine
 cargo build
 ```
 
-The project is a **Cargo workspace** with crates: `bpm-core`, `bpm-storage`, `bpm-runtime`, `bpm-adapter-memory`, `bpm-server-rest`, `bpm-worker-sdk`.
-
----
-
-## Usage
-
-### 1. REST API server
-
-Run the Engine as an HTTP service (in-memory storage, no DB):
+**1. Start the engine**
 
 ```bash
 cargo run -p bpm-server-rest
@@ -133,160 +134,173 @@ cargo run -p bpm-server-rest
 
 Server listens on **http://127.0.0.1:3000**. Built-in process definitions: `minimal` (Start → End), `payment-flow` (Start → ExternalTask `payment` → End).
 
-**Endpoints (base path `/api/v1`):**
+**2. Run a minimal process (Start → End)**
 
-| Method | Path | Description |
-|--------|------|--------------|
-| POST | `/process-instances` | Start instance. Body: `{ "process_def_id", "variables"?: {} }` → `{ "instance_id", "status" }` |
-| GET | `/process-instances/:id` | Get instance. → `{ "instance_id", "status", "current_nodes" }` |
-| GET | `/tasks?type=user\|external` | List waiting tasks. → `[{ "task_id", "node_id", "instance_id", "task_type" }]` |
-| POST | `/tasks/:task_id/complete` | Complete user task. Body: `{ "variables"?: {} }` |
-| POST | `/external-tasks/fetch-and-lock` | Worker: fetch and lock. Body: `{ "worker_id", "task_types", "max_tasks"?, "lock_duration_ms" }` → array of tasks |
-| POST | `/external-tasks/:task_id/complete` | Worker: complete. Body: `{ "worker_id", "variables"?: {} }` |
-| POST | `/external-tasks/:task_id/fail` | Worker: fail. Body: `{ "worker_id", "error", "retry_after_ms"?: u64 }` |
+In another terminal, start an instance and poll until completed:
 
-Optional header: `x-tenant-id` for tenant isolation.
-
-### 2. External Task Worker (Worker SDK)
-
-Use the **Worker SDK** to run pull-based workers that fetch, execute, and complete/fail external tasks without touching BPM concepts.
-
-**Quick run (payment example):**
-
-1. Start the Engine:
-   ```bash
-   cargo run -p bpm-server-rest
-   ```
-2. In another terminal, start a process instance (e.g. `payment-flow`):
-   ```bash
-   curl -X POST http://127.0.0.1:3000/api/v1/process-instances \
-     -H "Content-Type: application/json" \
-     -d '{"process_def_id":"payment-flow","variables":{"amount":"100"}}'
-   ```
-3. Run the payment worker:
-   ```bash
-   cargo run -p bpm-worker-sdk --example payment
-   ```
-
-The worker polls the Engine, locks the `payment` task, runs the handler, then completes it; the process continues to End.
-
-**Using the Worker SDK in your code:**
-
-Add to `Cargo.toml` (workspace member or path dependency):
-
-```toml
-[dependencies]
-bpm-worker-sdk = { path = "crates/worker-sdk" }
+```bash
+cargo run --example simple_process
 ```
 
-Implement [TaskHandler](crates/worker-sdk/src/handler.rs) and run a [Worker](crates/worker-sdk/src/worker.rs):
+Or with curl:
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/v1/process-instances \
+  -H "Content-Type: application/json" \
+  -d '{"process_def_id":"minimal"}'
+# Then GET /api/v1/process-instances/:id until status is COMPLETED
+```
+
+**3. Run a process with an external task (payment)**
+
+Start a process instance:
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/v1/process-instances \
+  -H "Content-Type: application/json" \
+  -d '{"process_def_id":"payment-flow","variables":{"amount":"100"}}'
+```
+
+Run the payment worker (in a third terminal):
+
+```bash
+cargo run -p bpm-worker-sdk --example payment
+```
+
+The worker polls the engine, locks the `payment` task, runs the handler, then completes it; the process continues to End.
+
+---
+
+## Example: External Task Worker
 
 ```rust
-use bpm_worker_sdk::{
-    EngineClient, ExternalTask, TaskContext, TaskHandler, TaskResult, Worker, WorkerConfig,
-};
-use std::time::Duration;
+use bpm_worker_sdk::{EngineClient, ExternalTask, TaskContext, TaskHandler, TaskResult, Worker, WorkerConfig};
 
-struct MyHandler;
+struct PaymentHandler;
+
 #[async_trait::async_trait]
-impl TaskHandler for MyHandler {
-    fn task_type(&self) -> &str { "my-task" }
+impl TaskHandler for PaymentHandler {
+    fn task_type(&self) -> &str { "payment" }
     async fn handle(&self, task: ExternalTask, _ctx: TaskContext) -> TaskResult {
-        // ... use task.variables; return TaskResult::Complete { variables } or Fail { error, retry_after }
+        // business logic
+        let mut variables = std::collections::HashMap::new();
+        variables.insert("status".to_string(), "PAID".to_string());
+        TaskResult::Complete { variables }
     }
 }
 
+// Worker: stateless, crash-safe, horizontally scalable
 let worker = Worker::builder()
     .client(EngineClient::new("http://127.0.0.1:3000"))
-    .handler(MyHandler)
-    .config(WorkerConfig::new("worker-1").poll_interval(Duration::from_secs(1)))
+    .handler(PaymentHandler)
+    .config(WorkerConfig::new("worker-1").poll_interval(std::time::Duration::from_secs(1)))
     .build();
 worker.start().await;
 ```
 
-See [crates/worker-sdk/examples/payment.rs](crates/worker-sdk/examples/payment.rs) for a full example.
+See [crates/worker-sdk/examples/payment.rs](crates/worker-sdk/examples/payment.rs) for the full example.
 
-### 3. Examples
+---
 
-| Location | Command | Description |
-|----------|---------|--------------|
-| **Payment worker** | `cargo run -p bpm-worker-sdk --example payment` | Pull-based worker for `payment` external tasks; requires Engine running. |
-| **Basic order** | `cargo run --example basic_order` | Minimal stub (root package). |
+## Guarantees
 
-### 4. Using the engine as a library
+This engine provides the following guarantees:
 
-Depend on workspace crates by path:
+- **Exactly-once token completion**
+- **Crash-safe execution**
+- **Deterministic replay**
+- **Persistent timers**
+- **Formal invariants** checked in tests
 
-```toml
-[dependencies]
-bpm-core     = { path = "crates/core" }
-bpm-storage  = { path = "crates/storage" }
-bpm-runtime  = { path = "crates/runtime" }
-bpm-adapter-memory = { path = "crates/adapters/memory" }
-# Optional: Worker SDK (HTTP client + worker runtime)
-bpm-worker-sdk = { path = "crates/worker-sdk" }
-```
+These guarantees are **design goals**, not best-effort behavior.
 
-- **bpm-core**: ProcessDefinition, NodeType (Start, End, UserTask, ExternalTask, gateways), Token, ProcessInstance, EngineEvent.
-- **bpm-storage**: Async traits (ProcessInstanceRepo, TokenRepo, ExternalTaskStore, etc.).
-- **bpm-runtime**: BpmEngine, handlers (ProcessStart, TokenArrived, UserTaskCompleted, etc.), transition helpers.
-- **bpm-adapter-memory**: MemoryRepo implementing storage traits; ProcessDefStore for in-memory definitions.
-- **bpm-worker-sdk**: EngineClient, Worker, TaskHandler, TaskResult; no BPM knowledge required for worker code.
+---
 
-Build an [EngineContext](crates/runtime/src/handler.rs) with repos, then run `BpmEngine::run_async(initial_event, &mut ctx)`. See [crates/server/rest](crates/server/rest) for wiring.
+## Usage & API
+
+### REST API (base path `/api/v1`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/process-instances` | Start instance. Body: `{ "process_def_id", "variables"?: {} }` |
+| GET | `/process-instances/:id` | Get instance status and current nodes |
+| POST | `/process-definitions/deploy` | Deploy a process from BPMN 2.0 XML (body: raw XML) |
+| GET | `/tasks?type=user\|external` | List waiting tasks |
+| POST | `/tasks/:task_id/complete` | Complete user task |
+| POST | `/external-tasks/fetch-and-lock` | Worker: fetch and lock tasks |
+| POST | `/external-tasks/:task_id/complete` | Worker: complete task |
+| POST | `/external-tasks/:task_id/fail` | Worker: fail task |
+
+Optional header: `x-tenant-id` for tenant isolation.
+
+### Workspace crates
+
+- **bpm-core**: ProcessDefinition, NodeType (Start, End, UserTask, ExternalTask, gateways), Token, ProcessInstance, EngineEvent
+- **bpm-storage**: Async traits (ProcessInstanceRepo, TokenRepo, ExternalTaskStore, etc.)
+- **bpm-runtime**: BpmEngine, handlers, transition helpers
+- **bpm-adapter-memory**: MemoryRepo; ProcessDefStore for in-memory definitions
+- **bpm-bpmn**: BPMN 2.0 XML parser and compiler to ProcessDefinition
+- **bpm-server-rest**: HTTP API server
+- **bpm-worker-sdk**: EngineClient, Worker, TaskHandler; no BPM knowledge required for worker code
+
+Using the engine as a library: depend on the crates above by path, build an [EngineContext](crates/runtime/src/handler.rs) with repos, then run `BpmEngine::run_async(initial_event, &mut ctx)`. See [crates/server/rest](crates/server/rest) for wiring.
 
 ---
 
 ## Documentation
 
-- 📘 [Architecture Overview](docs/docs_architecture.md)
-- ⚙️ [Execution Model (Token & Concurrency)](docs/docs_execution_model.md)
-- 🔄 [Saga & Compensation](docs/docs_saga.md)
-- ♻️ [Crash Recovery & Rehydration](docs/docs_recovery.md)
-- 🗄️ [Database Schema](docs/docs_database_schema.md)
-- 🧪 [Testing Strategy](docs/docs_testing_strategy.md)
-- 📋 [BPMN mapping](docs/docs_bpmn_mapping.md)
-- ❓ [FAQ and common errors](docs/docs_faq.md)
+- [Architecture Overview](docs/docs_architecture.md)
+- [Execution Model (Token & Concurrency)](docs/docs_execution_model.md)
+- [Invariants](docs/invariants.md)
+- [Persistence & Recovery](docs/docs_recovery.md)
+- [Database Schema](docs/docs_database_schema.md)
+- [Saga & Compensation](docs/docs_saga.md)
+- [Testing Strategy](docs/docs_testing_strategy.md)
+- [BPMN mapping](docs/docs_bpmn_mapping.md)
+- [API spec](docs/docs_api_spec.md)
+- [FAQ](docs/docs_faq.md)
 
 ---
 
-## Status
+## Project Status
 
-🚧 **Early development / Architecture-first phase**
+This project is in **active development**.
 
-- Core design is stable
-- Implementation is in progress
-- APIs may change
+- Core execution semantics are stable
+- APIs may evolve
+- Not yet recommended for mission-critical production use
 
----
+That said, the engine is already suitable for:
 
-## Design Philosophy
-
-> Token is the unit of execution.  
-> Event is the unit of progress.  
-> Saga is the unit of resilience.
+- Research
+- Prototyping
+- Internal systems
+- Correctness-focused experimentation
 
 ---
 
 ## Roadmap
 
-### v1
+- Worker SDK stabilization (Rust / Python)
+- Read-only execution inspector (Cockpit-like UI)
+- More invariant coverage
+- Documentation & examples
+- History / Replay documentation (TBD)
 
-- Single-node engine
-- Code-defined workflows
-- Core runtime features
+---
 
-### v2
+## Contributing
 
-- BPMN adapter layer
-- Improved timer scheduling
-- Execution visualization
+Contributions are welcome.
 
-### v3
+Areas where help is especially valuable:
 
-- Multi-engine coordination
-- Horizontal scalability
-- Advanced observability
+- Testing and invariant cases
+- Documentation
+- Worker SDK ergonomics
+- Visualization tools
+
+Please see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 

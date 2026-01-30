@@ -12,6 +12,7 @@ bpm-core = { path = "../../core" }
 bpm-runtime = { path = "../../runtime" }
 bpm-storage = { path = "../../storage" }
 bpm-adapter-memory = { path = "../../adapters/memory" }
+bpm-bpmn = { path = "../../bpmn" }
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

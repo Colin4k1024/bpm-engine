@@ -146,6 +146,19 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+#[derive(Serialize)]
+pub struct DeployResponse {
+    pub process_definition_id: String,
+}
+
+/// Deploy failure: either parse error (single message) or compile errors (list).
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum DeployErrorResponse {
+    Parse { error: String },
+    Compile { errors: Vec<bpm_bpmn::CompilerError> },
+}
+
 /// POST /api/v1/process-instances — start a process instance.
 pub async fn start_instance(
     State(state): State<Arc<AppState>>,
@@ -509,6 +522,38 @@ pub async fn external_task_fail(
     }))
 }
 
+/// POST /api/v1/process-definitions/deploy — deploy a process definition from BPMN 2.0 XML.
+/// On compile failure returns 400 with list of CompilerErrors (03.md).
+pub async fn deploy_bpmn(
+    State(state): State<Arc<AppState>>,
+    body: String,
+) -> Result<(StatusCode, Json<DeployResponse>), (StatusCode, Json<DeployErrorResponse>)> {
+    let def = match bpm_bpmn::parse_and_compile(&body) {
+        Ok(d) => d,
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(match e {
+                    bpm_bpmn::CompileError::Parse(parse_err) => DeployErrorResponse::Parse {
+                        error: parse_err.to_string(),
+                    },
+                    bpm_bpmn::CompileError::Compile(ce) => DeployErrorResponse::Compile {
+                        errors: ce.0,
+                    },
+                }),
+            ))
+        }
+    };
+    let process_definition_id = def.id.to_string();
+    state.def_store.register(def);
+    Ok((
+        StatusCode::CREATED,
+        Json(DeployResponse {
+            process_definition_id,
+        }),
+    ))
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .nest(
@@ -521,6 +566,7 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .route("/external-tasks/fetch-and-lock", post(external_task_fetch_and_lock))
                 .route("/external-tasks/:task_id/complete", post(external_task_complete))
                 .route("/external-tasks/:task_id/fail", post(external_task_fail))
+                .route("/process-definitions/deploy", post(deploy_bpmn))
                 .with_state(state),
         )
 }
