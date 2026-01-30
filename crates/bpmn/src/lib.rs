@@ -66,7 +66,9 @@ mod tests {
         assert_eq!(def.nodes.len(), 3);
         let payment = def.nodes.get("payment").unwrap();
         match &payment.node_type {
-            bpm_engine_core::NodeType::ExternalTask { task_type, .. } => assert_eq!(task_type, "default"),
+            bpm_engine_core::NodeType::ExternalTask { task_type, .. } => {
+                assert_eq!(task_type, "default")
+            }
             _ => panic!("expected ExternalTask"),
         }
     }
