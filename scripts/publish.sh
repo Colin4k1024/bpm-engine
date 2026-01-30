@@ -3,9 +3,9 @@
 # Usage:
 #   CRATES_IO_TOKEN=your_token ./scripts/publish.sh
 #   CARGO_REGISTRY_TOKEN=your_token ./scripts/publish.sh
-#   ./scripts/publish.sh your_token
 #   ./scripts/publish.sh --version 0.2.0 [token]
 #   ./scripts/publish.sh -v 0.2.0 --dry-run
+#   ./scripts/publish.sh --from bpm-engine-adapter-memory   # resume after rate limit (429)
 
 set -euo pipefail
 
@@ -25,12 +25,13 @@ CRATES=(
   bpm-engine
 )
 
-# Parse args: --version / -v, --dry-run, token
+# Parse args: --version / -v, --from <crate>, --dry-run, token
 # Token: CRATES_IO_TOKEN or CARGO_REGISTRY_TOKEN env, or first non-option argument
 CRATES_IO_TOKEN="${CRATES_IO_TOKEN:-}"
 TOKEN="${CRATES_IO_TOKEN:-${CARGO_REGISTRY_TOKEN:-}}"
 DRY_RUN=false
 VERSION=""
+FROM_CRATE=""
 prev=""
 for arg in "$@"; do
   if [[ "$prev" == "--version" || "$prev" == "-v" ]]; then
@@ -38,8 +39,14 @@ for arg in "$@"; do
     prev=""
     continue
   fi
+  if [[ "$prev" == "--from" ]]; then
+    FROM_CRATE="$arg"
+    prev=""
+    continue
+  fi
   case "$arg" in
     --version|-v) prev="$arg" ;;
+    --from)       prev="$arg" ;;
     --dry-run)    DRY_RUN=true ;;
     *)
       if [[ -z "$TOKEN" && -n "$arg" ]]; then
@@ -50,6 +57,10 @@ for arg in "$@"; do
 done
 if [[ "$prev" == "--version" || "$prev" == "-v" ]]; then
   echo "Error: --version / -v requires a value (e.g. 0.2.0)"
+  exit 1
+fi
+if [[ "$prev" == "--from" ]]; then
+  echo "Error: --from requires a crate name (e.g. bpm-engine-adapter-memory)"
   exit 1
 fi
 
@@ -82,7 +93,22 @@ fi
 
 export CARGO_REGISTRY_TOKEN="${TOKEN}"
 
-echo "Publishing ${#CRATES[@]} crates (root: $ROOT_DIR)"
+# If --from <crate>, publish only from that crate onward (for resuming after 429 rate limit)
+TO_PUBLISH=("${CRATES[@]}")
+if [[ -n "$FROM_CRATE" ]]; then
+  idx=""
+  for i in "${!CRATES[@]}"; do
+    [[ "${CRATES[i]}" == "$FROM_CRATE" ]] && idx=$i && break
+  done
+  if [[ -z "$idx" ]]; then
+    echo "Error: unknown crate '$FROM_CRATE'. Valid: ${CRATES[*]}"
+    exit 1
+  fi
+  TO_PUBLISH=("${CRATES[@]:$idx}")
+  echo "Resuming from $FROM_CRATE (${#TO_PUBLISH[@]} crates)."
+fi
+
+echo "Publishing ${#TO_PUBLISH[@]} crates (root: $ROOT_DIR)"
 [[ -n "$VERSION" ]] && echo "  Version: $VERSION"
 if [[ "$DRY_RUN" == "true" ]]; then
   echo "  (dry-run: no token used, cargo publish --dry-run for each crate)"
@@ -91,15 +117,20 @@ fi
 echo ""
 
 # After -v bump, Cargo.toml files are modified; allow publish without committing
-ALLOW_DIRTY=()
-[[ -n "$VERSION" ]] && ALLOW_DIRTY=(--allow-dirty)
-
-for crate in "${CRATES[@]}"; do
+for crate in "${TO_PUBLISH[@]}"; do
   echo ">>> Publishing $crate"
   if [[ "$DRY_RUN" == "true" ]]; then
-    cargo publish -p "$crate" --registry crates-io "${ALLOW_DIRTY[@]}" --dry-run
+    if [[ -n "$VERSION" ]]; then
+      cargo publish -p "$crate" --registry crates-io --allow-dirty --dry-run
+    else
+      cargo publish -p "$crate" --registry crates-io --dry-run
+    fi
   else
-    cargo publish -p "$crate" --registry crates-io "${ALLOW_DIRTY[@]}"
+    if [[ -n "$VERSION" ]]; then
+      cargo publish -p "$crate" --registry crates-io --allow-dirty
+    else
+      cargo publish -p "$crate" --registry crates-io
+    fi
   fi
   echo ""
 done
