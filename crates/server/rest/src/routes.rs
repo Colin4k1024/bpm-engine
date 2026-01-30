@@ -286,18 +286,12 @@ pub async fn get_process_definition(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<ProcessDefinitionView>, (StatusCode, Json<ErrorResponse>)> {
-    let def = state
-        .def_store
-        .load(&id)
-        .await
-        .ok()
-        .flatten()
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("process definition not found: {}", id),
-            }),
-        ))?;
+    let def = state.def_store.load(&id).await.ok().flatten().ok_or((
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: format!("process definition not found: {}", id),
+        }),
+    ))?;
     Ok(Json(process_definition_to_view(&def)))
 }
 
@@ -309,13 +303,8 @@ pub async fn get_instance_history(
 ) -> Result<Json<Vec<bpm_storage::HistoryEvent>>, (StatusCode, Json<ErrorResponse>)> {
     let token_id = params.get("token_id").map(String::as_str);
     let event_type = params.get("event_type").map(String::as_str);
-    let events = HistoryRepo::list_by_instance(
-        state.repo.as_ref(),
-        &id,
-        token_id,
-        event_type,
-    )
-    .await
+    let events = HistoryRepo::list_by_instance(state.repo.as_ref(), &id, token_id, event_type)
+        .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
