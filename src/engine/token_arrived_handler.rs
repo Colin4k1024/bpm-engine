@@ -7,6 +7,7 @@ use crate::engine::transition::{evaluate_exclusive_gateway, move_token, move_tok
 use crate::model::{InstanceState, NodeType, TokenStatus};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use tracing::{debug, warn};
 
 /// In-memory JoinState: key = "instance_id:node_id:parallel_group_id", value = (expected, arrived token ids).
 pub struct TokenArrivedHandler {
@@ -55,11 +56,17 @@ impl EventHandler for TokenArrivedHandler {
         // Whitepaper §11.4: Claim Ready -> Executing; if CAS fails, abandon (no retry).
         if let Some(tr) = ctx.token_repo.as_ref() {
             if !tr.claim_token(&e.instance_id, &token.id, token.version) {
+                warn!(instance_id = %e.instance_id, token_id = %token.id, "token claim failed (CAS)");
+                #[cfg(feature = "observability")]
+                metrics::counter!("token_claim_failures_total", 1);
                 return vec![];
             }
+            #[cfg(feature = "observability")]
+            metrics::counter!("token_claimed_total", 1);
             instance.tokens[token_idx].status = TokenStatus::Executing;
             instance.tokens[token_idx].version += 1;
         }
+        debug!(instance_id = %e.instance_id, token_id = %e.token_id, node_id = %e.node_id, "token arrived");
         let node = match def.nodes.get(e.node_id.as_str()) {
             Some(n) => n,
             None => return vec![],

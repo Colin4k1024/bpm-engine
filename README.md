@@ -158,6 +158,29 @@ cargo run --example <name>
 - **parallel_fork_join**: ParallelFork creates two tokens; both run branch_a/branch_b; ParallelJoin waits for both, then one token continues to End (uses in-memory join state).
 - **leave_request**: 请假流程：提交请假(设置 days/leave_type/reason) → 路由网关(EL: days>5→总监, leave_type=="sick"→经理, days>2→经理, Default→自动通过) → 人工审批 → 结果网关(approved=="true"→通过, Default→驳回)。
 
+### REST API server (optional)
+
+With the `api` feature, you can run the engine as an HTTP service:
+
+```bash
+cargo run --bin api_server --features api
+```
+
+Endpoints:
+
+- `POST /processes/start` — body: `{ "process_id": "minimal", "instance_id": null }` → returns `{ "instance_id": "..." }`
+- `GET /processes/:id` — returns the process instance (state, tokens, variables)
+- `POST /tasks/complete` — body: `{ "instance_id", "node_id", "task_id", "variables": {} }` → 204 No Content
+
+The API server uses in-memory storage by default (no database). Listen address: `http://0.0.0.0:3000`.
+
+- With the `observability` feature: `cargo run --bin api_server --features "api,observability"` adds `GET /metrics` (Prometheus) and structured tracing.
+- `GET /definitions/:id/diagram` returns a Mermaid flowchart for a registered process definition.
+
+### Process DSL (JSON) and BPMN (v2.0)
+
+You can define processes in **JSON** (no Rust code) via the [dsl](src/dsl/mod.rs) module: deserialize a [DslProcessDefinition](src/dsl/mod.rs), register ServiceTask handlers by name with [ServiceTaskRegistry](src/dsl/registry.rs), then use [to_process_definition](src/dsl/convert.rs) or [load_and_register_json](src/dsl/load.rs). A minimal **BPMN-like JSON** is also supported ([bpmn](src/bpmn/mod.rs)); see [docs_bpmn_mapping.md](docs/docs_bpmn_mapping.md). Gateway conditions support **and** / **or** in EL ([engine/el](src/engine/el.rs)).
+
 ### Using the engine as a library
 
 **From [crates.io](https://crates.io/crates/bpm-engine)** (recommended):
@@ -188,6 +211,8 @@ Then define a [ProcessDefinition](src/model.rs), build an [EngineContext](src/en
 - ♻️ [Crash Recovery & Rehydration](docs/docs_recovery.md)
 - 🗄️ [Database Schema](docs/docs_database_schema.md)
 - 🧪 [Testing Strategy](docs/docs_testing_strategy.md)
+- 📋 [BPMN mapping](docs/docs_bpmn_mapping.md)
+- ❓ [FAQ and common errors](docs/docs_faq.md)
 
 ---
 

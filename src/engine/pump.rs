@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 
 use super::events::EngineEvent;
 use super::handler::{EngineContext, EventHandler};
+use tracing::debug;
 
 /// Design: handler.md §9 — event pump.
 pub struct EventPump;
@@ -17,6 +18,7 @@ impl EventPump {
         queue.push_back(initial);
 
         while let Some(event) = queue.pop_front() {
+            debug!(event = ?event, "event pump dispatch");
             let run_in_tx = ctx.run_in_tx.take();
             if let Some(mut run_in_tx) = run_in_tx {
                 run_in_tx(&event, handlers, ctx, &mut queue);

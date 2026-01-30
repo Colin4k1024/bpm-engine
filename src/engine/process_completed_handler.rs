@@ -2,6 +2,7 @@
 
 use crate::engine::events::EngineEvent;
 use crate::engine::handler::{EngineContext, EventHandler};
+use tracing::info;
 
 pub struct ProcessCompletedHandler;
 
@@ -17,7 +18,9 @@ impl EventHandler for ProcessCompletedHandler {
                 process_repo.save(&instance);
             }
         }
-        println!("✅ Process completed: {}", instance_id);
+        info!(instance_id = %instance_id, "process completed");
+        #[cfg(feature = "observability")]
+        metrics::counter!("process_completed_total", 1);
         vec![]
     }
 }

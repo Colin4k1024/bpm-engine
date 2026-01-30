@@ -6,6 +6,8 @@
 //! - Run [BpmEngine::run](engine::BpmEngine::run) with [EngineEvent](engine::EngineEvent) (e.g. ProcessStarted, UserTaskCompleted).
 
 pub mod api;
+pub mod bpmn;
+pub mod dsl;
 pub mod domain;
 pub mod engine;
 pub mod events;

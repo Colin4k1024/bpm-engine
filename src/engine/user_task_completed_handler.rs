@@ -3,6 +3,7 @@
 use crate::engine::events::{payloads, EngineEvent};
 use crate::engine::handler::{EngineContext, EventHandler};
 use crate::engine::transition::move_token;
+use tracing::info;
 
 pub struct UserTaskCompletedHandler;
 
@@ -11,6 +12,7 @@ impl EventHandler for UserTaskCompletedHandler {
         let EngineEvent::UserTaskCompleted(e) = event else {
             return vec![];
         };
+        info!(instance_id = %e.instance_id, node_id = %e.node_id, "user task completed");
         let Some(process_repo) = ctx.process_repo.as_ref() else {
             return vec![];
         };

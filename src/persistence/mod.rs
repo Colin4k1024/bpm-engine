@@ -2,9 +2,15 @@
 //! Repo traits and SQLite / memory implementation.
 
 pub mod memory;
+pub mod memory_repo;
 pub mod repo;
 pub mod sqlite;
 
 pub use memory::ProcessDefStore;
-pub use repo::{CompensationRecordRepo, CompensationRecordRow, OutboxEvent, OutboxRepo, ParallelJoinRepo, ProcessDefinitionRepo, ProcessInstanceRepo, TimerRecord, TimerRepo, TokenRepo, TransactionScope, UserTaskRepo};
+pub use memory_repo::MemoryRepo;
+pub use repo::{
+    CompensationRecordRepo, CompensationRecordRow, OutboxEvent, OutboxRepo, ParallelJoinRepo,
+    ProcessDefinitionRepo, ProcessInstanceRepo, TimerRecord, TimerRepo, TokenRepo,
+    TransactionScope, UserTaskRepo,
+};
 pub use sqlite::InstanceRepo;

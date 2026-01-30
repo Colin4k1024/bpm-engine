@@ -3,6 +3,7 @@
 use crate::engine::events::{payloads, EngineEvent};
 use crate::engine::handler::{EngineContext, EventHandler};
 use crate::model::{InstanceState, ProcessInstance, Token, TokenMode, TokenStatus};
+use tracing::info;
 
 pub struct ProcessStartHandler;
 
@@ -11,6 +12,9 @@ impl EventHandler for ProcessStartHandler {
         let EngineEvent::ProcessStarted(e) = event else {
             return vec![];
         };
+        info!(instance_id = %e.instance_id, process_id = %e.process_id, "process started");
+        #[cfg(feature = "observability")]
+        metrics::counter!("process_started_total", 1);
         let Some(process_repo) = ctx.process_repo.as_ref() else {
             return vec![];
         };

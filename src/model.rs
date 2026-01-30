@@ -3,7 +3,7 @@ use std::collections::HashMap;
 pub type NodeId = &'static str;
 
 /// Process instance lifecycle state (design: overview §2.2, whitepaper §4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum InstanceState {
     Running,
     Completed,
@@ -11,7 +11,7 @@ pub enum InstanceState {
 }
 
 /// Token lifecycle states (design: core §2, whitepaper §4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum TokenStatus {
     Created,
     Ready,
@@ -23,7 +23,7 @@ pub enum TokenStatus {
 }
 
 /// Token execution mode (design: saga, whitepaper §4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum TokenMode {
     Forward,
     Compensation,
@@ -72,7 +72,7 @@ pub struct ProcessDefinition {
     pub start: NodeId,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Token {
     pub id: String,
     pub node_id: String,
@@ -95,7 +95,7 @@ impl Token {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ProcessInstance {
     pub id: String,
     pub process_def_id: String,

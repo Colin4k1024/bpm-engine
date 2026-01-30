@@ -3,7 +3,8 @@
 use crate::engine::events::EngineEvent;
 
 /// Design: handler.md §5 — handle(event, ctx) -> Vec<EngineEvent>.
-pub trait EventHandler {
+/// Send + Sync for use in multi-threaded API server (plan v1.0).
+pub trait EventHandler: Send + Sync {
     fn handle(
         &self,
         event: &EngineEvent,

@@ -8,6 +8,7 @@ pub struct ElError(pub String);
 
 /// Evaluates a condition expression against process variables. Returns true iff the condition holds.
 /// Supported forms:
+/// - `a and b`, `a or b` — logical and/or (plan v2.0 D.1); " or " splits first, then " and "
 /// - `key == "literal"` or `key == 'literal'` — string equality
 /// - `key != "literal"` — string inequality
 /// - `key > n`, `key >= n`, `key < n`, `key <= n` — numeric comparison (variable value parsed as f64)
@@ -16,6 +17,28 @@ pub fn eval_condition(expr: &str, variables: &HashMap<String, String>) -> Result
     let expr = expr.trim();
     if expr.is_empty() {
         return Err(ElError("empty expression".into()));
+    }
+
+    // Top-level: " or " (disjunction)
+    if expr.contains(" or ") {
+        let parts: Vec<&str> = expr.split(" or ").map(str::trim).collect();
+        for part in parts {
+            if eval_condition(part, variables)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+
+    // Second-level: " and " (conjunction)
+    if expr.contains(" and ") {
+        let parts: Vec<&str> = expr.split(" and ").map(str::trim).collect();
+        for part in parts {
+            if !eval_condition(part, variables)? {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
     }
 
     // Single identifier: truthy if present and non-empty
@@ -146,5 +169,16 @@ mod tests {
     #[test]
     fn el_empty_err() {
         assert!(eval_condition("", &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn el_and_or() {
+        let v = vars(&[("a", "1"), ("b", "2"), ("c", "")]);
+        assert!(eval_condition("a and b", &v).unwrap());
+        assert!(!eval_condition("a and c", &v).unwrap());
+        assert!(eval_condition("a or c", &v).unwrap());
+        assert!(eval_condition("c or a", &v).unwrap());
+        assert!(!eval_condition("c or missing", &v).unwrap());
+        assert!(eval_condition(r#"a == "1" and b == "2""#, &v).unwrap());
     }
 }

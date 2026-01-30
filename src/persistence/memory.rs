@@ -37,3 +37,9 @@ impl ProcessDefinitionRepo for ProcessDefStore {
         self.defs.read().unwrap().get(id).cloned()
     }
 }
+
+impl ProcessDefinitionRepo for std::sync::Arc<ProcessDefStore> {
+    fn load(&self, id: &str) -> Option<ProcessDefinition> {
+        (**self).load(id)
+    }
+}
