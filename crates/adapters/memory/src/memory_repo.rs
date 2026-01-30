@@ -2,10 +2,10 @@
 //! Implements all storage traits for runtime EngineContext.
 
 use async_trait::async_trait;
-use bpm_core::{
+use bpm_engine_core::{
     ExternalTask, ExternalTaskState, InstanceState, ProcessInstance, Token, TokenStatus,
 };
-use bpm_storage::{
+use bpm_engine_storage::{
     CompensationRecordRepo, CompensationRecordRow, ExternalTaskStore, HistoryEvent, HistoryRepo,
     OutboxEvent, OutboxRepo, ParallelJoinRepo, ProcessInstanceStore, TimerRecord, TimerStore,
     TokenStore,

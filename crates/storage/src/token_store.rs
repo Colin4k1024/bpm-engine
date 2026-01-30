@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use bpm_core::Token;
+use bpm_engine_core::Token;
 
 #[async_trait]
 pub trait TokenStore: Send + Sync {

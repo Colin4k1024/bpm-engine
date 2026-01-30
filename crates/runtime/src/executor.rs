@@ -1,4 +1,4 @@
-use bpm_core::{Node, ProcessInstance, Token};
+use bpm_engine_core::{Node, ProcessInstance, Token};
 
 pub struct ExecutionContext<'a> {
     pub instance: &'a mut ProcessInstance,

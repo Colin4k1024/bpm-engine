@@ -1,7 +1,9 @@
 [package]
-name = "bpm-core"
+name = "bpm-engine-core"
 version = "0.2.0"
 edition = "2021"
+description = "Core types and traits for the BPM engine (process, token, node)"
+license = "MIT"
 
 [dependencies]
 serde = { workspace = true }

@@ -13,7 +13,7 @@ pub use parser::parse;
 
 /// Parse BPMN XML and compile to engine ProcessDefinition in one step.
 /// Returns Parse error or list of CompilerErrors (03.md).
-pub fn parse_and_compile(xml: &str) -> Result<bpm_core::ProcessDefinition, CompileError> {
+pub fn parse_and_compile(xml: &str) -> Result<bpm_engine_core::ProcessDefinition, CompileError> {
     let model = parse(xml).map_err(CompileError::Parse)?;
     compile(model).map_err(|v| CompileError::Compile(CompileErrors(v)))
 }
@@ -66,7 +66,7 @@ mod tests {
         assert_eq!(def.nodes.len(), 3);
         let payment = def.nodes.get("payment").unwrap();
         match &payment.node_type {
-            bpm_core::NodeType::ExternalTask { task_type, .. } => assert_eq!(task_type, "default"),
+            bpm_engine_core::NodeType::ExternalTask { task_type, .. } => assert_eq!(task_type, "default"),
             _ => panic!("expected ExternalTask"),
         }
     }
@@ -90,7 +90,7 @@ mod tests {
         assert!(def.nodes.contains_key("xor1"));
         let xor1 = def.nodes.get("xor1").unwrap();
         match &xor1.node_type {
-            bpm_core::NodeType::ExclusiveGateway => {}
+            bpm_engine_core::NodeType::ExclusiveGateway => {}
             _ => panic!("expected ExclusiveGateway"),
         }
         assert_eq!(xor1.outgoing_edges.len(), 2);
@@ -121,11 +121,11 @@ mod tests {
         let fork1 = def.nodes.get("fork1").unwrap();
         let join1 = def.nodes.get("join1").unwrap();
         match &fork1.node_type {
-            bpm_core::NodeType::ParallelFork => {}
+            bpm_engine_core::NodeType::ParallelFork => {}
             _ => panic!("expected ParallelFork"),
         }
         match &join1.node_type {
-            bpm_core::NodeType::ParallelJoin { expected } => assert_eq!(*expected, 2),
+            bpm_engine_core::NodeType::ParallelJoin { expected } => assert_eq!(*expected, 2),
             _ => panic!("expected ParallelJoin"),
         }
     }

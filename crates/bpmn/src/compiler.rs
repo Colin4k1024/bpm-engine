@@ -1,7 +1,7 @@
 //! BPMN model → Engine ProcessDefinition compiler (03.md).
 //! Collects all CompilerErrors; check_* steps; build_outgoing from node.outgoing + flows.
 
-use bpm_core::{EdgeCondition, Node, NodeType, OutgoingEdge, ProcessDefinition};
+use bpm_engine_core::{EdgeCondition, Node, NodeType, OutgoingEdge, ProcessDefinition};
 use std::collections::{HashMap, HashSet};
 
 use crate::errors::{CompilerError, ErrorCode};

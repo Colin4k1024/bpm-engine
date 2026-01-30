@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use bpm_core::{ProcessDefinition, ProcessInstance};
+use bpm_engine_core::{ProcessDefinition, ProcessInstance};
 
 #[async_trait]
 pub trait ProcessInstanceStore: Send + Sync {

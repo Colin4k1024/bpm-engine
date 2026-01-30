@@ -1,7 +1,7 @@
 //! External Task store trait (plan §12): fetch-and-lock, complete, fail, reclaim, create.
 
 use async_trait::async_trait;
-use bpm_core::ExternalTask;
+use bpm_engine_core::ExternalTask;
 use std::collections::HashMap;
 use std::time::Duration;
 

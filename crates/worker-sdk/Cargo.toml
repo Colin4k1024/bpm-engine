@@ -1,8 +1,9 @@
 [package]
-name = "bpm-worker-sdk"
+name = "bpm-engine-worker-sdk"
 version = "0.2.0"
 edition = "2021"
 description = "Pull-based Worker SDK for BPM Engine external tasks"
+license = "MIT"
 
 [dependencies]
 reqwest = { version = "0.12", features = ["json"] }

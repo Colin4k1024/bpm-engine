@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 
 use super::handler::{EngineContext, EventHandler};
-use bpm_core::EngineEvent;
+use bpm_engine_core::EngineEvent;
 use tracing::debug;
 
 pub struct EventPump;

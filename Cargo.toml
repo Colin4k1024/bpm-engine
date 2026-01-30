@@ -35,11 +35,11 @@ keywords = ["bpm", "workflow", "engine", "process", "orchestration"]
 categories = ["algorithms", "concurrency", "data-structures"]
 
 [dependencies]
-bpm-core = { path = "crates/core", version = "0.2.0" }
-bpm-storage = { path = "crates/storage", version = "0.2.0" }
-bpm-runtime = { path = "crates/runtime", version = "0.2.0" }
-bpm-adapter-memory = { path = "crates/adapters/memory", version = "0.2.0" }
-bpm-bpmn = { path = "crates/bpmn", version = "0.2.0" }
+bpm-engine-core = { path = "crates/core", version = "0.2.0" }
+bpm-engine-storage = { path = "crates/storage", version = "0.2.0" }
+bpm-engine-runtime = { path = "crates/runtime", version = "0.2.0" }
+bpm-engine-adapter-memory = { path = "crates/adapters/memory", version = "0.2.0" }
+bpm-engine-bpmn = { path = "crates/bpmn", version = "0.2.0" }
 uuid = { version = "1.4", features = ["v4"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }

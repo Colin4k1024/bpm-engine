@@ -1,7 +1,7 @@
 //! HistoryHandler: append every EngineEvent to HistoryRepo for Trace UI.
 
 use async_trait::async_trait;
-use bpm_core::EngineEvent;
+use bpm_engine_core::EngineEvent;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::handler::{EngineContext, EventHandler};

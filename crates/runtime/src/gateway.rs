@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use bpm_core::{EdgeCondition, Node, NodeId};
+use bpm_engine_core::{EdgeCondition, Node, NodeId};
 
 pub trait GatewayEvaluator {
     fn evaluate(&self, node: &Node, variables: &HashMap<String, String>) -> Vec<NodeId>;

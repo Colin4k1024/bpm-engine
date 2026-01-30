@@ -2,7 +2,7 @@
 //! Handles ParallelFork / ParallelJoin.
 
 use async_trait::async_trait;
-use bpm_core::{payloads, EngineEvent, InstanceState, NodeType, TokenStatus};
+use bpm_engine_core::{payloads, EngineEvent, InstanceState, NodeType, TokenStatus};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use tracing::{debug, warn};

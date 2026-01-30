@@ -1,9 +1,9 @@
 //! Concurrent token claim: only one of N callers should succeed (CAS).
-//! Uses workspace crates: bpm_core, bpm_adapter_memory (async stores).
+//! Uses workspace crates: bpm_engine_core, bpm_engine_adapter_memory (async stores).
 
-use bpm_engine::bpm_adapter_memory::MemoryRepo;
-use bpm_engine::bpm_core::{InstanceState, ProcessInstance, Token, TokenMode, TokenStatus};
-use bpm_engine::bpm_storage::{ProcessInstanceStore, TokenStore};
+use bpm_engine::bpm_engine_adapter_memory::MemoryRepo;
+use bpm_engine::bpm_engine_core::{InstanceState, ProcessInstance, Token, TokenMode, TokenStatus};
+use bpm_engine::bpm_engine_storage::{ProcessInstanceStore, TokenStore};
 use std::sync::Arc;
 
 #[tokio::test]

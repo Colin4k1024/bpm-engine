@@ -1,7 +1,7 @@
 use super::handler::{EngineContext, EventHandler};
 use super::pump::EventPump;
-use bpm_core::EngineEvent;
-use bpm_storage::TokenStore;
+use bpm_engine_core::EngineEvent;
+use bpm_engine_storage::TokenStore;
 use std::sync::Arc;
 
 pub struct Engine<S> {

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use bpm_core::{InstanceState, ProcessInstance};
-use bpm_storage::ProcessInstanceStore;
+use bpm_engine_core::{InstanceState, ProcessInstance};
+use bpm_engine_storage::ProcessInstanceStore;
 use std::collections::HashMap;
 use std::sync::RwLock;
 

@@ -126,48 +126,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "812e12b5285cc515a9c72a5c1d3b6d46a19dac5acfef5265968c166106e31dd3"
 
 [[package]]
-name = "bpm-adapter-memory"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bpm-core",
- "bpm-storage",
- "serde_json",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "bpm-bpmn"
-version = "0.2.0"
-dependencies = [
- "bpm-core",
- "roxmltree",
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "bpm-core"
-version = "0.2.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
- "uuid",
-]
-
-[[package]]
 name = "bpm-engine"
 version = "0.2.0"
 dependencies = [
  "axum",
- "bpm-adapter-memory",
- "bpm-bpmn",
- "bpm-core",
- "bpm-runtime",
- "bpm-storage",
+ "bpm-engine-adapter-memory",
+ "bpm-engine-bpmn",
+ "bpm-engine-core",
+ "bpm-engine-runtime",
+ "bpm-engine-storage",
  "metrics 0.21.1",
  "metrics-exporter-prometheus",
  "reqwest 0.11.27",
@@ -182,13 +149,46 @@ dependencies = [
 ]
 
 [[package]]
-name = "bpm-runtime"
+name = "bpm-engine-adapter-memory"
 version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "bpm-core",
- "bpm-storage",
+ "bpm-engine-core",
+ "bpm-engine-storage",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "bpm-engine-bpmn"
+version = "0.2.0"
+dependencies = [
+ "bpm-engine-core",
+ "roxmltree",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "bpm-engine-core"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "bpm-engine-runtime"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bpm-engine-core",
+ "bpm-engine-storage",
  "serde_json",
  "thiserror",
  "tokio",
@@ -197,15 +197,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "bpm-server-rest"
+name = "bpm-engine-server-rest"
 version = "0.2.0"
 dependencies = [
  "axum",
- "bpm-adapter-memory",
- "bpm-bpmn",
- "bpm-core",
- "bpm-runtime",
- "bpm-storage",
+ "bpm-engine-adapter-memory",
+ "bpm-engine-bpmn",
+ "bpm-engine-core",
+ "bpm-engine-runtime",
+ "bpm-engine-storage",
  "serde",
  "tokio",
  "tracing-subscriber",
@@ -213,18 +213,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "bpm-storage"
+name = "bpm-engine-storage"
 version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "bpm-core",
+ "bpm-engine-core",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "bpm-worker-sdk"
+name = "bpm-engine-worker-sdk"
 version = "0.2.0"
 dependencies = [
  "async-trait",

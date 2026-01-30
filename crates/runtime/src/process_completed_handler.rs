@@ -1,7 +1,7 @@
 //! ProcessCompletedHandler: ProcessCompleted -> mark instance completed, persist.
 
 use async_trait::async_trait;
-use bpm_core::{EngineEvent, InstanceState};
+use bpm_engine_core::{EngineEvent, InstanceState};
 use tracing::info;
 
 use super::handler::{EngineContext, EventHandler};

@@ -2,10 +2,10 @@
 # One-click publish workspace crates to crates.io.
 # Usage:
 #   CRATES_IO_TOKEN=your_token ./scripts/publish.sh
+#   CARGO_REGISTRY_TOKEN=your_token ./scripts/publish.sh
 #   ./scripts/publish.sh your_token
 #   ./scripts/publish.sh --version 0.2.0 [token]
 #   ./scripts/publish.sh -v 0.2.0 --dry-run
-#   CRATES_IO_TOKEN=xxx ./scripts/publish.sh -v 1.0.0
 
 set -euo pipefail
 
@@ -15,18 +15,20 @@ cd "$ROOT_DIR"
 
 # Publish order: dependencies first (topological order)
 CRATES=(
-  bpm-core
-  bpm-storage
-  bpm-bpmn
-  bpm-worker-sdk
-  bpm-runtime
-  bpm-adapter-memory
-  bpm-server-rest
+  bpm-engine-core
+  bpm-engine-storage
+  bpm-engine-bpmn
+  bpm-engine-worker-sdk
+  bpm-engine-runtime
+  bpm-engine-adapter-memory
+  bpm-engine-server-rest
   bpm-engine
 )
 
 # Parse args: --version / -v, --dry-run, token
+# Token: CRATES_IO_TOKEN or CARGO_REGISTRY_TOKEN env, or first non-option argument
 CRATES_IO_TOKEN="${CRATES_IO_TOKEN:-}"
+TOKEN="${CRATES_IO_TOKEN:-${CARGO_REGISTRY_TOKEN:-}}"
 DRY_RUN=false
 VERSION=""
 prev=""
@@ -40,8 +42,8 @@ for arg in "$@"; do
     --version|-v) prev="$arg" ;;
     --dry-run)    DRY_RUN=true ;;
     *)
-      if [[ -z "$CRATES_IO_TOKEN" && "$arg" != "" ]]; then
-        CRATES_IO_TOKEN="$arg"
+      if [[ -z "$TOKEN" && -n "$arg" ]]; then
+        TOKEN="$arg"
       fi
       ;;
   esac
@@ -69,29 +71,35 @@ if [[ -n "$VERSION" ]]; then
   echo ""
 fi
 
-if [[ -z "$CRATES_IO_TOKEN" && "$DRY_RUN" != "true" ]]; then
+if [[ -z "$TOKEN" && "$DRY_RUN" != "true" ]]; then
   echo "Error: crates.io token required."
-  echo "  Set CRATES_IO_TOKEN or pass token as argument."
+  echo "  Set CRATES_IO_TOKEN or CARGO_REGISTRY_TOKEN, or pass token as argument."
   echo "  Example: CRATES_IO_TOKEN=xxx ./scripts/publish.sh"
+  echo "  Or:      CARGO_REGISTRY_TOKEN=xxx ./scripts/publish.sh"
   echo "  Or:      ./scripts/publish.sh --dry-run  (no token needed)"
   exit 1
 fi
 
-export CARGO_REGISTRY_TOKEN="${CRATES_IO_TOKEN}"
+export CARGO_REGISTRY_TOKEN="${TOKEN}"
 
 echo "Publishing ${#CRATES[@]} crates (root: $ROOT_DIR)"
 [[ -n "$VERSION" ]] && echo "  Version: $VERSION"
 if [[ "$DRY_RUN" == "true" ]]; then
   echo "  (dry-run: no token used, cargo publish --dry-run for each crate)"
+  echo "  Note: dry-run may fail for crates that depend on others (e.g. bpm-storage) until those deps are on crates.io."
 fi
 echo ""
+
+# After -v bump, Cargo.toml files are modified; allow publish without committing
+ALLOW_DIRTY=()
+[[ -n "$VERSION" ]] && ALLOW_DIRTY=(--allow-dirty)
 
 for crate in "${CRATES[@]}"; do
   echo ">>> Publishing $crate"
   if [[ "$DRY_RUN" == "true" ]]; then
-    cargo publish -p "$crate" --registry crates-io --dry-run 
+    cargo publish -p "$crate" --registry crates-io "${ALLOW_DIRTY[@]}" --dry-run
   else
-    cargo publish -p "$crate" --registry crates-io
+    cargo publish -p "$crate" --registry crates-io "${ALLOW_DIRTY[@]}"
   fi
   echo ""
 done

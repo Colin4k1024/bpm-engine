@@ -1,6 +1,6 @@
 //! BPMN validation: invalid process definitions are rejected by the compiler.
 
-use bpm_engine::bpm_bpmn::{parse_and_compile, CompileError};
+use bpm_engine::bpm_engine_bpmn::{parse_and_compile, CompileError};
 
 #[test]
 fn invalid_bpmn_no_start_event_rejected() {
@@ -18,7 +18,7 @@ fn invalid_bpmn_no_start_event_rejected() {
         assert!(ce
             .0
             .iter()
-            .any(|e| e.code == bpm_engine::bpm_bpmn::ErrorCode::NoStartEvent));
+            .any(|e| e.code == bpm_engine::bpm_engine_bpmn::ErrorCode::NoStartEvent));
     }
 }
 
@@ -39,7 +39,7 @@ fn invalid_bpmn_multiple_start_events_rejected() {
         assert!(ce
             .0
             .iter()
-            .any(|e| e.code == bpm_engine::bpm_bpmn::ErrorCode::MultipleStartEvents));
+            .any(|e| e.code == bpm_engine::bpm_engine_bpmn::ErrorCode::MultipleStartEvents));
     }
 }
 
@@ -59,6 +59,6 @@ fn invalid_bpmn_no_end_event_rejected() {
         assert!(ce
             .0
             .iter()
-            .any(|e| e.code == bpm_engine::bpm_bpmn::ErrorCode::NoEndEvent));
+            .any(|e| e.code == bpm_engine::bpm_engine_bpmn::ErrorCode::NoEndEvent));
     }
 }

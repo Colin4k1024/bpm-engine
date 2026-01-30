@@ -1,7 +1,7 @@
 //! UserTaskCompletedHandler: UserTaskCompleted -> move token, emit TokenArrived.
 
 use async_trait::async_trait;
-use bpm_core::{payloads, EngineEvent};
+use bpm_engine_core::{payloads, EngineEvent};
 use tracing::info;
 
 use super::handler::{EngineContext, EventHandler};

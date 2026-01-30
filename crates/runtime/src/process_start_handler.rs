@@ -1,7 +1,7 @@
 //! ProcessStartHandler: ProcessStarted -> create instance + initial token, emit TokenArrived.
 
 use async_trait::async_trait;
-use bpm_core::{
+use bpm_engine_core::{
     payloads, EngineEvent, InstanceState, ProcessInstance, Token, TokenMode, TokenStatus,
 };
 use tracing::info;

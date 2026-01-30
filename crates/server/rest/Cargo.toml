@@ -1,18 +1,20 @@
 [package]
-name = "bpm-server-rest"
+name = "bpm-engine-server-rest"
 version = "0.2.0"
 edition = "2021"
+description = "REST API server for the BPM engine (Axum)"
+license = "MIT"
 
 [[bin]]
 name = "api_server"
 path = "src/main.rs"
 
 [dependencies]
-bpm-core = { path = "../../core", version = "0.2.0" }
-bpm-runtime = { path = "../../runtime", version = "0.2.0" }
-bpm-storage = { path = "../../storage", version = "0.2.0" }
-bpm-adapter-memory = { path = "../../adapters/memory", version = "0.2.0" }
-bpm-bpmn = { path = "../../bpmn", version = "0.2.0" }
+bpm-engine-core = { path = "../../core", version = "0.2.0" }
+bpm-engine-runtime = { path = "../../runtime", version = "0.2.0" }
+bpm-engine-storage = { path = "../../storage", version = "0.2.0" }
+bpm-engine-adapter-memory = { path = "../../adapters/memory", version = "0.2.0" }
+bpm-engine-bpmn = { path = "../../bpmn", version = "0.2.0" }
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

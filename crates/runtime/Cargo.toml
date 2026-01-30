@@ -1,11 +1,13 @@
 [package]
-name = "bpm-runtime"
+name = "bpm-engine-runtime"
 version = "0.2.0"
 edition = "2021"
+description = "BPM engine runtime: dispatcher, executor, timers, and event handling"
+license = "MIT"
 
 [dependencies]
-bpm-core = { path = "../core", version = "0.2.0" }
-bpm-storage = { path = "../storage", version = "0.2.0" }
+bpm-engine-core = { path = "../core", version = "0.2.0" }
+bpm-engine-storage = { path = "../storage", version = "0.2.0" }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 async-trait = "0.1"

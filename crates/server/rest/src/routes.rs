@@ -6,12 +6,12 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use bpm_core::{
+use bpm_engine_core::{
     payloads, EngineEvent, ExternalTaskState, InstanceState, NodeType, ProcessDefinition,
     ProcessInstance, TokenStatus,
 };
-use bpm_runtime::{transition, EngineContext};
-use bpm_storage::{
+use bpm_engine_runtime::{transition, EngineContext};
+use bpm_engine_storage::{
     CompensationRecordRepo, ExternalTaskStore, HistoryRepo, ParallelJoinRepo,
     ProcessDefinitionStore, ProcessInstanceStore, TimerStore, TokenStore,
 };
@@ -123,7 +123,7 @@ pub struct InstanceStateResponse {
     pub process_def_id: String,
     pub status: String,
     pub current_nodes: Vec<String>,
-    pub tokens: Vec<bpm_core::Token>,
+    pub tokens: Vec<bpm_engine_core::Token>,
 }
 
 #[derive(Deserialize)]
@@ -163,7 +163,7 @@ pub enum DeployErrorResponse {
         error: String,
     },
     Compile {
-        errors: Vec<bpm_bpmn::CompilerError>,
+        errors: Vec<bpm_engine_bpmn::CompilerError>,
     },
 }
 
@@ -300,7 +300,7 @@ pub async fn get_instance_history(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<bpm_storage::HistoryEvent>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Vec<bpm_engine_storage::HistoryEvent>>, (StatusCode, Json<ErrorResponse>)> {
     let token_id = params.get("token_id").map(String::as_str);
     let event_type = params.get("event_type").map(String::as_str);
     let events = HistoryRepo::list_by_instance(state.repo.as_ref(), &id, token_id, event_type)
@@ -643,16 +643,16 @@ pub async fn deploy_bpmn(
     State(state): State<Arc<AppState>>,
     body: String,
 ) -> Result<(StatusCode, Json<DeployResponse>), (StatusCode, Json<DeployErrorResponse>)> {
-    let def = match bpm_bpmn::parse_and_compile(&body) {
+    let def = match bpm_engine_bpmn::parse_and_compile(&body) {
         Ok(d) => d,
         Err(e) => {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(match e {
-                    bpm_bpmn::CompileError::Parse(parse_err) => DeployErrorResponse::Parse {
+                    bpm_engine_bpmn::CompileError::Parse(parse_err) => DeployErrorResponse::Parse {
                         error: parse_err.to_string(),
                     },
-                    bpm_bpmn::CompileError::Compile(ce) => {
+                    bpm_engine_bpmn::CompileError::Compile(ce) => {
                         DeployErrorResponse::Compile { errors: ce.0 }
                     }
                 }),

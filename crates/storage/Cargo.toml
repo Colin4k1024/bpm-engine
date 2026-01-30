@@ -1,10 +1,12 @@
 [package]
-name = "bpm-storage"
+name = "bpm-engine-storage"
 version = "0.2.0"
 edition = "2021"
+description = "Storage traits and types for the BPM engine (process, token, timer, history)"
+license = "MIT"
 
 [dependencies]
-bpm-core = { path = "../core", version = "0.2.0" }
+bpm-engine-core = { path = "../core", version = "0.2.0" }
 anyhow = { workspace = true }
 async-trait = "0.1"
 serde = { workspace = true }

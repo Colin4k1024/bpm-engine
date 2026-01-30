@@ -2,8 +2,8 @@
 //! Context holds async storage store references.
 
 use async_trait::async_trait;
-use bpm_core::EngineEvent;
-use bpm_storage::{
+use bpm_engine_core::EngineEvent;
+use bpm_engine_storage::{
     CompensationRecordRepo, ExternalTaskStore, HistoryRepo, OutboxRepo, ParallelJoinRepo,
     ProcessDefinitionStore, ProcessInstanceStore, TimerStore, TokenStore,
 };

@@ -1,7 +1,7 @@
 //! Token transition helpers: move_token, evaluate_exclusive_gateway.
 
 use super::el;
-use bpm_core::{EdgeCondition, Node, NodeId, Token, TokenMode, TokenStatus};
+use bpm_engine_core::{EdgeCondition, Node, NodeId, Token, TokenMode, TokenStatus};
 use std::collections::HashMap;
 
 fn new_token(node_id: String, parallel_group_id: Option<String>) -> Token {

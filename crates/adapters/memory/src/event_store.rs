@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use bpm_storage::{OutboxEvent, OutboxRepo};
+use bpm_engine_storage::{OutboxEvent, OutboxRepo};
 use std::sync::RwLock;
 
 fn utc_now() -> String {

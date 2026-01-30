@@ -1,16 +1,16 @@
 //! Recovery-related test: engine continues after state is persisted (simulated restart).
 //! Creates instance with Ready token, runs engine with TokenArrived, asserts process completes.
 
-use bpm_engine::bpm_adapter_memory::{MemoryRepo, ProcessDefStore};
-use bpm_engine::bpm_core::{
+use bpm_engine::bpm_engine_adapter_memory::{MemoryRepo, ProcessDefStore};
+use bpm_engine::bpm_engine_core::{
     payloads, EngineEvent, InstanceState, Node, NodeType, OutgoingEdge, ProcessDefinition,
     ProcessInstance, Token, TokenMode, TokenStatus,
 };
-use bpm_engine::bpm_runtime::{
+use bpm_engine::bpm_engine_runtime::{
     BpmEngine, EngineContext, ProcessCompletedHandler, ProcessStartHandler, TokenArrivedHandler,
     UserTaskCompletedHandler,
 };
-use bpm_engine::bpm_storage::ProcessInstanceStore;
+use bpm_engine::bpm_engine_storage::ProcessInstanceStore;
 use std::collections::HashMap;
 use std::sync::Arc;
 

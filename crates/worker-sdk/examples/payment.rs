@@ -5,7 +5,7 @@
 //! Start this worker: `cargo run -p bpm-worker-sdk --example payment`
 
 use async_trait::async_trait;
-use bpm_worker_sdk::{
+use bpm_engine_worker_sdk::{
     EngineClient, ExternalTask, TaskContext, TaskHandler, TaskResult, Worker, WorkerConfig,
 };
 use std::collections::HashMap;

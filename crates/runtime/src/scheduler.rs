@@ -1,4 +1,4 @@
-use bpm_core::{ProcessInstance, Token};
+use bpm_engine_core::{ProcessInstance, Token};
 
 pub trait TokenScheduler {
     fn poll<'a>(&self, instance: &'a ProcessInstance) -> Vec<&'a Token>;
