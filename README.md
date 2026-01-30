@@ -147,6 +147,7 @@ cargo run --example <name>
 | **service_task_chain** | `cargo run --example service_task_chain` | Start → step1 → step2 → step3 → End (linear ServiceTask chain).              |
 | **reject_path**        | `cargo run --example reject_path`        | Approval topology but variable set to reject; process ends without UserTask. |
 | **parallel_fork_join** | `cargo run --example parallel_fork_join` | Start → Fork → (branch_a, branch_b) → Join → End (ParallelFork/Join).        |
+| **leave_request**      | `cargo run --example leave_request`      | 请假流程：EL 多级网关（days / leave_type）+ 经理/总监审批 + 通过/驳回。     |
 
 - **minimal**: Two-node process (start, end); template for the smallest run.
 - **approval**: Full approval flow with ServiceTask, ExclusiveGateway, and UserTask; simulates “complete user task” so you see the same behavior as `cargo run` without `bpm.db`.
@@ -155,6 +156,7 @@ cargo run --example <name>
 - **service_task_chain**: Three ServiceTasks in sequence; shows linear automation.
 - **reject_path**: Same graph as approval; ServiceTask sets `valid = "false"` so the gateway takes Default → reject (no UserTask).
 - **parallel_fork_join**: ParallelFork creates two tokens; both run branch_a/branch_b; ParallelJoin waits for both, then one token continues to End (uses in-memory join state).
+- **leave_request**: 请假流程：提交请假(设置 days/leave_type/reason) → 路由网关(EL: days>5→总监, leave_type=="sick"→经理, days>2→经理, Default→自动通过) → 人工审批 → 结果网关(approved=="true"→通过, Default→驳回)。
 
 ### Using the engine as a library
 
