@@ -1,11 +1,8 @@
-//! Minimal example: Start → End.
+//! ServiceTask chain: Start → step1 → step2 → step3 → End.
 //!
-//! Run: `cargo run --example minimal`
+//! Run: `cargo run --example service_task_chain`
 //!
-//! Demonstrates:
-//! - Defining a process with two nodes (start, end).
-//! - Creating engine context with in-memory SQLite.
-//! - Starting a process and running until completion.
+//! Demonstrates a linear sequence of ServiceTasks; each step runs in order and the process completes in one run.
 
 use bpm_engine::engine::{
     payloads, BpmEngine, EngineContext, EngineEvent, ProcessCompletedHandler, ProcessStartHandler,
@@ -16,9 +13,24 @@ use bpm_engine::persistence::{InstanceRepo, ProcessDefStore, ProcessInstanceRepo
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn step1(instance: &mut ProcessInstance) {
+    instance.variables.insert("step".into(), "1".into());
+    println!("  step1");
+}
+
+fn step2(instance: &mut ProcessInstance) {
+    instance.variables.insert("step".into(), "2".into());
+    println!("  step2");
+}
+
+fn step3(instance: &mut ProcessInstance) {
+    instance.variables.insert("step".into(), "3".into());
+    println!("  step3");
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let process = ProcessDefinition {
-        id: "minimal",
+        id: "service_task_chain",
         start: "start",
         nodes: HashMap::from([
             (
@@ -26,6 +38,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Node {
                     id: "start",
                     node_type: NodeType::Start,
+                    outgoing_edges: vec![OutgoingEdge {
+                        target: "step1",
+                        condition: None,
+                    }],
+                },
+            ),
+            (
+                "step1",
+                Node {
+                    id: "step1",
+                    node_type: NodeType::ServiceTask(step1),
+                    outgoing_edges: vec![OutgoingEdge {
+                        target: "step2",
+                        condition: None,
+                    }],
+                },
+            ),
+            (
+                "step2",
+                Node {
+                    id: "step2",
+                    node_type: NodeType::ServiceTask(step2),
+                    outgoing_edges: vec![OutgoingEdge {
+                        target: "step3",
+                        condition: None,
+                    }],
+                },
+            ),
+            (
+                "step3",
+                Node {
+                    id: "step3",
+                    node_type: NodeType::ServiceTask(step3),
                     outgoing_edges: vec![OutgoingEdge {
                         target: "end",
                         condition: None,
@@ -80,6 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let inst = repo.load(&instance_id).expect("instance exists");
     assert!(inst.completed());
-    println!("OK: instance {} completed (Start → End)", instance_id);
+    assert_eq!(inst.variables.get("step").map(String::as_str), Some("3"));
+    println!("OK: instance completed after step1 → step2 → step3");
     Ok(())
 }

@@ -59,6 +59,44 @@ pub trait OutboxRepo {
     fn mark_published(&self, id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
+/// Timer record (docs_database_schema §6: id, token_id, due_at, status, created_at).
+/// Plan: instance_id included for loading instance on TimerFired.
+#[derive(Debug, Clone)]
+pub struct TimerRecord {
+    pub id: String,
+    pub token_id: String,
+    pub instance_id: String,
+    pub due_at: String,
+    pub status: String, // "Scheduled" | "Fired" | "Cancelled"
+    pub created_at: String,
+}
+
+/// TimerRepo: get by id, mark fired, insert (design: timer.md, docs_database_schema §6).
+pub trait TimerRepo {
+    fn get_by_id(&self, id: &str) -> Option<TimerRecord>;
+    fn mark_fired(&self, id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    fn insert(&self, record: &TimerRecord) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+}
+
+/// Compensation record row (docs_database_schema §7: id, instance_id, node_id, handler_ref, order, status, created_at).
+#[derive(Debug, Clone)]
+pub struct CompensationRecordRow {
+    pub id: String,
+    pub instance_id: String,
+    pub node_id: String,
+    pub handler_ref: String,
+    /// Order for reverse compensation (persisted as sort_order in DB).
+    pub order: u32,
+    pub status: String, // "Pending" | "Completed" | "Failed"
+    pub created_at: String,
+}
+
+/// CompensationRecordRepo: add record, list by instance (ordered by order for reverse compensation).
+pub trait CompensationRecordRepo {
+    fn add(&self, record: &CompensationRecordRow) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    fn list_by_instance(&self, instance_id: &str) -> Vec<CompensationRecordRow>;
+}
+
 /// Whitepaper §11.5: run a closure with process_repo and token_repo inside a single DB transaction.
 pub trait TransactionScope {
     fn with_tx<'r, F, R>(&'r self, f: F) -> std::result::Result<R, Box<dyn std::error::Error + Send + Sync>>

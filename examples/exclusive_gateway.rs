@@ -1,11 +1,9 @@
-//! Minimal example: Start → End.
+//! ExclusiveGateway example: Start → set_choice (ServiceTask) → gateway → end_a or end_b.
 //!
-//! Run: `cargo run --example minimal`
+//! Run: `cargo run --example exclusive_gateway`
 //!
-//! Demonstrates:
-//! - Defining a process with two nodes (start, end).
-//! - Creating engine context with in-memory SQLite.
-//! - Starting a process and running until completion.
+//! Demonstrates branching by process variables: the ServiceTask sets `choice = "a"`,
+//! so the ExclusiveGateway selects the first matching edge and the process ends at `end_a`.
 
 use bpm_engine::engine::{
     payloads, BpmEngine, EngineContext, EngineEvent, ProcessCompletedHandler, ProcessStartHandler,
@@ -16,9 +14,14 @@ use bpm_engine::persistence::{InstanceRepo, ProcessDefStore, ProcessInstanceRepo
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn set_choice_a(instance: &mut ProcessInstance) {
+    instance.variables.insert("choice".into(), "a".into());
+    println!("  set choice = a");
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let process = ProcessDefinition {
-        id: "minimal",
+        id: "exclusive_gateway",
         start: "start",
         nodes: HashMap::from([
             (
@@ -27,15 +30,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     id: "start",
                     node_type: NodeType::Start,
                     outgoing_edges: vec![OutgoingEdge {
-                        target: "end",
+                        target: "set_choice",
                         condition: None,
                     }],
                 },
             ),
             (
-                "end",
+                "set_choice",
                 Node {
-                    id: "end",
+                    id: "set_choice",
+                    node_type: NodeType::ServiceTask(set_choice_a),
+                    outgoing_edges: vec![OutgoingEdge {
+                        target: "gateway",
+                        condition: None,
+                    }],
+                },
+            ),
+            (
+                "gateway",
+                Node {
+                    id: "gateway",
+                    node_type: NodeType::ExclusiveGateway,
+                    outgoing_edges: vec![
+                        OutgoingEdge {
+                            target: "end_a",
+                            condition: Some(EdgeCondition::Expression(r#"choice == "a""#.into())),
+                        },
+                        OutgoingEdge {
+                            target: "end_b",
+                            condition: Some(EdgeCondition::VariableEq {
+                                key: "choice".into(),
+                                value: "b".into(),
+                            }),
+                        },
+                        OutgoingEdge {
+                            target: "end_b",
+                            condition: Some(EdgeCondition::Default),
+                        },
+                    ],
+                },
+            ),
+            (
+                "end_a",
+                Node {
+                    id: "end_a",
+                    node_type: NodeType::End,
+                    outgoing_edges: vec![],
+                },
+            ),
+            (
+                "end_b",
+                Node {
+                    id: "end_b",
                     node_type: NodeType::End,
                     outgoing_edges: vec![],
                 },
@@ -80,6 +126,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let inst = repo.load(&instance_id).expect("instance exists");
     assert!(inst.completed());
-    println!("OK: instance {} completed (Start → End)", instance_id);
+    println!("OK: instance completed at end_a (choice=a)");
     Ok(())
 }

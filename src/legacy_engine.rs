@@ -163,6 +163,20 @@ impl Engine {
                         });
                     }
                 }
+                Some(EdgeCondition::Expression(expr)) => {
+                    if crate::engine::el::eval_condition(expr, variables).unwrap_or(false) {
+                        return Some(Token {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            node_id: edge.target.to_string(),
+                            status: TokenStatus::Ready,
+                            mode: TokenMode::Forward,
+                            version: 0,
+                            attempt: 0,
+                            parallel_group_id: None,
+                            updated_at: None,
+                        });
+                    }
+                }
             }
         }
         default_target.map(|t| Token {

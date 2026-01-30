@@ -1,22 +1,30 @@
-//! Approval example: Start → validate (ServiceTask) → gateway (ExclusiveGateway) → approve (UserTask) or reject (End) → end.
+//! Parallel Fork/Join: Start → fork → (branch_a, branch_b) → join → End.
 //!
-//! Run: `cargo run --example approval`
+//! Run: `cargo run --example parallel_fork_join`
 //!
-//! Uses an in-memory DB for the example; the default binary (`cargo run`) uses `bpm.db` and runs recovery on boot.
+//! Demonstrates ParallelFork (one token in, N tokens out with same parallel_group_id)
+//! and ParallelJoin (N tokens in, one out). Both branches run; when both have arrived at the join, one token continues to End.
 
 use bpm_engine::engine::{
     payloads, BpmEngine, EngineContext, EngineEvent, ProcessCompletedHandler, ProcessStartHandler,
-    TokenArrivedHandler, UserTaskCompletedHandler,
+    TokenArrivedHandler,
 };
 use bpm_engine::model::*;
 use bpm_engine::persistence::{InstanceRepo, ProcessDefStore, ProcessInstanceRepo};
-use bpm_engine::service;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn branch_a(_instance: &mut ProcessInstance) {
+    println!("  branch_a");
+}
+
+fn branch_b(_instance: &mut ProcessInstance) {
+    println!("  branch_b");
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let process = ProcessDefinition {
-        id: "approval",
+        id: "parallel_fork_join",
         start: "start",
         nodes: HashMap::from([
             (
@@ -25,59 +33,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     id: "start",
                     node_type: NodeType::Start,
                     outgoing_edges: vec![OutgoingEdge {
-                        target: "validate",
+                        target: "fork",
                         condition: None,
                     }],
                 },
             ),
             (
-                "validate",
+                "fork",
                 Node {
-                    id: "validate",
-                    node_type: NodeType::ServiceTask(service::validate),
-                    outgoing_edges: vec![OutgoingEdge {
-                        target: "gateway",
-                        condition: None,
-                    }],
-                },
-            ),
-            (
-                "gateway",
-                Node {
-                    id: "gateway",
-                    node_type: NodeType::ExclusiveGateway,
+                    id: "fork",
+                    node_type: NodeType::ParallelFork,
                     outgoing_edges: vec![
                         OutgoingEdge {
-                            target: "approve",
-                            condition: Some(EdgeCondition::VariableEq {
-                                key: "valid".into(),
-                                value: "true".into(),
-                            }),
+                            target: "branch_a",
+                            condition: None,
                         },
                         OutgoingEdge {
-                            target: "reject",
-                            condition: Some(EdgeCondition::Default),
+                            target: "branch_b",
+                            condition: None,
                         },
                     ],
                 },
             ),
             (
-                "approve",
+                "branch_a",
                 Node {
-                    id: "approve",
-                    node_type: NodeType::UserTask,
+                    id: "branch_a",
+                    node_type: NodeType::ServiceTask(branch_a),
                     outgoing_edges: vec![OutgoingEdge {
-                        target: "end",
+                        target: "join",
                         condition: None,
                     }],
                 },
             ),
             (
-                "reject",
+                "branch_b",
                 Node {
-                    id: "reject",
-                    node_type: NodeType::End,
-                    outgoing_edges: vec![],
+                    id: "branch_b",
+                    node_type: NodeType::ServiceTask(branch_b),
+                    outgoing_edges: vec![OutgoingEdge {
+                        target: "join",
+                        condition: None,
+                    }],
+                },
+            ),
+            (
+                "join",
+                Node {
+                    id: "join",
+                    node_type: NodeType::ParallelJoin { expected: 2 },
+                    outgoing_edges: vec![OutgoingEdge {
+                        target: "end",
+                        condition: None,
+                    }],
                 },
             ),
             (
@@ -100,7 +108,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         token_repo: Some(Box::new(Arc::clone(&repo))),
         process_def_repo: Some(Box::new(def_store)),
         task_repo: None,
-        parallel_join_repo: Some(Box::new(Arc::clone(&repo))),
+        // Use in-memory join state so both branches converge at join and one token continues to end.
+        parallel_join_repo: None,
         timer_repo: Some(Box::new(Arc::clone(&repo))),
         compensation_repo: Some(Box::new(Arc::clone(&repo))),
         run_in_tx: Some(Box::new(|event, handlers, ctx, queue| {
@@ -115,7 +124,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(ProcessStartHandler),
         Box::new(TokenArrivedHandler::new()),
         Box::new(ProcessCompletedHandler),
-        Box::new(UserTaskCompletedHandler),
     ]);
 
     let instance_id = uuid::Uuid::new_v4().to_string();
@@ -126,20 +134,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
         &mut ctx,
     );
-    println!("Process started, paused at UserTask 'approve'.");
-
-    engine.run(
-        EngineEvent::UserTaskCompleted(payloads::UserTaskCompleted {
-            task_id: String::new(),
-            instance_id: instance_id.clone(),
-            node_id: "approve".into(),
-            variables: HashMap::new(),
-        }),
-        &mut ctx,
-    );
 
     let inst = repo.load(&instance_id).expect("instance exists");
     assert!(inst.completed());
-    println!("OK: instance {} completed (approve path).", instance_id);
+    println!("OK: instance completed (Fork → branch_a, branch_b → Join → End)");
     Ok(())
 }

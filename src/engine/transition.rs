@@ -1,5 +1,6 @@
 //! Token transition helpers: move_token, evaluate_exclusive_gateway (shared with legacy engine logic).
 
+use super::el;
 use crate::model::{EdgeCondition, Node, Token, TokenMode, TokenStatus};
 use std::collections::HashMap;
 
@@ -41,6 +42,11 @@ pub fn evaluate_exclusive_gateway(
             Some(EdgeCondition::Default) => default_target = Some(edge.target),
             Some(EdgeCondition::VariableEq { key, value }) => {
                 if variables.get(key).as_deref() == Some(value) {
+                    return Some(new_token(edge.target.to_string(), None));
+                }
+            }
+            Some(EdgeCondition::Expression(expr)) => {
+                if el::eval_condition(expr, variables).unwrap_or(false) {
                     return Some(new_token(edge.target.to_string(), None));
                 }
             }

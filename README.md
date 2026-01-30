@@ -111,7 +111,7 @@ For detailed design, see the architecture documentation.
 **Prerequisites:** Rust 1.70+ (`rustup`).
 
 ```bash
-git clone <repo>
+git clone https://github.com/fanjia1024/bpm-engine.git
 cd bpm-engine
 cargo build
 ```
@@ -138,24 +138,43 @@ Runnable examples live in `examples/`. Run any of them with:
 cargo run --example <name>
 ```
 
-| Example      | Command                        | Description |
-| ------------ | ------------------------------ | ----------- |
-| **minimal** | `cargo run --example minimal`  | Start → End. In-memory SQLite; process completes in one run. |
-| **approval**| `cargo run --example approval` | Same flow as the default demo (validate → gateway → approve/reject → end), using in-memory DB. |
+| Example                | Command                                  | Description                                                                  |
+| ---------------------- | ---------------------------------------- | ---------------------------------------------------------------------------- |
+| **minimal**            | `cargo run --example minimal`            | Start → End. In-memory SQLite; process completes in one run.                 |
+| **approval**           | `cargo run --example approval`           | Same flow as the default demo (validate → gateway → approve/reject → end).   |
+| **exclusive_gateway**  | `cargo run --example exclusive_gateway`  | Start → ServiceTask → ExclusiveGateway (EL + VariableEq) → end_a or end_b.   |
+| **el_gateway**         | `cargo run --example el_gateway`         | Gateway with EL expressions only: `choice == "a"`, `amount > 50`, Default.   |
+| **service_task_chain** | `cargo run --example service_task_chain` | Start → step1 → step2 → step3 → End (linear ServiceTask chain).              |
+| **reject_path**        | `cargo run --example reject_path`        | Approval topology but variable set to reject; process ends without UserTask. |
+| **parallel_fork_join** | `cargo run --example parallel_fork_join` | Start → Fork → (branch_a, branch_b) → Join → End (ParallelFork/Join).        |
 
-- **minimal**: Defines a two-node process (start, end), creates engine context with `:memory:` SQLite, starts one instance, and asserts it completes. Use this as a template for the smallest possible run.
-- **approval**: Full approval flow with ServiceTask, ExclusiveGateway, and UserTask; runs to completion after simulating “complete user task” so you can see the same behavior as `cargo run` without touching `bpm.db`.
+- **minimal**: Two-node process (start, end); template for the smallest run.
+- **approval**: Full approval flow with ServiceTask, ExclusiveGateway, and UserTask; simulates “complete user task” so you see the same behavior as `cargo run` without `bpm.db`.
+- **exclusive_gateway**: Branching with EL expression (`choice == "a"`) and VariableEq; first matching edge wins.
+- **el_gateway**: Gateway conditions using EL only: string equality (`choice == "a"`), numeric comparison (`amount > 50`), and Default.
+- **service_task_chain**: Three ServiceTasks in sequence; shows linear automation.
+- **reject_path**: Same graph as approval; ServiceTask sets `valid = "false"` so the gateway takes Default → reject (no UserTask).
+- **parallel_fork_join**: ParallelFork creates two tokens; both run branch_a/branch_b; ParallelJoin waits for both, then one token continues to End (uses in-memory join state).
 
 ### Using the engine as a library
 
-Add to `Cargo.toml`:
+**From [crates.io](https://crates.io/crates/bpm-engine)** (recommended):
+
+Add to your project’s `Cargo.toml`:
 
 ```toml
 [dependencies]
-bpm-engine = { path = ".." }
+bpm-engine = "0.1"
 ```
 
-Then define a [ProcessDefinition](src/model.rs), build an [EngineContext](src/engine/handler.rs) with repos (e.g. [InstanceRepo](src/persistence/sqlite.rs)), and run [BpmEngine::run](src/engine/pump.rs) with events such as `ProcessStarted` and `UserTaskCompleted`. See `examples/minimal.rs` and `examples/approval.rs` for full code.
+**From a local path** (e.g. for development or forking):
+
+```toml
+[dependencies]
+bpm-engine = { path = "../bpm-engine" }
+```
+
+Then define a [ProcessDefinition](src/model.rs), build an [EngineContext](src/engine/handler.rs) with repos (e.g. [InstanceRepo](src/persistence/sqlite.rs)), and run [BpmEngine::run](src/engine/pump.rs) with events such as `ProcessStarted` and `UserTaskCompleted`. Gateway conditions support **EL expressions** ([engine/el](src/engine/el.rs)): use `EdgeCondition::Expression("key == \"value\"")` or `"key > 100"` for numeric comparison. See the `examples/` directory in this repo for full code (minimal, approval, exclusive_gateway, el_gateway, service_task_chain, reject_path, parallel_fork_join).
 
 ---
 
@@ -213,8 +232,3 @@ Then define a [ProcessDefinition](src/model.rs), build an [EngineContext](src/en
 ## License
 
 MIT
-
-```
-
-
-```

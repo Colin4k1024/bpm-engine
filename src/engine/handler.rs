@@ -20,6 +20,10 @@ pub struct EngineContext {
     pub task_repo: Option<Box<dyn crate::persistence::UserTaskRepo>>,
     /// Whitepaper §11.7: atomic parallel join (optional).
     pub parallel_join_repo: Option<Box<dyn crate::persistence::ParallelJoinRepo>>,
+    /// Timer repo for TimerFiredHandler (design: timer.md §7).
+    pub timer_repo: Option<Box<dyn crate::persistence::TimerRepo>>,
+    /// Compensation record repo for SagaCoordinator (design: saga.md).
+    pub compensation_repo: Option<Box<dyn crate::persistence::CompensationRecordRepo>>,
     /// When set, each event's handlers run inside this closure (one transaction per event).
     pub run_in_tx: Option<Box<dyn FnMut(&crate::engine::events::EngineEvent, &[Box<dyn EventHandler>], &mut EngineContext, &mut std::collections::VecDeque<crate::engine::events::EngineEvent>)>>,
 }
@@ -32,6 +36,8 @@ impl Default for EngineContext {
             process_def_repo: None,
             task_repo: None,
             parallel_join_repo: None,
+            timer_repo: None,
+            compensation_repo: None,
             run_in_tx: None,
         }
     }

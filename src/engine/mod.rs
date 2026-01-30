@@ -1,6 +1,7 @@
 //! BPM Engine (design: overview §3).
 //! TokenScheduler, NodeExecutor, GatewayEvaluator, EventBus / event pump.
 
+pub mod el;
 mod events;
 mod executor;
 mod gateway;
@@ -26,7 +27,7 @@ pub use log_handler::LogEventHandler;
 pub use process_completed_handler::ProcessCompletedHandler;
 pub use process_start_handler::ProcessStartHandler;
 pub use token_arrived_handler::TokenArrivedHandler;
-pub use saga::{CompensationRecord, CompensationRecordRepo, CompensationStatus, SagaCoordinator, TokenMode};
+pub use saga::{CompensationRecord, CompensationStatus, SagaCoordinator};
 pub use timer_handler::{Timer, TimerFiredHandler, TimerType};
 pub use user_task_completed_handler::UserTaskCompletedHandler;
 

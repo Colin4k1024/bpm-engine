@@ -2,6 +2,14 @@
 name = "bpm-engine"
 version = "0.1.0"
 edition = "2021"
+description = "Lightweight embeddable BPM runtime for long-running, stateful workflows with tokens, timers, Saga compensation, and crash recovery"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/fanjia1024/bpm-engine"
+homepage = "https://github.com/fanjia1024/bpm-engine"
+documentation = "https://docs.rs/bpm-engine"
+keywords = ["bpm", "workflow", "engine", "process","orchestration"]
+categories = ["algorithms", "concurrency", "data-structures"]
 
 [dependencies]
 uuid = { version = "1.4", features = ["v4"] }

@@ -33,6 +33,11 @@ impl GatewayEvaluator for ExclusiveGatewayEvaluator {
                         return vec![edge.target];
                     }
                 }
+                Some(EdgeCondition::Expression(expr)) => {
+                    if super::el::eval_condition(expr, variables).unwrap_or(false) {
+                        return vec![edge.target];
+                    }
+                }
             }
         }
         default_target.map(|t| vec![t]).unwrap_or_default()

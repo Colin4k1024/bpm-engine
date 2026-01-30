@@ -33,6 +33,8 @@ pub enum TokenMode {
 #[derive(Debug, Clone)]
 pub enum EdgeCondition {
     VariableEq { key: String, value: String },
+    /// EL expression: evaluated against instance variables; first matching edge wins.
+    Expression(String),
     Default,
 }
 

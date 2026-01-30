@@ -6,5 +6,5 @@ pub mod repo;
 pub mod sqlite;
 
 pub use memory::ProcessDefStore;
-pub use repo::{OutboxEvent, OutboxRepo, ParallelJoinRepo, ProcessDefinitionRepo, ProcessInstanceRepo, TokenRepo, TransactionScope, UserTaskRepo};
+pub use repo::{CompensationRecordRepo, CompensationRecordRow, OutboxEvent, OutboxRepo, ParallelJoinRepo, ProcessDefinitionRepo, ProcessInstanceRepo, TimerRecord, TimerRepo, TokenRepo, TransactionScope, UserTaskRepo};
 pub use sqlite::InstanceRepo;

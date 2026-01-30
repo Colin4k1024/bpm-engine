@@ -1,22 +1,28 @@
-//! Approval example: Start → validate (ServiceTask) → gateway (ExclusiveGateway) → approve (UserTask) or reject (End) → end.
+//! EL expression gateway: Start → set_vars (ServiceTask) → gateway (Expression conditions) → end_*.
 //!
-//! Run: `cargo run --example approval`
+//! Run: `cargo run --example el_gateway`
 //!
-//! Uses an in-memory DB for the example; the default binary (`cargo run`) uses `bpm.db` and runs recovery on boot.
+//! Demonstrates gateway conditions using EL expressions: string equality, numeric comparison,
+//! and Default. Variables: choice="a", amount=100. First matching edge: choice == "a" → end_a.
 
 use bpm_engine::engine::{
     payloads, BpmEngine, EngineContext, EngineEvent, ProcessCompletedHandler, ProcessStartHandler,
-    TokenArrivedHandler, UserTaskCompletedHandler,
+    TokenArrivedHandler,
 };
 use bpm_engine::model::*;
 use bpm_engine::persistence::{InstanceRepo, ProcessDefStore, ProcessInstanceRepo};
-use bpm_engine::service;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn set_vars(instance: &mut ProcessInstance) {
+    instance.variables.insert("choice".into(), "a".into());
+    instance.variables.insert("amount".into(), "100".into());
+    println!("  set choice=a, amount=100");
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let process = ProcessDefinition {
-        id: "approval",
+        id: "el_gateway",
         start: "start",
         nodes: HashMap::from([
             (
@@ -25,16 +31,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     id: "start",
                     node_type: NodeType::Start,
                     outgoing_edges: vec![OutgoingEdge {
-                        target: "validate",
+                        target: "set_vars",
                         condition: None,
                     }],
                 },
             ),
             (
-                "validate",
+                "set_vars",
                 Node {
-                    id: "validate",
-                    node_type: NodeType::ServiceTask(service::validate),
+                    id: "set_vars",
+                    node_type: NodeType::ServiceTask(set_vars),
                     outgoing_edges: vec![OutgoingEdge {
                         target: "gateway",
                         condition: None,
@@ -48,42 +54,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     node_type: NodeType::ExclusiveGateway,
                     outgoing_edges: vec![
                         OutgoingEdge {
-                            target: "approve",
-                            condition: Some(EdgeCondition::VariableEq {
-                                key: "valid".into(),
-                                value: "true".into(),
-                            }),
+                            target: "end_a",
+                            condition: Some(EdgeCondition::Expression(r#"choice == "a""#.into())),
                         },
                         OutgoingEdge {
-                            target: "reject",
+                            target: "end_high",
+                            condition: Some(EdgeCondition::Expression("amount > 50".into())),
+                        },
+                        OutgoingEdge {
+                            target: "end_b",
                             condition: Some(EdgeCondition::Default),
                         },
                     ],
                 },
             ),
             (
-                "approve",
+                "end_a",
                 Node {
-                    id: "approve",
-                    node_type: NodeType::UserTask,
-                    outgoing_edges: vec![OutgoingEdge {
-                        target: "end",
-                        condition: None,
-                    }],
-                },
-            ),
-            (
-                "reject",
-                Node {
-                    id: "reject",
+                    id: "end_a",
                     node_type: NodeType::End,
                     outgoing_edges: vec![],
                 },
             ),
             (
-                "end",
+                "end_high",
                 Node {
-                    id: "end",
+                    id: "end_high",
+                    node_type: NodeType::End,
+                    outgoing_edges: vec![],
+                },
+            ),
+            (
+                "end_b",
+                Node {
+                    id: "end_b",
                     node_type: NodeType::End,
                     outgoing_edges: vec![],
                 },
@@ -115,7 +119,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(ProcessStartHandler),
         Box::new(TokenArrivedHandler::new()),
         Box::new(ProcessCompletedHandler),
-        Box::new(UserTaskCompletedHandler),
     ]);
 
     let instance_id = uuid::Uuid::new_v4().to_string();
@@ -126,20 +129,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
         &mut ctx,
     );
-    println!("Process started, paused at UserTask 'approve'.");
-
-    engine.run(
-        EngineEvent::UserTaskCompleted(payloads::UserTaskCompleted {
-            task_id: String::new(),
-            instance_id: instance_id.clone(),
-            node_id: "approve".into(),
-            variables: HashMap::new(),
-        }),
-        &mut ctx,
-    );
 
     let inst = repo.load(&instance_id).expect("instance exists");
     assert!(inst.completed());
-    println!("OK: instance {} completed (approve path).", instance_id);
+    println!("OK: instance completed at end_a (first matching EL: choice == \"a\")");
     Ok(())
 }

@@ -99,6 +99,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         process_def_repo: Some(Box::new(def_store)),
         task_repo: None,
         parallel_join_repo: Some(Box::new(Arc::clone(&repo))),
+        timer_repo: Some(Box::new(Arc::clone(&repo))),
+        compensation_repo: Some(Box::new(Arc::clone(&repo))),
         run_in_tx: Some(Box::new(|event, handlers, ctx, queue| {
             for handler in handlers {
                 let new_events = handler.handle(event, ctx);
@@ -193,6 +195,8 @@ mod tests {
             process_def_repo: Some(Box::new(def_store)),
             task_repo: None,
             parallel_join_repo: Some(Box::new(Arc::clone(&repo))),
+            timer_repo: Some(Box::new(Arc::clone(&repo))),
+            compensation_repo: Some(Box::new(Arc::clone(&repo))),
             run_in_tx: Some(Box::new(|event, handlers, ctx, queue| {
                 for handler in handlers {
                     let new_events = handler.handle(event, ctx);
