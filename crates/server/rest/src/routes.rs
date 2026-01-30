@@ -7,12 +7,13 @@ use axum::{
     Json, Router,
 };
 use bpm_core::{
-    payloads, EngineEvent, ExternalTaskState, InstanceState, NodeType, ProcessInstance, TokenStatus,
+    payloads, EngineEvent, ExternalTaskState, InstanceState, NodeType, ProcessDefinition,
+    ProcessInstance, TokenStatus,
 };
 use bpm_runtime::{transition, EngineContext};
 use bpm_storage::{
-    CompensationRecordRepo, ExternalTaskStore, ParallelJoinRepo, ProcessDefinitionStore,
-    ProcessInstanceStore, TimerStore, TokenStore,
+    CompensationRecordRepo, ExternalTaskStore, HistoryRepo, ParallelJoinRepo,
+    ProcessDefinitionStore, ProcessInstanceStore, TimerStore, TokenStore,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -98,6 +99,7 @@ fn build_ctx(state: &AppState, tenant_id: Option<String>) -> EngineContext {
         compensation_repo: Some(repo.clone() as Arc<dyn CompensationRecordRepo>),
         outbox_repo: None,
         external_task_store: Some(repo.clone() as Arc<dyn ExternalTaskStore>),
+        history_repo: Some(repo.clone() as Arc<dyn HistoryRepo>),
         tenant_id,
     }
 }
@@ -118,8 +120,10 @@ pub struct StartInstanceResponse {
 #[derive(Serialize)]
 pub struct InstanceStateResponse {
     pub instance_id: String,
+    pub process_def_id: String,
     pub status: String,
     pub current_nodes: Vec<String>,
+    pub tokens: Vec<bpm_core::Token>,
 }
 
 #[derive(Deserialize)]
@@ -161,6 +165,64 @@ pub enum DeployErrorResponse {
     Compile {
         errors: Vec<bpm_bpmn::CompilerError>,
     },
+}
+
+// --- Process definition view (Trace UI diagram) ---
+
+#[derive(Serialize)]
+pub struct NodeView {
+    pub id: String,
+    pub node_type: String,
+}
+
+#[derive(Serialize)]
+pub struct EdgeView {
+    pub source: String,
+    pub target: String,
+}
+
+#[derive(Serialize)]
+pub struct ProcessDefinitionView {
+    pub id: String,
+    pub start: String,
+    pub nodes: Vec<NodeView>,
+    pub edges: Vec<EdgeView>,
+}
+
+fn node_type_str(nt: &NodeType) -> &'static str {
+    match nt {
+        NodeType::Start => "Start",
+        NodeType::End => "End",
+        NodeType::ServiceTask(_) => "ServiceTask",
+        NodeType::UserTask => "UserTask",
+        NodeType::ExternalTask { .. } => "ExternalTask",
+        NodeType::ExclusiveGateway => "ExclusiveGateway",
+        NodeType::ParallelFork => "ParallelFork",
+        NodeType::ParallelJoin { .. } => "ParallelJoin",
+    }
+}
+
+fn process_definition_to_view(def: &ProcessDefinition) -> ProcessDefinitionView {
+    let mut nodes = Vec::with_capacity(def.nodes.len());
+    let mut edges = Vec::new();
+    for (id, node) in &def.nodes {
+        nodes.push(NodeView {
+            id: id.to_string(),
+            node_type: node_type_str(&node.node_type).to_string(),
+        });
+        for out in &node.outgoing_edges {
+            edges.push(EdgeView {
+                source: id.to_string(),
+                target: out.target.to_string(),
+            });
+        }
+    }
+    ProcessDefinitionView {
+        id: def.id.to_string(),
+        start: def.start.to_string(),
+        nodes,
+        edges,
+    }
 }
 
 /// POST /api/v1/process-instances — start a process instance.
@@ -205,8 +267,10 @@ pub async fn get_instance(
     match inst {
         Some(inst) => Ok(Json(InstanceStateResponse {
             instance_id: inst.id.clone(),
+            process_def_id: inst.process_def_id.clone(),
             status: status_str(inst.state).to_string(),
             current_nodes: current_nodes(&inst),
+            tokens: inst.tokens.clone(),
         })),
         None => Err((
             StatusCode::NOT_FOUND,
@@ -215,6 +279,52 @@ pub async fn get_instance(
             }),
         )),
     }
+}
+
+/// GET /api/v1/process-definitions/:id — process definition view for Trace UI diagram.
+pub async fn get_process_definition(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ProcessDefinitionView>, (StatusCode, Json<ErrorResponse>)> {
+    let def = state
+        .def_store
+        .load(&id)
+        .await
+        .ok()
+        .flatten()
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("process definition not found: {}", id),
+            }),
+        ))?;
+    Ok(Json(process_definition_to_view(&def)))
+}
+
+/// GET /api/v1/process-instances/:id/history — execution history for Trace UI timeline.
+pub async fn get_instance_history(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<bpm_storage::HistoryEvent>>, (StatusCode, Json<ErrorResponse>)> {
+    let token_id = params.get("token_id").map(String::as_str);
+    let event_type = params.get("event_type").map(String::as_str);
+    let events = HistoryRepo::list_by_instance(
+        state.repo.as_ref(),
+        &id,
+        token_id,
+        event_type,
+    )
+    .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(events))
 }
 
 /// GET /api/v1/tasks?type=user|external
@@ -576,6 +686,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         Router::new()
             .route("/process-instances", post(start_instance))
             .route("/process-instances/:id", get(get_instance))
+            .route("/process-instances/:id/history", get(get_instance_history))
+            .route("/process-definitions/:id", get(get_process_definition))
             .route("/tasks", get(list_tasks))
             .route("/tasks/:task_id/complete", post(complete_task_by_id))
             .route(

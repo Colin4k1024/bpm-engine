@@ -133,6 +133,7 @@ dependencies = [
  "async-trait",
  "bpm-core",
  "bpm-storage",
+ "serde_json",
  "tokio",
  "uuid",
 ]
@@ -188,6 +189,7 @@ dependencies = [
  "async-trait",
  "bpm-core",
  "bpm-storage",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
@@ -217,6 +219,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bpm-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

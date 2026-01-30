@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use bpm_core::EngineEvent;
 use bpm_storage::{
-    CompensationRecordRepo, ExternalTaskStore, OutboxRepo, ParallelJoinRepo,
+    CompensationRecordRepo, ExternalTaskStore, HistoryRepo, OutboxRepo, ParallelJoinRepo,
     ProcessDefinitionStore, ProcessInstanceStore, TimerStore, TokenStore,
 };
 use std::sync::Arc;
@@ -26,5 +26,6 @@ pub struct EngineContext {
     pub compensation_repo: Option<Arc<dyn CompensationRecordRepo>>,
     pub outbox_repo: Option<Arc<dyn OutboxRepo>>,
     pub external_task_store: Option<Arc<dyn ExternalTaskStore>>,
+    pub history_repo: Option<Arc<dyn HistoryRepo>>,
     pub tenant_id: Option<String>,
 }

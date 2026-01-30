@@ -1,0 +1,220 @@
+#root {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  text-align: left;
+  min-height: 100vh;
+}
+
+/* Home */
+.home-page {
+  max-width: 480px;
+  margin: 2rem auto;
+  padding: 1rem;
+}
+.home-page h1 {
+  font-size: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+.home-page form {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+.home-page input {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  font-size: 1rem;
+}
+.home-page button {
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+}
+
+/* Trace page layout */
+.trace-page {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.instance-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid #333;
+  background: #1a1a1a;
+}
+.instance-header-main {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.process-name {
+  font-weight: 600;
+}
+.instance-id {
+  font-family: ui-monospace, monospace;
+  cursor: pointer;
+  color: #888;
+}
+.instance-id:hover {
+  color: #fff;
+}
+.status-badge {
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+.status-running { background: #0a4; color: #fff; }
+.status-completed { background: #666; color: #fff; }
+.status-terminated { background: #c44; color: #fff; }
+
+.trace-main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.trace-left {
+  flex: 1;
+  min-width: 0;
+  border-right: 1px solid #333;
+  overflow: auto;
+}
+.trace-right {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+.trace-bottom {
+  flex: 0 0 200px;
+  border-top: 1px solid #333;
+  overflow: auto;
+  background: #111;
+}
+
+/* Panels */
+.process-diagram-panel,
+.execution-timeline-panel,
+.event-detail-panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 0.5rem;
+}
+.panel-placeholder {
+  color: #666;
+  padding: 1rem;
+}
+
+/* Diagram */
+.diagram-graph {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.diagram-nodes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.diagram-node {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #222;
+}
+.diagram-node.has-token {
+  border-width: 2px;
+  border-color: #0a4;
+}
+.node-type { font-size: 0.75rem; color: #888; display: block; }
+.node-id { font-weight: 500; }
+.token-badges {
+  margin-top: 0.25rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+.token-badge {
+  font-size: 0.7rem;
+  padding: 0.15rem 0.35rem;
+  border-radius: 4px;
+  border: 1px solid;
+  background: transparent;
+  cursor: pointer;
+  color: inherit;
+}
+.diagram-edges {
+  font-size: 0.8rem;
+  color: #555;
+}
+
+/* CSS vars for token status (design doc) */
+:root {
+  --token-ready: #0a4;
+  --token-executing: #0a4;
+  --token-waiting: #fa0;
+  --token-completed: #888;
+  --token-terminated: #c44;
+  --token-created: #888;
+  --token-suspended: #fa0;
+}
+
+/* Timeline */
+.timeline-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.timeline-toolbar select {
+  padding: 0.35rem 0.5rem;
+  font-size: 0.9rem;
+}
+.timeline-list {
+  flex: 1;
+  overflow: auto;
+}
+.timeline-empty {
+  color: #666;
+  padding: 1rem;
+}
+.timeline-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.25rem;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #222;
+  cursor: pointer;
+  color: inherit;
+}
+.timeline-item:hover {
+  background: #2a2a2a;
+}
+.timeline-item-icon { margin-right: 0.5rem; }
+.timeline-item-time { margin-right: 0.5rem; color: #888; font-size: 0.85rem; }
+.timeline-item-type { font-weight: 500; margin-right: 0.5rem; }
+.timeline-item-meta { font-size: 0.85rem; color: #888; }
+
+/* Event detail */
+.event-detail-title {
+  font-size: 0.9rem;
+  margin: 0 0 0.5rem 0;
+}
+.event-detail-json {
+  margin: 0;
+  padding: 0.75rem;
+  font-size: 0.8rem;
+  font-family: ui-monospace, monospace;
+  background: #1a1a1a;
+  border-radius: 4px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

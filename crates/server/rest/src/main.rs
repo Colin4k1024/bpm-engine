@@ -8,7 +8,7 @@ use crate::state::AppState;
 use bpm_adapter_memory::{MemoryRepo, ProcessDefStore};
 use bpm_core::{Node, NodeType, OutgoingEdge, ProcessDefinition};
 use bpm_runtime::{
-    BpmEngine, ProcessCompletedHandler, ProcessStartHandler, TokenArrivedHandler,
+    BpmEngine, HistoryHandler, ProcessCompletedHandler, ProcessStartHandler, TokenArrivedHandler,
     UserTaskCompletedHandler,
 };
 use std::collections::HashMap;
@@ -103,6 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Box::new(TokenArrivedHandler::new()),
         Box::new(ProcessCompletedHandler),
         Box::new(UserTaskCompletedHandler),
+        Box::new(HistoryHandler),
     ]);
 
     let state = Arc::new(AppState {

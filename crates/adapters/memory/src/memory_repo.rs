@@ -6,8 +6,9 @@ use bpm_core::{
     ExternalTask, ExternalTaskState, InstanceState, ProcessInstance, Token, TokenStatus,
 };
 use bpm_storage::{
-    CompensationRecordRepo, CompensationRecordRow, ExternalTaskStore, OutboxEvent, OutboxRepo,
-    ParallelJoinRepo, ProcessInstanceStore, TimerRecord, TimerStore, TokenStore,
+    CompensationRecordRepo, CompensationRecordRow, ExternalTaskStore, HistoryEvent, HistoryRepo,
+    OutboxEvent, OutboxRepo, ParallelJoinRepo, ProcessInstanceStore, TimerRecord, TimerStore,
+    TokenStore,
 };
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -60,7 +61,16 @@ impl ExternalTaskRow {
     }
 }
 
-/// Unified in-memory repo: instances (with tokens inside), outbox, timers, parallel_join, compensation, external_tasks.
+#[derive(Clone)]
+struct HistoryEventRow {
+    id: String,
+    instance_id: String,
+    event_type: String,
+    payload: String,
+    occurred_at: String,
+}
+
+/// Unified in-memory repo: instances (with tokens inside), outbox, timers, parallel_join, compensation, external_tasks, history.
 pub struct MemoryRepo {
     instances: RwLock<HashMap<String, ProcessInstance>>,
     outbox: RwLock<Vec<OutboxEvent>>,
@@ -68,6 +78,7 @@ pub struct MemoryRepo {
     parallel_join: RwLock<HashMap<String, (u32, u32, bool)>>,
     compensation: RwLock<Vec<CompensationRecordRow>>,
     external_tasks: RwLock<HashMap<String, ExternalTaskRow>>,
+    history_events: RwLock<Vec<HistoryEventRow>>,
 }
 
 impl MemoryRepo {
@@ -79,6 +90,7 @@ impl MemoryRepo {
             parallel_join: RwLock::new(HashMap::new()),
             compensation: RwLock::new(Vec::new()),
             external_tasks: RwLock::new(HashMap::new()),
+            history_events: RwLock::new(Vec::new()),
         }
     }
 }
@@ -531,6 +543,61 @@ impl ExternalTaskStore for MemoryRepo {
             .unwrap()
             .get(task_id)
             .map(|r| r.to_external_task()))
+    }
+}
+
+#[async_trait]
+impl HistoryRepo for MemoryRepo {
+    async fn append(
+        &self,
+        instance_id: &str,
+        event_type: &str,
+        payload: &serde_json::Value,
+        occurred_at: &str,
+    ) -> anyhow::Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let row = HistoryEventRow {
+            id: id.clone(),
+            instance_id: instance_id.to_string(),
+            event_type: event_type.to_string(),
+            payload: payload.to_string(),
+            occurred_at: occurred_at.to_string(),
+        };
+        self.history_events.write().unwrap().push(row);
+        Ok(id)
+    }
+
+    async fn list_by_instance(
+        &self,
+        instance_id: &str,
+        token_id_filter: Option<&str>,
+        event_type_filter: Option<&str>,
+    ) -> anyhow::Result<Vec<HistoryEvent>> {
+        let guard = self.history_events.read().unwrap();
+        let mut out: Vec<HistoryEvent> = guard
+            .iter()
+            .filter(|r| r.instance_id == instance_id)
+            .filter(|r| {
+                event_type_filter.map_or(true, |f| r.event_type == f)
+            })
+            .filter(|r| {
+                token_id_filter.map_or(true, |tid| {
+                    let tid_in_payload: Option<String> = serde_json::from_str::<serde_json::Value>(&r.payload)
+                        .ok()
+                        .and_then(|v| v.get("token_id").and_then(|t| t.as_str()).map(String::from));
+                    tid_in_payload.as_deref() == Some(tid)
+                })
+            })
+            .map(|r| HistoryEvent {
+                id: r.id.clone(),
+                instance_id: r.instance_id.clone(),
+                event_type: r.event_type.clone(),
+                payload: serde_json::from_str(&r.payload).unwrap_or(serde_json::Value::Null),
+                occurred_at: r.occurred_at.clone(),
+            })
+            .collect();
+        out.sort_by(|a, b| a.occurred_at.cmp(&b.occurred_at));
+        Ok(out)
     }
 }
 
