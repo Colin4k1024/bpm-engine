@@ -6,12 +6,13 @@ use rusqlite::{params, Connection, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::repo::{CompensationRecordRepo, CompensationRecordRow, OutboxEvent, OutboxRepo, ParallelJoinRepo, ProcessInstanceRepo, TimerRecord, TimerRepo, TokenRepo, TransactionScope};
+use super::repo::{CompensationRecordRepo, CompensationRecordRow, LeaderLeaseRepo, OutboxEvent, OutboxRepo, ParallelJoinRepo, ProcessInstanceRepo, TimerRecord, TimerRepo, TokenRepo, TransactionScope};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS process_instances (
     id TEXT PRIMARY KEY,
     process_def_id TEXT NOT NULL,
+    tenant_id TEXT,
     variables TEXT NOT NULL,
     completed INTEGER NOT NULL,
     state TEXT NOT NULL DEFAULT 'Running',
@@ -37,12 +38,15 @@ CREATE INDEX IF NOT EXISTS idx_tokens_instance_id ON tokens(instance_id);
 CREATE INDEX IF NOT EXISTS idx_tokens_status_updated_at ON tokens(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_tokens_parallel_group_id ON tokens(parallel_group_id);
 
--- Whitepaper §11.6 + docs_database_schema §5: Event Outbox (id, event_type, payload, status, created_at).
+-- Whitepaper §11.6 + docs_database_schema §5: Event Outbox. v3: tenant_id, worker_id, claimed_at for distributed claim.
 CREATE TABLE IF NOT EXISTS outbox_event (
     id TEXT PRIMARY KEY,
     event_type TEXT NOT NULL DEFAULT '',
     payload TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'Pending',
+    tenant_id TEXT,
+    worker_id TEXT,
+    claimed_at TEXT,
     created_at TEXT
 );
 
@@ -78,6 +82,13 @@ CREATE TABLE IF NOT EXISTS parallel_join (
     expected INTEGER NOT NULL,
     arrived_count INTEGER NOT NULL DEFAULT 0,
     joined INTEGER NOT NULL DEFAULT 0
+);
+
+-- v3: Leader lease (role, worker_id, expires_at) for outbox_publisher / timer_poller.
+CREATE TABLE IF NOT EXISTS leader_lease (
+    role TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL
 );
 ";
 
@@ -146,6 +157,36 @@ fn migrate_add_columns(conn: &Connection) -> Result<()> {
     if has_event_type.is_none() {
         conn.execute("ALTER TABLE outbox_event ADD COLUMN event_type TEXT NOT NULL DEFAULT ''", [])?;
     }
+    // v3: tenant_id for multi-tenancy
+    let has_tenant = conn
+        .query_row(
+            "SELECT 1 FROM pragma_table_info('process_instances') WHERE name='tenant_id'",
+            [],
+            |r| r.get::<_, i32>(0),
+        )
+        .optional()?;
+    if has_tenant.is_none() {
+        conn.execute("ALTER TABLE process_instances ADD COLUMN tenant_id TEXT", [])?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_process_instances_tenant_state ON process_instances(tenant_id, state)", [])?;
+    }
+    let has_outbox_tenant = conn
+        .query_row(
+            "SELECT 1 FROM pragma_table_info('outbox_event') WHERE name='tenant_id'",
+            [],
+            |r| r.get::<_, i32>(0),
+        )
+        .optional()?;
+    if has_outbox_tenant.is_none() {
+        conn.execute("ALTER TABLE outbox_event ADD COLUMN tenant_id TEXT", [])?;
+        conn.execute("ALTER TABLE outbox_event ADD COLUMN worker_id TEXT", [])?;
+        conn.execute("ALTER TABLE outbox_event ADD COLUMN claimed_at TEXT", [])?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_outbox_tenant_status ON outbox_event(tenant_id, status)", [])?;
+    }
+    // v3: leader_lease table (may already exist from SCHEMA)
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS leader_lease (role TEXT PRIMARY KEY, worker_id TEXT NOT NULL, expires_at TEXT NOT NULL)",
+        [],
+    );
     // Indexes for recovery (docs_database_schema §3)
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_tokens_status_updated_at ON tokens(status, updated_at)", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_tokens_parallel_group_id ON tokens(parallel_group_id)", []);
@@ -235,11 +276,13 @@ impl InstanceRepo {
         let variables_json =
             serde_json::to_string(&instance.variables).unwrap_or_else(|_| "{}".to_string());
         let created_at = chrono_utc_now();
+        let tenant_id: Option<&str> = instance.tenant_id.as_deref();
         self.conn.execute(
-            "INSERT INTO process_instances (id, process_def_id, variables, completed, state, version, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO process_instances (id, process_def_id, tenant_id, variables, completed, state, version, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 instance.id,
                 process_def_id,
+                tenant_id,
                 variables_json,
                 if instance.completed() { 1 } else { 0 },
                 state_to_str(instance.state),
@@ -281,7 +324,7 @@ impl InstanceRepo {
 
     pub fn get_instance(&self, id: &str) -> Result<Option<ProcessInstance>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, process_def_id, variables, completed, state, version FROM process_instances WHERE id = ?1",
+            "SELECT id, process_def_id, tenant_id, variables, completed, state, version FROM process_instances WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
         let row = match rows.next()? {
@@ -290,17 +333,19 @@ impl InstanceRepo {
         };
         let id_val: String = row.get(0)?;
         let process_def_id: String = row.get(1)?;
-        let variables_json: String = row.get(2)?;
+        let tenant_id: Option<String> = row.get(2).ok();
+        let variables_json: String = row.get(3)?;
         let variables: HashMap<String, String> =
             serde_json::from_str(&variables_json).unwrap_or_else(|_| HashMap::new());
-        let _completed: i32 = row.get(3)?;
-        let state_str: String = row.get(4).unwrap_or_else(|_| "Running".to_string());
+        let _completed: i32 = row.get(4)?;
+        let state_str: String = row.get(5).unwrap_or_else(|_| "Running".to_string());
         let state = str_to_state(&state_str);
-        let version: u32 = row.get(5).unwrap_or(0);
+        let version: u32 = row.get(6).unwrap_or(0);
         let tokens = self.get_tokens(id)?;
         Ok(Some(ProcessInstance {
             id: id_val,
             process_def_id,
+            tenant_id,
             tokens,
             variables,
             state,
@@ -344,13 +389,15 @@ impl InstanceRepo {
     pub fn update_instance(&self, instance: &ProcessInstance) -> Result<()> {
         let variables_json =
             serde_json::to_string(&instance.variables).unwrap_or_else(|_| "{}".to_string());
+        let tenant_id: Option<&str> = instance.tenant_id.as_deref();
         self.conn.execute(
-            "UPDATE process_instances SET variables = ?1, completed = ?2, state = ?3, version = ?4 WHERE id = ?5",
+            "UPDATE process_instances SET variables = ?1, completed = ?2, state = ?3, version = ?4, tenant_id = ?5 WHERE id = ?6",
             params![
                 variables_json,
                 if instance.completed() { 1 } else { 0 },
                 state_to_str(instance.state),
                 instance.version,
+                tenant_id,
                 instance.id,
             ],
         )?;
@@ -387,13 +434,22 @@ impl ProcessInstanceRepo for InstanceRepo {
         }
     }
 
-    fn list_running(&self) -> Vec<String> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM process_instances WHERE state = 'Running'")
-            .unwrap();
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0)).unwrap();
-        rows.filter_map(Result::ok).collect()
+    fn list_running(&self, tenant_id: Option<&str>) -> Vec<String> {
+        let rows: Vec<String> = match tenant_id {
+            Some(t) => {
+                let mut stmt = self.conn
+                    .prepare("SELECT id FROM process_instances WHERE state = 'Running' AND (tenant_id = ?1 OR (tenant_id IS NULL AND ?1 = ''))")
+                    .unwrap();
+                stmt.query_map([t], |row| row.get::<_, String>(0)).unwrap().filter_map(Result::ok).collect()
+            }
+            None => {
+                let mut stmt = self.conn
+                    .prepare("SELECT id FROM process_instances WHERE state = 'Running'")
+                    .unwrap();
+                stmt.query_map([], |row| row.get::<_, String>(0)).unwrap().filter_map(Result::ok).collect()
+            }
+        };
+        rows
     }
 }
 
@@ -495,7 +551,7 @@ fn get_tokens_conn(conn: &Connection, instance_id: &str) -> Result<Vec<Token>> {
 
 fn get_instance_conn(conn: &Connection, id: &str) -> Result<Option<ProcessInstance>> {
     let mut stmt = conn.prepare(
-        "SELECT id, process_def_id, variables, completed, state, version FROM process_instances WHERE id = ?1",
+        "SELECT id, process_def_id, variables, completed, state, version, tenant_id FROM process_instances WHERE id = ?1",
     )?;
     let mut rows = stmt.query(params![id])?;
     let row = match rows.next()? {
@@ -511,10 +567,12 @@ fn get_instance_conn(conn: &Connection, id: &str) -> Result<Option<ProcessInstan
     let state_str: String = row.get(4).unwrap_or_else(|_| "Running".to_string());
     let state = str_to_state(&state_str);
     let version: u32 = row.get(5).unwrap_or(0);
+    let tenant_id: Option<String> = row.get(6).ok();
     let tokens = get_tokens_conn(conn, id)?;
     Ok(Some(ProcessInstance {
         id: id_val,
         process_def_id,
+        tenant_id,
         tokens,
         variables,
         state,
@@ -570,13 +628,15 @@ fn update_token_cas_conn(conn: &Connection, instance_id: &str, token: &Token) ->
 fn update_instance_conn(conn: &Connection, instance: &ProcessInstance) -> Result<()> {
     let variables_json =
         serde_json::to_string(&instance.variables).unwrap_or_else(|_| "{}".to_string());
+    let tenant_id: Option<&str> = instance.tenant_id.as_deref();
     conn.execute(
-        "UPDATE process_instances SET variables = ?1, completed = ?2, state = ?3, version = ?4 WHERE id = ?5",
+        "UPDATE process_instances SET variables = ?1, completed = ?2, state = ?3, version = ?4, tenant_id = ?5 WHERE id = ?6",
         params![
             variables_json,
             if instance.completed() { 1 } else { 0 },
             state_to_str(instance.state),
             instance.version,
+            tenant_id,
             instance.id,
         ],
     )?;
@@ -605,12 +665,22 @@ fn save_tokens_impl_conn(conn: &Connection, instance_id: &str, tokens: &[Token])
     }
 }
 
-fn list_running_conn(conn: &Connection) -> Vec<String> {
-    let mut stmt = conn
-        .prepare("SELECT id FROM process_instances WHERE state = 'Running'")
-        .unwrap();
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0)).unwrap();
-    rows.filter_map(Result::ok).collect()
+fn list_running_conn(conn: &Connection, tenant_id: Option<&str>) -> Vec<String> {
+    let rows: Vec<String> = match tenant_id {
+        Some(t) => {
+            let mut stmt = conn
+                .prepare("SELECT id FROM process_instances WHERE state = 'Running' AND (tenant_id = ?1 OR (tenant_id IS NULL AND ?1 = ''))")
+                .unwrap();
+            stmt.query_map([t], |row| row.get::<_, String>(0)).unwrap().filter_map(Result::ok).collect()
+        }
+        None => {
+            let mut stmt = conn
+                .prepare("SELECT id FROM process_instances WHERE state = 'Running'")
+                .unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(0)).unwrap().filter_map(Result::ok).collect()
+        }
+    };
+    rows
 }
 
 fn claim_token_conn(conn: &Connection, instance_id: &str, token_id: &str, version: u32) -> bool {
@@ -641,11 +711,13 @@ impl ProcessInstanceRepo for InstanceRepoTx<'_> {
             let variables_json =
                 serde_json::to_string(&instance.variables).unwrap_or_else(|_| "{}".to_string());
             let created_at = chrono_utc_now();
+            let tenant_id: Option<&str> = instance.tenant_id.as_deref();
             let _ = self.conn.execute(
-                "INSERT INTO process_instances (id, process_def_id, variables, completed, state, version, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO process_instances (id, process_def_id, tenant_id, variables, completed, state, version, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     instance.id,
                     &instance.process_def_id,
+                    tenant_id,
                     variables_json,
                     if instance.completed() { 1 } else { 0 },
                     state_to_str(instance.state),
@@ -659,8 +731,8 @@ impl ProcessInstanceRepo for InstanceRepoTx<'_> {
         }
     }
 
-    fn list_running(&self) -> Vec<String> {
-        list_running_conn(self.conn)
+    fn list_running(&self, tenant_id: Option<&str>) -> Vec<String> {
+        list_running_conn(self.conn, tenant_id)
     }
 }
 
@@ -694,11 +766,13 @@ impl ProcessInstanceRepo for Arc<InstanceRepoTx<'_>> {
             let variables_json =
                 serde_json::to_string(&instance.variables).unwrap_or_else(|_| "{}".to_string());
             let created_at = chrono_utc_now();
+            let tenant_id: Option<&str> = instance.tenant_id.as_deref();
             let _ = self.conn.execute(
-                "INSERT INTO process_instances (id, process_def_id, variables, completed, state, version, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO process_instances (id, process_def_id, tenant_id, variables, completed, state, version, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     instance.id,
                     &instance.process_def_id,
+                    tenant_id,
                     variables_json,
                     if instance.completed() { 1 } else { 0 },
                     state_to_str(instance.state),
@@ -712,8 +786,8 @@ impl ProcessInstanceRepo for Arc<InstanceRepoTx<'_>> {
         }
     }
 
-    fn list_running(&self) -> Vec<String> {
-        list_running_conn(self.conn)
+    fn list_running(&self, tenant_id: Option<&str>) -> Vec<String> {
+        list_running_conn(self.conn, tenant_id)
     }
 }
 
@@ -748,8 +822,8 @@ impl ProcessInstanceRepo for Arc<InstanceRepo> {
         }
     }
 
-    fn list_running(&self) -> Vec<String> {
-        self.as_ref().list_running()
+    fn list_running(&self, tenant_id: Option<&str>) -> Vec<String> {
+        self.as_ref().list_running(tenant_id)
     }
 }
 
@@ -836,35 +910,51 @@ impl ParallelJoinRepo for Arc<InstanceRepo> {
     }
 }
 
-// --- Whitepaper §11.6: Event Outbox ---
+// --- Whitepaper §11.6: Event Outbox. v3: tenant_id, claim_pending, release_claimed ---
+
+fn outbox_event_from_row(row: &rusqlite::Row) -> rusqlite::Result<OutboxEvent> {
+    Ok(OutboxEvent {
+        id: row.get(0)?,
+        event_type: row.get(1).unwrap_or_else(|_| String::new()),
+        payload: row.get(2)?,
+        status: row.get(3)?,
+        tenant_id: row.get(4).ok(),
+        created_at: row.get(5).ok(),
+    })
+}
 
 impl OutboxRepo for InstanceRepo {
-    fn insert_pending(&self, event_type: &str, payload: &str) -> std::result::Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    fn insert_pending(&self, tenant_id: Option<&str>, event_type: &str, payload: &str) -> std::result::Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono_utc_now();
         self.conn.execute(
-            "INSERT INTO outbox_event (id, event_type, payload, status, created_at) VALUES (?1, ?2, ?3, 'Pending', ?4)",
-            params![id, event_type, payload, created_at],
+            "INSERT INTO outbox_event (id, event_type, payload, status, tenant_id, created_at) VALUES (?1, ?2, ?3, 'Pending', ?4, ?5)",
+            params![id, event_type, payload, tenant_id, created_at],
         )?;
         Ok(id)
     }
 
-    fn list_pending(&self) -> std::result::Result<Vec<OutboxEvent>, Box<dyn std::error::Error + Send + Sync>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, event_type, payload, status, created_at FROM outbox_event WHERE status = 'Pending' ORDER BY created_at",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(OutboxEvent {
-                id: row.get(0)?,
-                event_type: row.get(1).unwrap_or_else(|_| String::new()),
-                payload: row.get(2)?,
-                status: row.get(3)?,
-                created_at: row.get(4).ok(),
-            })
-        })?;
+    fn list_pending(&self, tenant_id: Option<&str>) -> std::result::Result<Vec<OutboxEvent>, Box<dyn std::error::Error + Send + Sync>> {
         let mut out = vec![];
-        for r in rows {
-            out.push(r?);
+        match tenant_id {
+            Some(t) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, event_type, payload, status, tenant_id, created_at FROM outbox_event WHERE status = 'Pending' AND (tenant_id = ?1 OR (tenant_id IS NULL AND ?1 = '')) ORDER BY created_at",
+                )?;
+                let rows = stmt.query_map(params![t], outbox_event_from_row)?;
+                for r in rows {
+                    out.push(r?);
+                }
+            }
+            None => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, event_type, payload, status, tenant_id, created_at FROM outbox_event WHERE status = 'Pending' ORDER BY created_at",
+                )?;
+                let rows = stmt.query_map([], outbox_event_from_row)?;
+                for r in rows {
+                    out.push(r?);
+                }
+            }
         }
         Ok(out)
     }
@@ -873,19 +963,106 @@ impl OutboxRepo for InstanceRepo {
         self.conn.execute("UPDATE outbox_event SET status = 'Published' WHERE id = ?1", params![id])?;
         Ok(())
     }
+
+    fn claim_pending(&self, worker_id: &str, tenant_id: Option<&str>, limit: u32) -> std::result::Result<Vec<OutboxEvent>, Box<dyn std::error::Error + Send + Sync>> {
+        let claimed_at = chrono_utc_now();
+        let limit = limit.min(100) as i32;
+        for _ in 0..limit {
+            let updated = match tenant_id {
+                Some(t) => self.conn.execute(
+                    "UPDATE outbox_event SET status = 'Dispatched', worker_id = ?1, claimed_at = ?2 WHERE id = (SELECT id FROM outbox_event WHERE status = 'Pending' AND (tenant_id = ?3 OR (tenant_id IS NULL AND ?3 = '')) ORDER BY created_at LIMIT 1)",
+                    params![worker_id, claimed_at, t],
+                )?,
+                None => self.conn.execute(
+                    "UPDATE outbox_event SET status = 'Dispatched', worker_id = ?1, claimed_at = ?2 WHERE id = (SELECT id FROM outbox_event WHERE status = 'Pending' ORDER BY created_at LIMIT 1)",
+                    params![worker_id, claimed_at],
+                )?,
+            };
+            if updated == 0 {
+                break;
+            }
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT id, event_type, payload, status, tenant_id, created_at FROM outbox_event WHERE worker_id = ?1 AND status = 'Dispatched' AND claimed_at = ?2 ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map(params![worker_id, claimed_at], outbox_event_from_row)?;
+        let mut out = vec![];
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    fn release_claimed(&self, id: &str) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.conn.execute(
+            "UPDATE outbox_event SET status = 'Pending', worker_id = NULL, claimed_at = NULL WHERE id = ?1 AND status = 'Dispatched'",
+            params![id],
+        )?;
+        Ok(())
+    }
+}
+
+// --- v3: Leader lease (LeaderLeaseRepo) ---
+
+impl LeaderLeaseRepo for InstanceRepo {
+    fn try_acquire(&self, role: &str, worker_id: &str, ttl_secs: u64) -> std::result::Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let now_str = chrono_utc_now();
+        let now_u: u64 = now_str.parse().unwrap_or(0);
+        let expires = (now_u + ttl_secs).to_string();
+        let n = self.conn.execute(
+            "UPDATE leader_lease SET worker_id = ?1, expires_at = ?2 WHERE role = ?3 AND (expires_at < ?4 OR worker_id = ?5)",
+            params![worker_id, expires, role, now_str, worker_id],
+        )?;
+        if n == 1 {
+            return Ok(true);
+        }
+        self.conn.execute(
+            "INSERT OR IGNORE INTO leader_lease (role, worker_id, expires_at) VALUES (?1, ?2, ?3)",
+            params![role, worker_id, expires],
+        )?;
+        Ok(self.conn.changes() == 1)
+    }
+
+    fn renew(&self, role: &str, worker_id: &str, ttl_secs: u64) -> std::result::Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let now_str = chrono_utc_now();
+        let now_u: u64 = now_str.parse().unwrap_or(0);
+        let expires = (now_u + ttl_secs).to_string();
+        let n = self.conn.execute(
+            "UPDATE leader_lease SET expires_at = ?1 WHERE role = ?2 AND worker_id = ?3",
+            params![expires, role, worker_id],
+        )?;
+        Ok(n == 1)
+    }
+}
+
+impl LeaderLeaseRepo for Arc<InstanceRepo> {
+    fn try_acquire(&self, role: &str, worker_id: &str, ttl_secs: u64) -> std::result::Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        self.as_ref().try_acquire(role, worker_id, ttl_secs)
+    }
+    fn renew(&self, role: &str, worker_id: &str, ttl_secs: u64) -> std::result::Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        self.as_ref().renew(role, worker_id, ttl_secs)
+    }
 }
 
 impl OutboxRepo for Arc<InstanceRepo> {
-    fn insert_pending(&self, event_type: &str, payload: &str) -> std::result::Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        self.as_ref().insert_pending(event_type, payload)
+    fn insert_pending(&self, tenant_id: Option<&str>, event_type: &str, payload: &str) -> std::result::Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        self.as_ref().insert_pending(tenant_id, event_type, payload)
     }
 
-    fn list_pending(&self) -> std::result::Result<Vec<OutboxEvent>, Box<dyn std::error::Error + Send + Sync>> {
-        self.as_ref().list_pending()
+    fn list_pending(&self, tenant_id: Option<&str>) -> std::result::Result<Vec<OutboxEvent>, Box<dyn std::error::Error + Send + Sync>> {
+        self.as_ref().list_pending(tenant_id)
     }
 
     fn mark_published(&self, id: &str) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.as_ref().mark_published(id)
+    }
+
+    fn claim_pending(&self, worker_id: &str, tenant_id: Option<&str>, limit: u32) -> std::result::Result<Vec<OutboxEvent>, Box<dyn std::error::Error + Send + Sync>> {
+        self.as_ref().claim_pending(worker_id, tenant_id, limit)
+    }
+
+    fn release_claimed(&self, id: &str) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.as_ref().release_claimed(id)
     }
 }
 
@@ -944,6 +1121,28 @@ impl TimerRepo for InstanceRepo {
     fn insert(&self, record: &TimerRecord) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.insert_timer(record).map_err(Into::into)
     }
+
+    fn list_due(&self, now_iso: &str, limit: u32) -> Result<Vec<TimerRecord>, Box<dyn std::error::Error + Send + Sync>> {
+        let limit = limit.min(100) as i32;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, token_id, instance_id, due_at, status, created_at FROM timer WHERE status = 'Scheduled' AND due_at <= ?1 ORDER BY due_at LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![now_iso, limit], |row| {
+            Ok(TimerRecord {
+                id: row.get(0)?,
+                token_id: row.get(1)?,
+                instance_id: row.get(2)?,
+                due_at: row.get(3)?,
+                status: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        let mut out = vec![];
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
 }
 
 impl TimerRepo for Arc<InstanceRepo> {
@@ -957,6 +1156,10 @@ impl TimerRepo for Arc<InstanceRepo> {
 
     fn insert(&self, record: &TimerRecord) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.as_ref().insert(record)
+    }
+
+    fn list_due(&self, now_iso: &str, limit: u32) -> Result<Vec<TimerRecord>, Box<dyn std::error::Error + Send + Sync>> {
+        self.as_ref().list_due(now_iso, limit)
     }
 }
 

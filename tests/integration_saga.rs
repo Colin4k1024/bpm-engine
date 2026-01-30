@@ -19,6 +19,7 @@ fn saga_only_pending_in_reverse_order() {
     let inst = ProcessInstance {
         id: instance_id.clone(),
         process_def_id: "p".into(),
+        tenant_id: None,
         tokens: vec![],
         variables: HashMap::new(),
         state: InstanceState::Running,
@@ -66,6 +67,8 @@ fn saga_only_pending_in_reverse_order() {
         parallel_join_repo: Some(Box::new(Arc::clone(&repo))),
         timer_repo: Some(Box::new(Arc::clone(&repo))),
         compensation_repo: Some(Box::new(Arc::clone(&repo))),
+        outbox_repo: None,
+        tenant_id: None,
         run_in_tx: None,
     };
 

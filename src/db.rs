@@ -129,6 +129,7 @@ impl InstanceRepo {
         Ok(Some(ProcessInstance {
             id: id_val,
             process_def_id,
+            tenant_id: None,
             tokens,
             variables,
             state,

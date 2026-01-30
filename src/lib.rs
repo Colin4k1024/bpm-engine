@@ -7,14 +7,15 @@
 
 pub mod api;
 pub mod bpmn;
+pub mod cluster;
 pub mod dsl;
 pub mod domain;
 pub mod engine;
 pub mod events;
+pub mod legacy_engine;
 pub mod model;
 pub mod persistence;
 pub mod recovery;
-pub mod legacy_engine;
 pub mod service;
 
 /// Legacy db API: re-export from persistence so existing callers still work.

@@ -7,12 +7,14 @@ use crate::persistence::{ProcessInstanceRepo, TokenRepo};
 use std::collections::VecDeque;
 
 /// Reconcile rules (docs_recovery §5.3): Ready → enqueue TokenArrived; Executing → reset to Ready, increment attempt in DB, then enqueue TokenArrived; Waiting/Created/Suspended → skip; Completed/Terminated → ignore.
+/// v3: tenant_id = None means all tenants; Some(t) recovers only that tenant.
 pub fn recover(
     process_repo: &dyn ProcessInstanceRepo,
     token_repo: Option<&dyn TokenRepo>,
+    tenant_id: Option<&str>,
     out: &mut VecDeque<EngineEvent>,
 ) {
-    let running_ids = process_repo.list_running();
+    let running_ids = process_repo.list_running(tenant_id);
     for instance_id in running_ids {
         let Some(instance) = process_repo.load(&instance_id) else {
             continue;

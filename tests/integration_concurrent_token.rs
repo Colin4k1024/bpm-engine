@@ -13,6 +13,7 @@ fn only_one_claim_succeeds() {
     let inst = ProcessInstance {
         id: instance_id.clone(),
         process_def_id: "p".into(),
+        tenant_id: None,
         tokens: vec![Token {
             id: token_id.clone(),
             node_id: "n1".into(),

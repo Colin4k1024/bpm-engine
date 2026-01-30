@@ -28,6 +28,7 @@ impl EventHandler for ProcessStartHandler {
         let instance = ProcessInstance {
             id: e.instance_id.clone(),
             process_def_id: e.process_id.clone(),
+            tenant_id: ctx.tenant_id.clone(),
             tokens: vec![Token {
                 id: token_id.clone(),
                 node_id: def.start.to_string(),

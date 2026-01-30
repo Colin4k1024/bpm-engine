@@ -11,6 +11,7 @@ impl Engine {
         ProcessInstance {
             id: uuid::Uuid::new_v4().to_string(),
             process_def_id: def.id.to_string(),
+            tenant_id: None,
             tokens: vec![Token {
                 id: uuid::Uuid::new_v4().to_string(),
                 node_id: def.start.to_string(),

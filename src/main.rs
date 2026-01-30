@@ -105,6 +105,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         parallel_join_repo: Some(Box::new(Arc::clone(&repo))),
         timer_repo: Some(Box::new(Arc::clone(&repo))),
         compensation_repo: Some(Box::new(Arc::clone(&repo))),
+        outbox_repo: None,
+        tenant_id: None,
         run_in_tx: Some(Box::new(|event, handlers, ctx, queue| {
             for handler in handlers {
                 let new_events = handler.handle(event, ctx);
@@ -122,7 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut recover_queue = VecDeque::new();
     if let Some(ref pr) = ctx.process_repo {
-        recovery::recover(&**pr, ctx.token_repo.as_deref(), &mut recover_queue);
+        recovery::recover(&**pr, ctx.token_repo.as_deref(), ctx.tenant_id.as_deref(), &mut recover_queue);
     }
     for ev in recover_queue {
         engine.run(ev, &mut ctx);
@@ -201,6 +203,8 @@ mod tests {
             parallel_join_repo: Some(Box::new(Arc::clone(&repo))),
             timer_repo: Some(Box::new(Arc::clone(&repo))),
             compensation_repo: Some(Box::new(Arc::clone(&repo))),
+            outbox_repo: None,
+            tenant_id: None,
             run_in_tx: Some(Box::new(|event, handlers, ctx, queue| {
                 for handler in handlers {
                     let new_events = handler.handle(event, ctx);

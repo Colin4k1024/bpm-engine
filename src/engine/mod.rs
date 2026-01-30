@@ -17,7 +17,7 @@ mod token_arrived_handler;
 mod transition;
 mod user_task_completed_handler;
 
-pub use events::{payloads, EngineEvent};
+pub use events::{event_from_outbox, payloads, EngineEvent};
 pub use gateway::GatewayEvaluator;
 pub use handler::{EngineContext, EventHandler};
 pub use pump::EventPump;

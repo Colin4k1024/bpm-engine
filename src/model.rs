@@ -99,6 +99,8 @@ impl Token {
 pub struct ProcessInstance {
     pub id: String,
     pub process_def_id: String,
+    /// Multi-tenant isolation (v3). None = legacy single-tenant.
+    pub tenant_id: Option<String>,
     pub tokens: Vec<Token>,
     pub variables: HashMap<String, String>,
     /// Instance lifecycle (whitepaper §4). Persisted as state; completed derived.
@@ -151,6 +153,7 @@ mod tests {
         let inst_running = ProcessInstance {
             id: "i".into(),
             process_def_id: "p".into(),
+            tenant_id: None,
             tokens: vec![],
             variables: HashMap::new(),
             state: InstanceState::Running,
@@ -160,6 +163,7 @@ mod tests {
         let inst_done = ProcessInstance {
             id: "i".into(),
             process_def_id: "p".into(),
+            tenant_id: None,
             tokens: vec![],
             variables: HashMap::new(),
             state: InstanceState::Completed,

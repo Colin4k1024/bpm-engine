@@ -14,6 +14,7 @@ pub trait EventHandler: Send + Sync {
 
 /// Design: handler.md §6 — execution environment for handlers (repos, services, clock).
 /// Whitepaper §11.5: run_in_tx runs each event's handlers inside one transaction when set.
+/// v3: tenant_id for multi-tenant isolation; outbox_repo for distributed event dispatch.
 pub struct EngineContext {
     pub process_repo: Option<Box<dyn crate::persistence::ProcessInstanceRepo>>,
     pub token_repo: Option<Box<dyn crate::persistence::TokenRepo>>,
@@ -25,6 +26,10 @@ pub struct EngineContext {
     pub timer_repo: Option<Box<dyn crate::persistence::TimerRepo>>,
     /// Compensation record repo for SagaCoordinator (design: saga.md).
     pub compensation_repo: Option<Box<dyn crate::persistence::CompensationRecordRepo>>,
+    /// v3: Outbox repo for reliable event dispatch (optional).
+    pub outbox_repo: Option<Box<dyn crate::persistence::OutboxRepo>>,
+    /// v3: Current tenant for multi-tenant isolation (None = legacy single-tenant).
+    pub tenant_id: Option<String>,
     /// When set, each event's handlers run inside this closure (one transaction per event).
     pub run_in_tx: Option<Box<dyn FnMut(&crate::engine::events::EngineEvent, &[Box<dyn EventHandler>], &mut EngineContext, &mut std::collections::VecDeque<crate::engine::events::EngineEvent>)>>,
 }
@@ -39,6 +44,8 @@ impl Default for EngineContext {
             parallel_join_repo: None,
             timer_repo: None,
             compensation_repo: None,
+            outbox_repo: None,
+            tenant_id: None,
             run_in_tx: None,
         }
     }

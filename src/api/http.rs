@@ -8,7 +8,7 @@ mod server {
     use crate::persistence::{MemoryRepo, ProcessDefStore, ProcessDefinitionRepo};
     use axum::{
         extract::{Path, State},
-        http::StatusCode,
+        http::{HeaderMap, StatusCode},
         routing::{get, post},
         Json, Router,
     };
@@ -68,7 +68,8 @@ mod server {
         pub error: String,
     }
 
-    fn build_ctx(state: &AppState) -> EngineContext {
+    /// v3: tenant_id from X-Tenant-Id header (optional).
+    fn build_ctx(state: &AppState, tenant_id: Option<String>) -> EngineContext {
         let repo = Arc::clone(&state.repo);
         EngineContext {
             process_repo: Some(Box::new(Arc::clone(&repo))),
@@ -78,6 +79,8 @@ mod server {
             parallel_join_repo: Some(Box::new(Arc::clone(&repo))),
             timer_repo: Some(Box::new(Arc::clone(&repo))),
             compensation_repo: Some(Box::new(Arc::clone(&repo))),
+            outbox_repo: None,
+            tenant_id,
             run_in_tx: Some(Box::new(move |event, handlers, ctx, queue| {
                 for handler in handlers {
                     let new_events = handler.handle(event, ctx);
@@ -87,11 +90,20 @@ mod server {
         }
     }
 
+    fn tenant_from_headers(headers: &HeaderMap) -> Option<String> {
+        headers
+            .get("x-tenant-id")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
+    }
+
     pub async fn start_process(
         State(state): State<Arc<AppState>>,
+        headers: HeaderMap,
         Json(body): Json<StartProcessRequest>,
     ) -> Result<Json<StartProcessResponse>, (StatusCode, Json<ErrorResponse>)> {
-        let mut ctx = build_ctx(state.as_ref());
+        let tenant_id = tenant_from_headers(&headers);
+        let mut ctx = build_ctx(state.as_ref(), tenant_id);
         match ProcessService::start_process(
             &body.process_id,
             body.instance_id.clone(),
@@ -110,9 +122,11 @@ mod server {
 
     pub async fn get_process(
         State(state): State<Arc<AppState>>,
+        headers: HeaderMap,
         Path(id): Path<String>,
     ) -> Result<Json<ProcessInstance>, (StatusCode, Json<ErrorResponse>)> {
-        let ctx = build_ctx(state.as_ref());
+        let tenant_id = tenant_from_headers(&headers);
+        let ctx = build_ctx(state.as_ref(), tenant_id);
         match ProcessService::get_process(&id, &ctx) {
             Some(inst) => Ok(Json(inst)),
             None => Err((
@@ -140,10 +154,12 @@ mod server {
 
     pub async fn complete_task(
         State(state): State<Arc<AppState>>,
+        headers: HeaderMap,
         Json(body): Json<CompleteTaskRequest>,
     ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
         let variables = body.variables.unwrap_or_default();
-        let mut ctx = build_ctx(state.as_ref());
+        let tenant_id = tenant_from_headers(&headers);
+        let mut ctx = build_ctx(state.as_ref(), tenant_id);
         match TaskService::complete_task(
             &body.instance_id,
             &body.node_id,

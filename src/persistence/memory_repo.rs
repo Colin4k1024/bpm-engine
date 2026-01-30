@@ -58,12 +58,20 @@ impl ProcessInstanceRepo for MemoryRepo {
             .insert(instance.id.clone(), instance.clone());
     }
 
-    fn list_running(&self) -> Vec<String> {
+    fn list_running(&self, tenant_id: Option<&str>) -> Vec<String> {
         self.instances
             .read()
             .unwrap()
             .iter()
-            .filter(|(_, i)| i.state == InstanceState::Running)
+            .filter(|(_, i)| {
+                i.state == InstanceState::Running
+                    && match (tenant_id, &i.tenant_id) {
+                        (None, _) => true,
+                        (Some(t), Some(ti)) => t == ti.as_str(),
+                        (Some(""), None) => true,
+                        (Some(_), None) => false,
+                    }
+            })
             .map(|(id, _)| id.clone())
             .collect()
     }
@@ -126,6 +134,7 @@ impl TokenRepo for MemoryRepo {
 impl OutboxRepo for MemoryRepo {
     fn insert_pending(
         &self,
+        tenant_id: Option<&str>,
         event_type: &str,
         payload: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -135,19 +144,28 @@ impl OutboxRepo for MemoryRepo {
             event_type: event_type.to_string(),
             payload: payload.to_string(),
             status: "Pending".to_string(),
+            tenant_id: tenant_id.map(String::from),
             created_at: Some(utc_now()),
         };
         self.outbox.write().unwrap().push(ev);
         Ok(id)
     }
 
-    fn list_pending(&self) -> Result<Vec<OutboxEvent>, Box<dyn std::error::Error + Send + Sync>> {
+    fn list_pending(&self, tenant_id: Option<&str>) -> Result<Vec<OutboxEvent>, Box<dyn std::error::Error + Send + Sync>> {
         let out: Vec<_> = self
             .outbox
             .read()
             .unwrap()
             .iter()
-            .filter(|e| e.status == "Pending")
+            .filter(|e| {
+                e.status == "Pending"
+                    && match (tenant_id, &e.tenant_id) {
+                        (None, _) => true,
+                        (Some(t), Some(ti)) => t == ti.as_str(),
+                        (Some(""), None) => true,
+                        (Some(_), None) => false,
+                    }
+            })
             .cloned()
             .collect();
         Ok(out)
@@ -166,6 +184,44 @@ impl OutboxRepo for MemoryRepo {
                 "outbox event not found",
             ))),
         }
+    }
+
+    fn claim_pending(
+        &self,
+        _worker_id: &str,
+        tenant_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<OutboxEvent>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut outbox = self.outbox.write().unwrap();
+        let mut claimed = vec![];
+        let limit = limit.min(100) as usize;
+        for ev in outbox.iter_mut() {
+            if ev.status != "Pending" {
+                continue;
+            }
+            let matches = match (tenant_id, &ev.tenant_id) {
+                (None, _) => true,
+                (Some(t), Some(ti)) => t == ti.as_str(),
+                (Some(""), None) => true,
+                (Some(_), None) => false,
+            };
+            if matches {
+                ev.status = "Dispatched".to_string();
+                claimed.push(ev.clone());
+                if claimed.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(claimed)
+    }
+
+    fn release_claimed(&self, id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut outbox = self.outbox.write().unwrap();
+        if let Some(ev) = outbox.iter_mut().find(|ev| ev.id == id && ev.status == "Dispatched") {
+            ev.status = "Pending".to_string();
+        }
+        Ok(())
     }
 }
 
@@ -193,6 +249,19 @@ impl TimerRepo for MemoryRepo {
             .unwrap()
             .insert(record.id.clone(), record.clone());
         Ok(())
+    }
+
+    fn list_due(&self, now_iso: &str, limit: u32) -> Result<Vec<TimerRecord>, Box<dyn std::error::Error + Send + Sync>> {
+        let limit = limit.min(100) as usize;
+        let timers = self.timers.read().unwrap();
+        let mut out: Vec<_> = timers
+            .values()
+            .filter(|r| r.status == "Scheduled" && r.due_at.as_str() <= now_iso)
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| a.due_at.cmp(&b.due_at));
+        out.truncate(limit);
+        Ok(out)
     }
 }
 
@@ -255,8 +324,8 @@ impl ProcessInstanceRepo for std::sync::Arc<MemoryRepo> {
     fn save(&self, instance: &ProcessInstance) {
         (**self).save(instance)
     }
-    fn list_running(&self) -> Vec<String> {
-        (**self).list_running()
+    fn list_running(&self, tenant_id: Option<&str>) -> Vec<String> {
+        (**self).list_running(tenant_id)
     }
 }
 
@@ -278,16 +347,28 @@ impl TokenRepo for std::sync::Arc<MemoryRepo> {
 impl OutboxRepo for std::sync::Arc<MemoryRepo> {
     fn insert_pending(
         &self,
+        tenant_id: Option<&str>,
         event_type: &str,
         payload: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        (**self).insert_pending(event_type, payload)
+        (**self).insert_pending(tenant_id, event_type, payload)
     }
-    fn list_pending(&self) -> Result<Vec<OutboxEvent>, Box<dyn std::error::Error + Send + Sync>> {
-        (**self).list_pending()
+    fn list_pending(&self, tenant_id: Option<&str>) -> Result<Vec<OutboxEvent>, Box<dyn std::error::Error + Send + Sync>> {
+        (**self).list_pending(tenant_id)
     }
     fn mark_published(&self, id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         (**self).mark_published(id)
+    }
+    fn claim_pending(
+        &self,
+        worker_id: &str,
+        tenant_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<OutboxEvent>, Box<dyn std::error::Error + Send + Sync>> {
+        (**self).claim_pending(worker_id, tenant_id, limit)
+    }
+    fn release_claimed(&self, id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        (**self).release_claimed(id)
     }
 }
 
@@ -300,6 +381,9 @@ impl TimerRepo for std::sync::Arc<MemoryRepo> {
     }
     fn insert(&self, record: &TimerRecord) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         (**self).insert(record)
+    }
+    fn list_due(&self, now_iso: &str, limit: u32) -> Result<Vec<TimerRecord>, Box<dyn std::error::Error + Send + Sync>> {
+        (**self).list_due(now_iso, limit)
     }
 }
 

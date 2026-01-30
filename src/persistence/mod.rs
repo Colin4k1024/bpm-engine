@@ -9,8 +9,8 @@ pub mod sqlite;
 pub use memory::ProcessDefStore;
 pub use memory_repo::MemoryRepo;
 pub use repo::{
-    CompensationRecordRepo, CompensationRecordRow, OutboxEvent, OutboxRepo, ParallelJoinRepo,
-    ProcessDefinitionRepo, ProcessInstanceRepo, TimerRecord, TimerRepo, TokenRepo,
+    CompensationRecordRepo, CompensationRecordRow, LeaderLeaseRepo, OutboxEvent, OutboxRepo,
+    ParallelJoinRepo, ProcessDefinitionRepo, ProcessInstanceRepo, TimerRecord, TimerRepo, TokenRepo,
     TransactionScope, UserTaskRepo,
 };
 pub use sqlite::InstanceRepo;

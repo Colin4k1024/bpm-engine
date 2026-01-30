@@ -49,6 +49,7 @@ fn recover_ready_token_produces_token_arrived() {
     let inst = ProcessInstance {
         id: instance_id.clone(),
         process_def_id: "minimal".into(),
+        tenant_id: None,
         tokens: vec![Token {
             id: token_id.clone(),
             node_id: "start".into(),
@@ -66,7 +67,7 @@ fn recover_ready_token_produces_token_arrived() {
     repo.save(&inst);
 
     let mut queue = VecDeque::new();
-    recovery::recover(repo.as_ref(), Some(repo.as_ref()), &mut queue);
+    recovery::recover(repo.as_ref(), Some(repo.as_ref()), None, &mut queue);
     assert!(!queue.is_empty());
     let ev = queue.pop_front().unwrap();
     match &ev {
@@ -90,6 +91,7 @@ fn recover_then_run_completes_instance() {
     let inst = ProcessInstance {
         id: instance_id.clone(),
         process_def_id: "minimal".into(),
+        tenant_id: None,
         tokens: vec![Token {
             id: token_id.clone(),
             node_id: "start".into(),
@@ -107,7 +109,7 @@ fn recover_then_run_completes_instance() {
     repo.save(&inst);
 
     let mut queue = VecDeque::new();
-    recovery::recover(repo.as_ref(), Some(repo.as_ref()), &mut queue);
+    recovery::recover(repo.as_ref(), Some(repo.as_ref()), None, &mut queue);
 
     let engine = BpmEngine::new(vec![
         Box::new(ProcessStartHandler),
@@ -122,6 +124,8 @@ fn recover_then_run_completes_instance() {
         parallel_join_repo: Some(Box::new(Arc::clone(&repo))),
         timer_repo: Some(Box::new(Arc::clone(&repo))),
         compensation_repo: Some(Box::new(Arc::clone(&repo))),
+        outbox_repo: None,
+        tenant_id: None,
         run_in_tx: Some(Box::new(|event, handlers, ctx, queue| {
             for handler in handlers {
                 let new_events = handler.handle(event, ctx);
@@ -144,6 +148,7 @@ fn recover_without_token_repo_still_emits_token_arrived_for_executing() {
     let inst = ProcessInstance {
         id: instance_id.clone(),
         process_def_id: "p".into(),
+        tenant_id: None,
         tokens: vec![Token {
             id: token_id.clone(),
             node_id: "n".into(),
@@ -161,6 +166,6 @@ fn recover_without_token_repo_still_emits_token_arrived_for_executing() {
     repo.save(&inst);
 
     let mut queue = VecDeque::new();
-    recovery::recover(repo.as_ref(), None, &mut queue);
+    recovery::recover(repo.as_ref(), None, None, &mut queue);
     assert!(!queue.is_empty(), "without token_repo we still enqueue TokenArrived for Executing");
 }
