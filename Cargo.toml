@@ -5,6 +5,7 @@ members = [
     "crates/runtime",
     "crates/adapters/memory",
     "crates/server/rest",
+    "crates/worker-sdk",
 ]
 resolver = "2"
 

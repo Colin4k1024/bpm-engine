@@ -1,0 +1,20 @@
+[package]
+name = "bpm-worker-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "Pull-based Worker SDK for BPM Engine external tasks"
+
+[dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+tracing = "0.1"
+
+[[example]]
+name = "payment"
+path = "examples/payment.rs"
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

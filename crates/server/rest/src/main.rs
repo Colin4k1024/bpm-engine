@@ -43,6 +43,50 @@ fn minimal_process() -> ProcessDefinition {
     }
 }
 
+/// Process with ExternalTask (task_type = "payment") for worker-sdk payment example.
+fn payment_process() -> ProcessDefinition {
+    ProcessDefinition {
+        id: "payment-flow",
+        start: "start",
+        nodes: HashMap::from([
+            (
+                "start",
+                Node {
+                    id: "start",
+                    node_type: NodeType::Start,
+                    outgoing_edges: vec![OutgoingEdge {
+                        target: "payment",
+                        condition: None,
+                    }],
+                },
+            ),
+            (
+                "payment",
+                Node {
+                    id: "payment",
+                    node_type: NodeType::ExternalTask {
+                        task_type: "payment".to_string(),
+                        retries: 3,
+                        timeout_secs: 60,
+                    },
+                    outgoing_edges: vec![OutgoingEdge {
+                        target: "end",
+                        condition: None,
+                    }],
+                },
+            ),
+            (
+                "end",
+                Node {
+                    id: "end",
+                    node_type: NodeType::End,
+                    outgoing_edges: vec![],
+                },
+            ),
+        ]),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
@@ -52,6 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let repo = Arc::new(MemoryRepo::new());
     let def_store = Arc::new(ProcessDefStore::new());
     def_store.register(minimal_process());
+    def_store.register(payment_process());
 
     let engine = BpmEngine::new(vec![
         Box::new(ProcessStartHandler),

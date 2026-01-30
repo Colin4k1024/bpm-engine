@@ -75,6 +75,7 @@ This project fills that gap.
 - ⏱ Timers, delays, and timeouts
 - 🔁 Retry with backoff
 - 👤 Human task integration
+- 📦 **External Task Worker** (pull-based fetch-and-lock / complete / fail; Worker SDK for Rust)
 - 🔄 Saga compensation (long transactions)
 - 💾 Persistent state & crash recovery
 - ⚙️ Native Rust, async-friendly design
@@ -116,90 +117,123 @@ cd bpm-engine
 cargo build
 ```
 
+The project is a **Cargo workspace** with crates: `bpm-core`, `bpm-storage`, `bpm-runtime`, `bpm-adapter-memory`, `bpm-server-rest`, `bpm-worker-sdk`.
+
 ---
 
 ## Usage
 
-### Default demo (approval process)
+### 1. REST API server
 
-Running the default binary starts the **approval** demo: Start → validate (ServiceTask) → gateway (ExclusiveGateway) → approve (UserTask) or reject (End) → end. State is stored in `bpm.db`; on boot, recovery runs and re-dispatches any Ready/Executing tokens.
-
-```bash
-cargo run
-```
-
-You will see the process start, pause at the UserTask `approve`, then complete after the engine receives `UserTaskCompleted`.
-
-### Examples
-
-Runnable examples live in `examples/`. Run any of them with:
+Run the Engine as an HTTP service (in-memory storage, no DB):
 
 ```bash
-cargo run --example <name>
+cargo run -p bpm-server-rest
 ```
 
-| Example                | Command                                  | Description                                                                  |
-| ---------------------- | ---------------------------------------- | ---------------------------------------------------------------------------- |
-| **minimal**            | `cargo run --example minimal`            | Start → End. In-memory SQLite; process completes in one run.                 |
-| **approval**           | `cargo run --example approval`           | Same flow as the default demo (validate → gateway → approve/reject → end).   |
-| **exclusive_gateway**  | `cargo run --example exclusive_gateway`  | Start → ServiceTask → ExclusiveGateway (EL + VariableEq) → end_a or end_b.   |
-| **el_gateway**         | `cargo run --example el_gateway`         | Gateway with EL expressions only: `choice == "a"`, `amount > 50`, Default.   |
-| **service_task_chain** | `cargo run --example service_task_chain` | Start → step1 → step2 → step3 → End (linear ServiceTask chain).              |
-| **reject_path**        | `cargo run --example reject_path`        | Approval topology but variable set to reject; process ends without UserTask. |
-| **parallel_fork_join** | `cargo run --example parallel_fork_join` | Start → Fork → (branch_a, branch_b) → Join → End (ParallelFork/Join).        |
-| **leave_request**      | `cargo run --example leave_request`      | 请假流程：EL 多级网关（days / leave_type）+ 经理/总监审批 + 通过/驳回。     |
+Server listens on **http://127.0.0.1:3000**. Built-in process definitions: `minimal` (Start → End), `payment-flow` (Start → ExternalTask `payment` → End).
 
-- **minimal**: Two-node process (start, end); template for the smallest run.
-- **approval**: Full approval flow with ServiceTask, ExclusiveGateway, and UserTask; simulates “complete user task” so you see the same behavior as `cargo run` without `bpm.db`.
-- **exclusive_gateway**: Branching with EL expression (`choice == "a"`) and VariableEq; first matching edge wins.
-- **el_gateway**: Gateway conditions using EL only: string equality (`choice == "a"`), numeric comparison (`amount > 50`), and Default.
-- **service_task_chain**: Three ServiceTasks in sequence; shows linear automation.
-- **reject_path**: Same graph as approval; ServiceTask sets `valid = "false"` so the gateway takes Default → reject (no UserTask).
-- **parallel_fork_join**: ParallelFork creates two tokens; both run branch_a/branch_b; ParallelJoin waits for both, then one token continues to End (uses in-memory join state).
-- **leave_request**: 请假流程：提交请假(设置 days/leave_type/reason) → 路由网关(EL: days>5→总监, leave_type=="sick"→经理, days>2→经理, Default→自动通过) → 人工审批 → 结果网关(approved=="true"→通过, Default→驳回)。
+**Endpoints (base path `/api/v1`):**
 
-### REST API server (optional)
+| Method | Path | Description |
+|--------|------|--------------|
+| POST | `/process-instances` | Start instance. Body: `{ "process_def_id", "variables"?: {} }` → `{ "instance_id", "status" }` |
+| GET | `/process-instances/:id` | Get instance. → `{ "instance_id", "status", "current_nodes" }` |
+| GET | `/tasks?type=user\|external` | List waiting tasks. → `[{ "task_id", "node_id", "instance_id", "task_type" }]` |
+| POST | `/tasks/:task_id/complete` | Complete user task. Body: `{ "variables"?: {} }` |
+| POST | `/external-tasks/fetch-and-lock` | Worker: fetch and lock. Body: `{ "worker_id", "task_types", "max_tasks"?, "lock_duration_ms" }` → array of tasks |
+| POST | `/external-tasks/:task_id/complete` | Worker: complete. Body: `{ "worker_id", "variables"?: {} }` |
+| POST | `/external-tasks/:task_id/fail` | Worker: fail. Body: `{ "worker_id", "error", "retry_after_ms"?: u64 }` |
 
-With the `api` feature, you can run the engine as an HTTP service:
+Optional header: `x-tenant-id` for tenant isolation.
 
-```bash
-cargo run --bin api_server --features api
-```
+### 2. External Task Worker (Worker SDK)
 
-Endpoints:
+Use the **Worker SDK** to run pull-based workers that fetch, execute, and complete/fail external tasks without touching BPM concepts.
 
-- `POST /processes/start` — body: `{ "process_id": "minimal", "instance_id": null }` → returns `{ "instance_id": "..." }`
-- `GET /processes/:id` — returns the process instance (state, tokens, variables)
-- `POST /tasks/complete` — body: `{ "instance_id", "node_id", "task_id", "variables": {} }` → 204 No Content
+**Quick run (payment example):**
 
-The API server uses in-memory storage by default (no database). Listen address: `http://0.0.0.0:3000`.
+1. Start the Engine:
+   ```bash
+   cargo run -p bpm-server-rest
+   ```
+2. In another terminal, start a process instance (e.g. `payment-flow`):
+   ```bash
+   curl -X POST http://127.0.0.1:3000/api/v1/process-instances \
+     -H "Content-Type: application/json" \
+     -d '{"process_def_id":"payment-flow","variables":{"amount":"100"}}'
+   ```
+3. Run the payment worker:
+   ```bash
+   cargo run -p bpm-worker-sdk --example payment
+   ```
 
-- With the `observability` feature: `cargo run --bin api_server --features "api,observability"` adds `GET /metrics` (Prometheus) and structured tracing.
-- `GET /definitions/:id/diagram` returns a Mermaid flowchart for a registered process definition.
+The worker polls the Engine, locks the `payment` task, runs the handler, then completes it; the process continues to End.
 
-### Process DSL (JSON) and BPMN (v2.0)
+**Using the Worker SDK in your code:**
 
-You can define processes in **JSON** (no Rust code) via the [dsl](src/dsl/mod.rs) module: deserialize a [DslProcessDefinition](src/dsl/mod.rs), register ServiceTask handlers by name with [ServiceTaskRegistry](src/dsl/registry.rs), then use [to_process_definition](src/dsl/convert.rs) or [load_and_register_json](src/dsl/load.rs). A minimal **BPMN-like JSON** is also supported ([bpmn](src/bpmn/mod.rs)); see [docs_bpmn_mapping.md](docs/docs_bpmn_mapping.md). Gateway conditions support **and** / **or** in EL ([engine/el](src/engine/el.rs)).
-
-### Using the engine as a library
-
-**From [crates.io](https://crates.io/crates/bpm-engine)** (recommended):
-
-Add to your project’s `Cargo.toml`:
+Add to `Cargo.toml` (workspace member or path dependency):
 
 ```toml
 [dependencies]
-bpm-engine = "0.1"
+bpm-worker-sdk = { path = "crates/worker-sdk" }
 ```
 
-**From a local path** (e.g. for development or forking):
+Implement [TaskHandler](crates/worker-sdk/src/handler.rs) and run a [Worker](crates/worker-sdk/src/worker.rs):
+
+```rust
+use bpm_worker_sdk::{
+    EngineClient, ExternalTask, TaskContext, TaskHandler, TaskResult, Worker, WorkerConfig,
+};
+use std::time::Duration;
+
+struct MyHandler;
+#[async_trait::async_trait]
+impl TaskHandler for MyHandler {
+    fn task_type(&self) -> &str { "my-task" }
+    async fn handle(&self, task: ExternalTask, _ctx: TaskContext) -> TaskResult {
+        // ... use task.variables; return TaskResult::Complete { variables } or Fail { error, retry_after }
+    }
+}
+
+let worker = Worker::builder()
+    .client(EngineClient::new("http://127.0.0.1:3000"))
+    .handler(MyHandler)
+    .config(WorkerConfig::new("worker-1").poll_interval(Duration::from_secs(1)))
+    .build();
+worker.start().await;
+```
+
+See [crates/worker-sdk/examples/payment.rs](crates/worker-sdk/examples/payment.rs) for a full example.
+
+### 3. Examples
+
+| Location | Command | Description |
+|----------|---------|--------------|
+| **Payment worker** | `cargo run -p bpm-worker-sdk --example payment` | Pull-based worker for `payment` external tasks; requires Engine running. |
+| **Basic order** | `cargo run --example basic_order` | Minimal stub (root package). |
+
+### 4. Using the engine as a library
+
+Depend on workspace crates by path:
 
 ```toml
 [dependencies]
-bpm-engine = { path = "../bpm-engine" }
+bpm-core     = { path = "crates/core" }
+bpm-storage  = { path = "crates/storage" }
+bpm-runtime  = { path = "crates/runtime" }
+bpm-adapter-memory = { path = "crates/adapters/memory" }
+# Optional: Worker SDK (HTTP client + worker runtime)
+bpm-worker-sdk = { path = "crates/worker-sdk" }
 ```
 
-Then define a [ProcessDefinition](src/model.rs), build an [EngineContext](src/engine/handler.rs) with repos (e.g. [InstanceRepo](src/persistence/sqlite.rs)), and run [BpmEngine::run](src/engine/pump.rs) with events such as `ProcessStarted` and `UserTaskCompleted`. Gateway conditions support **EL expressions** ([engine/el](src/engine/el.rs)): use `EdgeCondition::Expression("key == \"value\"")` or `"key > 100"` for numeric comparison. See the `examples/` directory in this repo for full code (minimal, approval, exclusive_gateway, el_gateway, service_task_chain, reject_path, parallel_fork_join).
+- **bpm-core**: ProcessDefinition, NodeType (Start, End, UserTask, ExternalTask, gateways), Token, ProcessInstance, EngineEvent.
+- **bpm-storage**: Async traits (ProcessInstanceRepo, TokenRepo, ExternalTaskStore, etc.).
+- **bpm-runtime**: BpmEngine, handlers (ProcessStart, TokenArrived, UserTaskCompleted, etc.), transition helpers.
+- **bpm-adapter-memory**: MemoryRepo implementing storage traits; ProcessDefStore for in-memory definitions.
+- **bpm-worker-sdk**: EngineClient, Worker, TaskHandler, TaskResult; no BPM knowledge required for worker code.
+
+Build an [EngineContext](crates/runtime/src/handler.rs) with repos, then run `BpmEngine::run_async(initial_event, &mut ctx)`. See [crates/server/rest](crates/server/rest) for wiring.
 
 ---
 
