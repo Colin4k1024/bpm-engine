@@ -1,0 +1,220 @@
+# Rust BPM Engine
+
+> A native Rust BPM runtime engine for long-running, stateful workflows.
+
+**Rust BPM Engine** is a lightweight, embeddable **Business Process Management (BPM) runtime**, designed for executing long-running workflows with **parallelism, timers, retries, human tasks, and Saga compensation** — without relying on BPMN XML or heavyweight platforms.
+
+This project focuses on the **execution engine**, not visual modeling or low-code tooling.
+
+---
+
+## Why This Project
+
+The Rust ecosystem lacks a production-grade BPM runtime that:
+
+- Works natively in Rust
+- Supports long-running business processes
+- Handles failures, retries, and compensation correctly
+- Does not depend on JVM, BPMN XML, or external workflow servers
+
+This project fills that gap.
+
+---
+
+## What This Is (and Is Not)
+
+### ✅ This is
+
+- A **BPM runtime engine**
+- Token-based execution model
+- Event-driven core
+- Crash-safe and resumable
+- Designed for backend systems and orchestration
+
+### ❌ This is NOT
+
+- A BPMN modeler
+- A low-code platform
+- A workflow UI tool
+- A distributed workflow SaaS (yet)
+
+---
+
+## Core Concepts
+
+### Token-based Execution
+
+- **Token** is the unit of execution
+- Parallelism is achieved by multiple tokens, not threads
+- Each token advances independently through the process graph
+
+### Event-driven Engine
+
+- All state transitions are triggered by events
+- Event handlers are deterministic and transactional
+- Engine progression is observable and replayable
+
+### Saga Compensation
+
+- Long-running transactions are handled via Saga
+- Only successfully completed steps are compensated
+- Compensation executes in reverse order using dedicated tokens
+
+### Crash Recovery
+
+- Engine state is fully persisted
+- Tokens can be safely resumed after crashes
+- No in-memory assumptions
+
+---
+
+## Key Features
+
+- 🧠 Token-based workflow execution
+- 🔀 Parallel fork / join support
+- ⏱ Timers, delays, and timeouts
+- 🔁 Retry with backoff
+- 👤 Human task integration
+- 🔄 Saga compensation (long transactions)
+- 💾 Persistent state & crash recovery
+- ⚙️ Native Rust, async-friendly design
+
+---
+
+## High-level Architecture
+
+```
+
+API / Adapter
+↓
+Application Services
+↓
+BPM Engine Core
+
+* Event Dispatcher
+* Token Scheduler
+* Node Executor
+* Saga Coordinator
+  ↓
+  Persistence Layer
+  ↓
+  Infrastructure (DB / Clock / Logger)
+
+```
+
+For detailed design, see the architecture documentation.
+
+---
+
+## Getting Started
+
+**Prerequisites:** Rust 1.70+ (`rustup`).
+
+```bash
+git clone <repo>
+cd bpm-engine
+cargo build
+```
+
+---
+
+## Usage
+
+### Default demo (approval process)
+
+Running the default binary starts the **approval** demo: Start → validate (ServiceTask) → gateway (ExclusiveGateway) → approve (UserTask) or reject (End) → end. State is stored in `bpm.db`; on boot, recovery runs and re-dispatches any Ready/Executing tokens.
+
+```bash
+cargo run
+```
+
+You will see the process start, pause at the UserTask `approve`, then complete after the engine receives `UserTaskCompleted`.
+
+### Examples
+
+Runnable examples live in `examples/`. Run any of them with:
+
+```bash
+cargo run --example <name>
+```
+
+| Example      | Command                        | Description |
+| ------------ | ------------------------------ | ----------- |
+| **minimal** | `cargo run --example minimal`  | Start → End. In-memory SQLite; process completes in one run. |
+| **approval**| `cargo run --example approval` | Same flow as the default demo (validate → gateway → approve/reject → end), using in-memory DB. |
+
+- **minimal**: Defines a two-node process (start, end), creates engine context with `:memory:` SQLite, starts one instance, and asserts it completes. Use this as a template for the smallest possible run.
+- **approval**: Full approval flow with ServiceTask, ExclusiveGateway, and UserTask; runs to completion after simulating “complete user task” so you can see the same behavior as `cargo run` without touching `bpm.db`.
+
+### Using the engine as a library
+
+Add to `Cargo.toml`:
+
+```toml
+[dependencies]
+bpm-engine = { path = ".." }
+```
+
+Then define a [ProcessDefinition](src/model.rs), build an [EngineContext](src/engine/handler.rs) with repos (e.g. [InstanceRepo](src/persistence/sqlite.rs)), and run [BpmEngine::run](src/engine/pump.rs) with events such as `ProcessStarted` and `UserTaskCompleted`. See `examples/minimal.rs` and `examples/approval.rs` for full code.
+
+---
+
+## Documentation
+
+- 📘 [Architecture Overview](docs/docs_architecture.md)
+- ⚙️ [Execution Model (Token & Concurrency)](docs/docs_execution_model.md)
+- 🔄 [Saga & Compensation](docs/docs_saga.md)
+- ♻️ [Crash Recovery & Rehydration](docs/docs_recovery.md)
+- 🗄️ [Database Schema](docs/docs_database_schema.md)
+- 🧪 [Testing Strategy](docs/docs_testing_strategy.md)
+
+---
+
+## Status
+
+🚧 **Early development / Architecture-first phase**
+
+- Core design is stable
+- Implementation is in progress
+- APIs may change
+
+---
+
+## Design Philosophy
+
+> Token is the unit of execution.  
+> Event is the unit of progress.  
+> Saga is the unit of resilience.
+
+---
+
+## Roadmap
+
+### v1
+
+- Single-node engine
+- Code-defined workflows
+- Core runtime features
+
+### v2
+
+- BPMN adapter layer
+- Improved timer scheduling
+- Execution visualization
+
+### v3
+
+- Multi-engine coordination
+- Horizontal scalability
+- Advanced observability
+
+---
+
+## License
+
+MIT
+
+```
+
+
+```
