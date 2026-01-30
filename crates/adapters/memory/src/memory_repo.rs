@@ -577,9 +577,9 @@ impl HistoryRepo for MemoryRepo {
         let mut out: Vec<HistoryEvent> = guard
             .iter()
             .filter(|r| r.instance_id == instance_id)
-            .filter(|r| event_type_filter.map_or(true, |f| r.event_type == f))
+            .filter(|r| event_type_filter.is_none_or(|f| r.event_type == f))
             .filter(|r| {
-                token_id_filter.map_or(true, |tid| {
+                token_id_filter.is_none_or(|tid| {
                     let tid_in_payload: Option<String> =
                         serde_json::from_str::<serde_json::Value>(&r.payload)
                             .ok()
