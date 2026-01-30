@@ -1,11 +1,11 @@
 [package]
 name = "bpm-bpmn"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "BPMN 2.0 XML parser and compiler to engine ProcessDefinition"
 
 [dependencies]
-bpm-core = { path = "../core" }
+bpm-core = { path = "../core", version = "0.2.0" }
 roxmltree = "0.20"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }

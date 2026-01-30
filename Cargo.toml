@@ -23,7 +23,7 @@ async-trait = "0.1"
 
 [package]
 name = "bpm-engine"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Lightweight embeddable BPM runtime for long-running, stateful workflows with tokens, timers, Saga compensation, and crash recovery"
 readme = "README.md"
@@ -35,11 +35,11 @@ keywords = ["bpm", "workflow", "engine", "process", "orchestration"]
 categories = ["algorithms", "concurrency", "data-structures"]
 
 [dependencies]
-bpm-core = { path = "crates/core" }
-bpm-storage = { path = "crates/storage" }
-bpm-runtime = { path = "crates/runtime" }
-bpm-adapter-memory = { path = "crates/adapters/memory" }
-bpm-bpmn = { path = "crates/bpmn" }
+bpm-core = { path = "crates/core", version = "0.2.0" }
+bpm-storage = { path = "crates/storage", version = "0.2.0" }
+bpm-runtime = { path = "crates/runtime", version = "0.2.0" }
+bpm-adapter-memory = { path = "crates/adapters/memory", version = "0.2.0" }
+bpm-bpmn = { path = "crates/bpmn", version = "0.2.0" }
 uuid = { version = "1.4", features = ["v4"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
