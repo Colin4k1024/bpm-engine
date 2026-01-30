@@ -1,0 +1,12 @@
+[package]
+name = "bpm-adapter-memory"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bpm-core = { path = "../../core" }
+bpm-storage = { path = "../../storage" }
+anyhow = { workspace = true }
+async-trait = "0.1"
+tokio = "1"
+uuid = { workspace = true }

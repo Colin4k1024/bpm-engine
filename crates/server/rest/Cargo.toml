@@ -1,0 +1,19 @@
+[package]
+name = "bpm-server-rest"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "api_server"
+path = "src/main.rs"
+
+[dependencies]
+bpm-core = { path = "../../core" }
+bpm-runtime = { path = "../../runtime" }
+bpm-storage = { path = "../../storage" }
+bpm-adapter-memory = { path = "../../adapters/memory" }
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }

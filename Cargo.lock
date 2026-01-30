@@ -24,6 +24,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.100"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
+
+[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -108,10 +114,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "812e12b5285cc515a9c72a5c1d3b6d46a19dac5acfef5265968c166106e31dd3"
 
 [[package]]
+name = "bpm-adapter-memory"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bpm-core",
+ "bpm-storage",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "bpm-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "bpm-engine"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bpm-adapter-memory",
+ "bpm-core",
+ "bpm-runtime",
+ "bpm-storage",
  "metrics 0.21.1",
  "metrics-exporter-prometheus",
  "rusqlite",
@@ -122,6 +154,44 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "bpm-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bpm-core",
+ "bpm-storage",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "bpm-server-rest"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bpm-adapter-memory",
+ "bpm-core",
+ "bpm-runtime",
+ "bpm-storage",
+ "serde",
+ "tokio",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "bpm-storage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bpm-core",
 ]
 
 [[package]]
@@ -1284,6 +1354,7 @@ checksum = "ee48d38b119b0cd71fe4141b30f5ba9c7c5d9f4e7a3a8b4a674e4b6ef789976f"
 dependencies = [
  "getrandom",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

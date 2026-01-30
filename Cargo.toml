@@ -1,3 +1,24 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/storage",
+    "crates/runtime",
+    "crates/adapters/memory",
+    "crates/server/rest",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+async-trait = "0.1"
+
 [package]
 name = "bpm-engine"
 version = "0.1.0"
@@ -8,10 +29,14 @@ license = "MIT"
 repository = "https://github.com/fanjia1024/bpm-engine"
 homepage = "https://github.com/fanjia1024/bpm-engine"
 documentation = "https://docs.rs/bpm-engine"
-keywords = ["bpm", "workflow", "engine", "process","orchestration"]
+keywords = ["bpm", "workflow", "engine", "process", "orchestration"]
 categories = ["algorithms", "concurrency", "data-structures"]
 
 [dependencies]
+bpm-core = { path = "crates/core" }
+bpm-storage = { path = "crates/storage" }
+bpm-runtime = { path = "crates/runtime" }
+bpm-adapter-memory = { path = "crates/adapters/memory" }
 uuid = { version = "1.4", features = ["v4"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -28,7 +53,3 @@ tower-http = { version = "0.5", features = ["cors"], optional = true }
 default = []
 api = ["axum", "tokio", "tower-http"]
 observability = ["metrics", "metrics-exporter-prometheus"]
-
-[[bin]]
-name = "api_server"
-required-features = ["api"]

@@ -1,0 +1,9 @@
+[package]
+name = "bpm-storage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bpm-core = { path = "../core" }
+anyhow = { workspace = true }
+async-trait = "0.1"
