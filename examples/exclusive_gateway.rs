@@ -122,6 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         EngineEvent::ProcessStarted(payloads::ProcessStarted {
             process_id: process.id.to_string(),
             instance_id: instance_id.clone(),
+            initial_variables: None,
         }),
         &mut ctx,
     );

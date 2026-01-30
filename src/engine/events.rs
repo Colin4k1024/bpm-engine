@@ -25,6 +25,9 @@ pub mod payloads {
     pub struct ProcessStarted {
         pub process_id: String,
         pub instance_id: String,
+        /// Initial variables for the instance (API spec: POST /process-instances variables).
+        #[serde(default)]
+        pub initial_variables: Option<std::collections::HashMap<String, String>>,
     }
 
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

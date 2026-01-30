@@ -2,6 +2,7 @@
 //! Serves REST: POST /processes/start, GET /processes/:id, POST /tasks/complete.
 
 use bpm_engine::api::http::{router, AppState};
+use bpm_engine::dsl::ServiceTaskRegistry;
 use bpm_engine::engine::{
     ProcessCompletedHandler, ProcessStartHandler, TokenArrivedHandler, UserTaskCompletedHandler,
     BpmEngine,
@@ -65,10 +66,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Box::new(UserTaskCompletedHandler),
     ]);
 
+    let registry = Arc::new(ServiceTaskRegistry::new());
     let state = Arc::new(AppState {
         engine,
         repo,
         def_store,
+        registry: Some(registry),
     });
 
     let app = router(state);

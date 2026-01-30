@@ -260,7 +260,7 @@ message FailRequest {
 
 ## 5. Idempotency & Safety
 
-- REST supports `Idempotency-Key` header
+- REST supports `Idempotency-Key` header (accepted on `POST /process-instances` and `POST /tasks/{task_id}/complete`; cached response behavior to be implemented).
 - gRPC tasks are **at-least-once**
 - Duplicate completion is safe
 

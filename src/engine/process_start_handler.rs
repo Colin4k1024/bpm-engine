@@ -25,6 +25,10 @@ impl EventHandler for ProcessStartHandler {
             return vec![];
         };
         let token_id = uuid::Uuid::new_v4().to_string();
+        let variables = e
+            .initial_variables
+            .clone()
+            .unwrap_or_default();
         let instance = ProcessInstance {
             id: e.instance_id.clone(),
             process_def_id: e.process_id.clone(),
@@ -39,7 +43,7 @@ impl EventHandler for ProcessStartHandler {
                 parallel_group_id: None,
                 updated_at: None,
             }],
-            variables: Default::default(),
+            variables,
             state: InstanceState::Running,
             version: 0,
         };
