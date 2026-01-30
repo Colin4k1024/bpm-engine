@@ -7,6 +7,9 @@ use std::collections::{HashMap, HashSet};
 use crate::errors::{CompilerError, ErrorCode};
 use crate::model::{BpmnFlowNode, BpmnProcess, BpmnSequenceFlow};
 
+/// Map node id -> (NodeType, outgoing edges as (target, condition)).
+type NodeOutgoingMap = HashMap<String, (NodeType, Vec<(String, Option<EdgeCondition>)>)>;
+
 /// Compile BPMN process to engine ProcessDefinition. Returns all errors (no fail-fast).
 pub fn compile(model: BpmnProcess) -> Result<ProcessDefinition, Vec<CompilerError>> {
     let mut errors = Vec::new();
@@ -26,7 +29,13 @@ pub fn compile(model: BpmnProcess) -> Result<ProcessDefinition, Vec<CompilerErro
     to_engine_definition(&model.id, &model, nodes)
 }
 
-fn err(code: ErrorCode, message: impl Into<String>, node_id: Option<String>, flow_id: Option<String>, hint: Option<String>) -> CompilerError {
+fn err(
+    code: ErrorCode,
+    message: impl Into<String>,
+    node_id: Option<String>,
+    flow_id: Option<String>,
+    hint: Option<String>,
+) -> CompilerError {
     CompilerError {
         code,
         message: message.into(),
@@ -166,7 +175,12 @@ fn check_gateways(model: &BpmnProcess, errors: &mut Vec<CompilerError>) {
             let outgoing = node.outgoing();
             let default_count = outgoing
                 .iter()
-                .filter(|fid| flows_by_id.get(fid.as_str()).map(|f| f.is_default).unwrap_or(false))
+                .filter(|fid| {
+                    flows_by_id
+                        .get(fid.as_str())
+                        .map(|f| f.is_default)
+                        .unwrap_or(false)
+                })
                 .count();
             if default_count > 1 {
                 errors.push(err(
@@ -203,7 +217,10 @@ fn check_gateways(model: &BpmnProcess, errors: &mut Vec<CompilerError>) {
             if inc != 1 && out != 1 {
                 errors.push(err(
                     ErrorCode::ParallelGatewayInvalidShape,
-                    format!("Gateway has {} incoming and {} outgoing; cannot act as both fork and join", inc, out),
+                    format!(
+                        "Gateway has {} incoming and {} outgoing; cannot act as both fork and join",
+                        inc, out
+                    ),
                     Some(id.clone()),
                     None,
                     Some("Split into separate fork and join gateways".to_string()),
@@ -277,10 +294,11 @@ fn check_dead_end(model: &BpmnProcess, errors: &mut Vec<CompilerError>) {
     while changed {
         changed = false;
         for flow in &model.sequence_flows {
-            if can_reach_end.contains(&flow.target_ref) && reachable.contains(&flow.source_ref) {
-                if can_reach_end.insert(flow.source_ref.clone()) {
-                    changed = true;
-                }
+            if can_reach_end.contains(&flow.target_ref)
+                && reachable.contains(&flow.source_ref)
+                && can_reach_end.insert(flow.source_ref.clone())
+            {
+                changed = true;
             }
         }
     }
@@ -351,13 +369,13 @@ fn parse_condition(raw: &str, is_default: bool) -> EdgeCondition {
 fn build_nodes(
     model: &BpmnProcess,
     outgoing: &HashMap<String, Vec<(String, Option<EdgeCondition>)>>,
-) -> HashMap<String, (NodeType, Vec<(String, Option<EdgeCondition>)>)> {
+) -> NodeOutgoingMap {
     let mut incoming_count: HashMap<String, usize> = HashMap::new();
     for flow in &model.sequence_flows {
         *incoming_count.entry(flow.target_ref.clone()).or_insert(0) += 1;
     }
 
-    let mut result: HashMap<String, (NodeType, Vec<(String, Option<EdgeCondition>)>)> = HashMap::new();
+    let mut result: NodeOutgoingMap = HashMap::new();
     for (id, node) in &model.flow_nodes {
         let out = outgoing.get(id).cloned().unwrap_or_default();
         let node_type = match node {
@@ -392,7 +410,7 @@ fn build_nodes(
 fn to_engine_definition(
     process_id: &str,
     model: &BpmnProcess,
-    nodes: HashMap<String, (NodeType, Vec<(String, Option<EdgeCondition>)>)>,
+    nodes: NodeOutgoingMap,
 ) -> Result<ProcessDefinition, Vec<CompilerError>> {
     let start_id = model
         .flow_nodes

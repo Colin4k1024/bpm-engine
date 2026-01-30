@@ -2,6 +2,13 @@
 
 Contributions are welcome. This document explains how to get started.
 
+## How to contribute
+
+1. **Pick an issue** — Check [Issues](https://github.com/fanjia1024/bpm-engine/issues) for bugs or features labeled "good first issue", or open a new issue to discuss a change.
+2. **Branch** — Create a branch from the default branch (e.g. `fix/description` or `feat/description`).
+3. **Implement** — Follow code style (fmt, clippy) and add or update tests as needed.
+4. **PR** — Open a pull request against the default branch. Use the [PR template](.github/PULL_REQUEST_TEMPLATE.md) checklist. Describe the change and how it fits the project focus (correctness, execution semantics, persistence).
+
 ## Build and test
 
 ```bash
@@ -21,15 +28,16 @@ cargo run -p bpm-server-rest
 cargo run --example simple_process
 ```
 
-## Code style
+## Code style and CI
 
 - Format with `cargo fmt`
-- Lint with `cargo clippy`
-- Ensure all tests pass before submitting a PR
+- Lint with `cargo clippy --workspace --all-targets -- -D warnings`
+- Ensure all tests pass: `cargo test --workspace`
+- CI runs on push/PR: fmt check, clippy, and tests must pass
 
 ## Areas where help is valuable
 
-- **Testing and invariant cases**: Add tests that assert formal invariants (token lifecycle, join semantics, external task ownership). See [docs/invariants.md](docs/invariants.md) and [docs/docs_testing_strategy.md](docs/docs_testing_strategy.md).
+- **Testing and invariant cases**: Add tests that assert formal invariants (token lifecycle, join semantics, external task ownership). See [docs/invariants.md](docs/invariants.md) and [docs/docs_testing_strategy.md](docs/docs_testing_strategy.md). See also [docs/cheat-sheet.md](docs/cheat-sheet.md) for quick commands.
 - **Documentation**: Improve README, doc comments, and design docs (architecture, persistence, replay).
 - **Worker SDK ergonomics**: Improve the Rust Worker SDK API and examples.
 - **Visualization tools**: Read-only execution inspector, trace viewers.
@@ -46,7 +54,12 @@ The workspace is split into crates with clear roles:
 - **crates/server/rest**: HTTP API and deploy endpoint.
 - **crates/worker-sdk**: External task fetch/lock/complete client and worker runtime.
 
-See [docs/docs_architecture.md](docs/docs_architecture.md) for details.
+See [docs/architecture.md](docs/architecture.md) for details.
+
+## Documentation and tests
+
+- When adding or changing behavior, update relevant docs under [docs/](docs/) (e.g. [architecture.md](docs/architecture.md), [execution-model.md](docs/execution-model.md), [faq.md](docs/faq.md)).
+- When fixing a bug or adding a feature, add or extend tests (unit or integration under [tests/](tests/)). See [docs/docs_testing_strategy.md](docs/docs_testing_strategy.md) and [docs/invariants.md](docs/invariants.md).
 
 ## Good first issues
 
@@ -57,4 +70,4 @@ See [docs/docs_architecture.md](docs/docs_architecture.md) for details.
 
 ## Pull requests
 
-Open a PR against the default branch. Describe the change and how it fits the project’s focus on correctness and execution semantics.
+Open a PR against the default branch. Use the [PR template](.github/PULL_REQUEST_TEMPLATE.md). Describe the change and how it fits the project’s focus on correctness and execution semantics.

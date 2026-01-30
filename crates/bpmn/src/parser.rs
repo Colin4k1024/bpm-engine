@@ -22,10 +22,7 @@ pub fn parse(xml: &str) -> Result<BpmnProcess, ParseError> {
         .find(|n| n.tag_name().name() == "process")
         .ok_or(ParseError::NoProcess)?;
 
-    let process_id = process
-        .attribute("id")
-        .unwrap_or("process")
-        .to_string();
+    let process_id = process.attribute("id").unwrap_or("process").to_string();
     let process_name = process.attribute("name").map(String::from);
 
     let mut flow_nodes: HashMap<String, BpmnFlowNode> = HashMap::new();
@@ -147,7 +144,10 @@ fn parse_service_task(node: &roxmltree::Node) -> Result<BpmnFlowNode, ParseError
     let mut retries = 3i32;
     let timeout_secs = 60u64;
 
-    for ext in node.children().filter(|n| n.tag_name().name() == "extensionElements") {
+    for ext in node
+        .children()
+        .filter(|n| n.tag_name().name() == "extensionElements")
+    {
         for e in ext.children() {
             if e.tag_name().name() == "taskDefinition" {
                 if let Some(ty) = e.attribute("type") {

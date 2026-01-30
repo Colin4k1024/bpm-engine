@@ -16,16 +16,16 @@ impl EventHandler for UserTaskCompletedHandler {
             return vec![];
         };
         info!(instance_id = %e.instance_id, node_id = %e.node_id, "user task completed");
-        let Some(process_repo) = ctx.process_repo.as_ref() else {
+        let Some(process_store) = ctx.process_store.as_ref() else {
             return vec![];
         };
-        let Some(process_def_repo) = ctx.process_def_repo.as_ref() else {
+        let Some(process_def_store) = ctx.process_def_store.as_ref() else {
             return vec![];
         };
-        let Ok(Some(mut instance)) = process_repo.load(&e.instance_id).await else {
+        let Ok(Some(mut instance)) = process_store.load(&e.instance_id).await else {
             return vec![];
         };
-        let Ok(Some(def)) = process_def_repo.load(&instance.process_def_id).await else {
+        let Ok(Some(def)) = process_def_store.load(&instance.process_def_id).await else {
             return vec![];
         };
         let Some(node) = def.nodes.get(e.node_id.as_str()) else {
@@ -42,7 +42,7 @@ impl EventHandler for UserTaskCompletedHandler {
             }));
         }
         instance.tokens.extend(new_tokens);
-        let _ = process_repo.save(&instance).await;
+        let _ = process_store.save(&instance).await;
         out
     }
 }

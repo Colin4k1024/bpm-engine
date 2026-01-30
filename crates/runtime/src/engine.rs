@@ -1,7 +1,7 @@
 use super::handler::{EngineContext, EventHandler};
 use super::pump::EventPump;
 use bpm_core::EngineEvent;
-use bpm_storage::TokenRepo;
+use bpm_storage::TokenStore;
 use std::sync::Arc;
 
 pub struct Engine<S> {
@@ -10,7 +10,7 @@ pub struct Engine<S> {
 
 impl<S> Engine<S>
 where
-    S: TokenRepo + Send + Sync + 'static,
+    S: TokenStore + Send + Sync + 'static,
 {
     pub fn new(store: Arc<S>) -> Self {
         Self { store }

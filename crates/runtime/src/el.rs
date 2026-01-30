@@ -65,20 +65,34 @@ fn unquote(s: &str) -> Option<&str> {
     }
 }
 
-fn eval_eq(left_val: &str, right: &str, variables: &HashMap<String, String>) -> Result<bool, ElError> {
+fn eval_eq(
+    left_val: &str,
+    right: &str,
+    variables: &HashMap<String, String>,
+) -> Result<bool, ElError> {
     let right_val = if let Some(q) = unquote(right) {
         q.to_string()
     } else {
-        variables.get(right.trim()).cloned().unwrap_or_else(|| right.trim().to_string())
+        variables
+            .get(right.trim())
+            .cloned()
+            .unwrap_or_else(|| right.trim().to_string())
     };
     Ok(left_val == right_val.as_str())
 }
 
-fn eval_neq(left_val: &str, right: &str, variables: &HashMap<String, String>) -> Result<bool, ElError> {
+fn eval_neq(
+    left_val: &str,
+    right: &str,
+    variables: &HashMap<String, String>,
+) -> Result<bool, ElError> {
     let right_val = if let Some(q) = unquote(right) {
         q.to_string()
     } else {
-        variables.get(right.trim()).cloned().unwrap_or_else(|| right.trim().to_string())
+        variables
+            .get(right.trim())
+            .cloned()
+            .unwrap_or_else(|| right.trim().to_string())
     };
     Ok(left_val != right_val.as_str())
 }
@@ -86,11 +100,15 @@ fn eval_neq(left_val: &str, right: &str, variables: &HashMap<String, String>) ->
 fn parse_f64(s: &str, variables: &HashMap<String, String>) -> Result<f64, ElError> {
     let s = s.trim();
     if let Some(q) = unquote(s) {
-        q.parse::<f64>().map_err(|_| ElError(format!("not a number: {}", q)))
+        q.parse::<f64>()
+            .map_err(|_| ElError(format!("not a number: {}", q)))
     } else if let Some(v) = variables.get(s) {
-        v.trim().parse::<f64>().map_err(|_| ElError(format!("variable {} is not a number: {:?}", s, v)))
+        v.trim()
+            .parse::<f64>()
+            .map_err(|_| ElError(format!("variable {} is not a number: {:?}", s, v)))
     } else {
-        s.parse::<f64>().map_err(|_| ElError(format!("not a number: {}", s)))
+        s.parse::<f64>()
+            .map_err(|_| ElError(format!("not a number: {}", s)))
     }
 }
 
@@ -103,8 +121,12 @@ fn eval_cmp<F>(
 where
     F: FnOnce(f64, f64) -> bool,
 {
-    let a = parse_f64(left_val, variables)
-        .or_else(|_| left_val.trim().parse::<f64>().map_err(|_| ElError(format!("left operand not numeric: {:?}", left_val))))?;
+    let a = parse_f64(left_val, variables).or_else(|_| {
+        left_val
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| ElError(format!("left operand not numeric: {:?}", left_val)))
+    })?;
     let b = parse_f64(right, variables)?;
     Ok(op(a, b))
 }

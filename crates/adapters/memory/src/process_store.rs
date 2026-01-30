@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use bpm_core::{InstanceState, ProcessInstance};
-use bpm_storage::{ProcessInstanceRepo};
+use bpm_storage::ProcessInstanceStore;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -23,7 +23,7 @@ impl Default for MemoryProcessStore {
 }
 
 #[async_trait]
-impl ProcessInstanceRepo for MemoryProcessStore {
+impl ProcessInstanceStore for MemoryProcessStore {
     async fn load(&self, id: &str) -> anyhow::Result<Option<ProcessInstance>> {
         Ok(self.instances.read().unwrap().get(id).cloned())
     }

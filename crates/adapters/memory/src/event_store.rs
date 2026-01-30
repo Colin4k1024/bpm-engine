@@ -68,7 +68,13 @@ impl OutboxRepo for MemoryOutboxStore {
     }
 
     async fn mark_published(&self, id: &str) -> anyhow::Result<()> {
-        if let Some(ev) = self.events.write().unwrap().iter_mut().find(|ev| ev.id == id) {
+        if let Some(ev) = self
+            .events
+            .write()
+            .unwrap()
+            .iter_mut()
+            .find(|ev| ev.id == id)
+        {
             ev.status = "Published".to_string();
         }
         Ok(())

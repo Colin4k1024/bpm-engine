@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use bpm_core::{Token, TokenStatus};
-use bpm_storage::TokenRepo;
+use bpm_storage::TokenStore;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -41,7 +41,7 @@ impl Default for MemoryTokenStore {
 }
 
 #[async_trait]
-impl TokenRepo for MemoryTokenStore {
+impl TokenStore for MemoryTokenStore {
     async fn load_by_instance(&self, instance_id: &str) -> anyhow::Result<Vec<Token>> {
         Ok(self
             .tokens_by_instance
@@ -77,7 +77,12 @@ impl TokenRepo for MemoryTokenStore {
         Ok(true)
     }
 
-    async fn claim_token(&self, instance_id: &str, token_id: &str, version: u32) -> anyhow::Result<bool> {
+    async fn claim_token(
+        &self,
+        instance_id: &str,
+        token_id: &str,
+        version: u32,
+    ) -> anyhow::Result<bool> {
         let mut guard = self.tokens_by_instance.write().unwrap();
         let list = match guard.get_mut(instance_id) {
             Some(l) => l,

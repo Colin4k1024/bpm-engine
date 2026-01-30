@@ -110,11 +110,7 @@ impl EngineClient {
             lock_duration_ms,
         };
         debug!(%url, "fetch_and_lock");
-        let req = self
-            .client
-            .post(&url)
-            .json(&body)
-            .headers(self.headers());
+        let req = self.client.post(&url).json(&body).headers(self.headers());
         let res = req.send().await?;
         let status = res.status();
         if !status.is_success() {

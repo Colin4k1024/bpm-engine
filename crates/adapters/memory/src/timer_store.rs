@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use bpm_storage::{TimerRecord, TimerRepo};
+use bpm_storage::{TimerRecord, TimerStore};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -29,7 +29,7 @@ impl Default for MemoryTimerStore {
 }
 
 #[async_trait]
-impl TimerRepo for MemoryTimerStore {
+impl TimerStore for MemoryTimerStore {
     async fn get_by_id(&self, id: &str) -> anyhow::Result<Option<TimerRecord>> {
         Ok(self.timers.read().unwrap().get(id).cloned())
     }

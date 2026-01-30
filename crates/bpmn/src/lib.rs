@@ -7,7 +7,7 @@ pub mod model;
 pub mod parser;
 
 pub use compiler::compile;
-pub use errors::{CompileError, CompilerError, CompileErrors, ErrorCode, ParseError};
+pub use errors::{CompileError, CompileErrors, CompilerError, ErrorCode, ParseError};
 pub use model::{BpmnFlowNode, BpmnProcess, BpmnSequenceFlow, FlowAttach};
 pub use parser::parse;
 
@@ -157,7 +157,9 @@ mod tests {
 </definitions>"#;
         let model = parse(xml).unwrap();
         let errs = compile(model).unwrap_err();
-        assert!(errs.iter().any(|e| e.code == ErrorCode::MultipleStartEvents));
+        assert!(errs
+            .iter()
+            .any(|e| e.code == ErrorCode::MultipleStartEvents));
     }
 
     #[test]
@@ -186,7 +188,9 @@ mod tests {
 </definitions>"#;
         let model = parse(xml).unwrap();
         let errs = compile(model).unwrap_err();
-        assert!(errs.iter().any(|e| e.code == ErrorCode::OrphanNode && e.node_id.as_deref() == Some("orphan")));
+        assert!(errs
+            .iter()
+            .any(|e| e.code == ErrorCode::OrphanNode && e.node_id.as_deref() == Some("orphan")));
     }
 
     #[test]
@@ -225,7 +229,9 @@ mod tests {
             }],
         };
         let errs = compile(model).unwrap_err();
-        assert!(errs.iter().any(|e| e.code == ErrorCode::SequenceFlowTargetNotFound));
+        assert!(errs
+            .iter()
+            .any(|e| e.code == ErrorCode::SequenceFlowTargetNotFound));
     }
 
     #[test]
@@ -255,7 +261,9 @@ mod tests {
             }],
         };
         let errs = compile(model).unwrap_err();
-        assert!(errs.iter().any(|e| e.code == ErrorCode::SequenceFlowSourceNotFound));
+        assert!(errs
+            .iter()
+            .any(|e| e.code == ErrorCode::SequenceFlowSourceNotFound));
     }
 
     #[test]
@@ -293,7 +301,9 @@ mod tests {
 </definitions>"#;
         let model = parse(xml).unwrap();
         let errs = compile(model).unwrap_err();
-        assert!(errs.iter().any(|e| e.code == ErrorCode::ExclusiveGatewayNoDefault));
+        assert!(errs
+            .iter()
+            .any(|e| e.code == ErrorCode::ExclusiveGatewayNoDefault));
     }
 
     #[test]
@@ -313,6 +323,8 @@ mod tests {
 </definitions>"#;
         let model = parse(xml).unwrap();
         let errs = compile(model).unwrap_err();
-        assert!(errs.iter().any(|e| e.code == ErrorCode::ParallelGatewayInvalidShape));
+        assert!(errs
+            .iter()
+            .any(|e| e.code == ErrorCode::ParallelGatewayInvalidShape));
     }
 }

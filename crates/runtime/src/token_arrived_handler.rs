@@ -34,24 +34,28 @@ impl EventHandler for TokenArrivedHandler {
         let EngineEvent::TokenArrived(e) = event else {
             return vec![];
         };
-        let Some(process_repo) = ctx.process_repo.as_ref() else {
+        let Some(process_store) = ctx.process_store.as_ref() else {
             return vec![];
         };
-        let Some(process_def_repo) = ctx.process_def_repo.as_ref() else {
+        let Some(process_def_store) = ctx.process_def_store.as_ref() else {
             return vec![];
         };
-        let Ok(Some(mut instance)) = process_repo.load(&e.instance_id).await else {
+        let Ok(Some(mut instance)) = process_store.load(&e.instance_id).await else {
             return vec![];
         };
-        let Ok(Some(def)) = process_def_repo.load(&instance.process_def_id).await else {
+        let Ok(Some(def)) = process_def_store.load(&instance.process_def_id).await else {
             return vec![];
         };
         let Some(token_idx) = instance.tokens.iter().position(|t| t.id == e.token_id) else {
             return vec![];
         };
         let token = &instance.tokens[token_idx];
-        if let Some(tr) = ctx.token_repo.as_ref() {
-            if !tr.claim_token(&e.instance_id, &token.id, token.version).await.unwrap_or(false) {
+        if let Some(tr) = ctx.token_store.as_ref() {
+            if !tr
+                .claim_token(&e.instance_id, &token.id, token.version)
+                .await
+                .unwrap_or(false)
+            {
                 warn!(instance_id = %e.instance_id, token_id = %token.id, "token claim failed (CAS)");
                 return vec![];
             }
@@ -100,7 +104,7 @@ impl EventHandler for TokenArrivedHandler {
                 retries,
                 timeout_secs,
             } => {
-                if let Some(ref ext_store) = ctx.external_task_repo {
+                if let Some(ref ext_store) = ctx.external_task_store {
                     let variables = instance.variables.clone();
                     let _ = ext_store
                         .create(
@@ -129,7 +133,7 @@ impl EventHandler for TokenArrivedHandler {
             NodeType::End => {
                 instance.state = InstanceState::Completed;
                 instance.tokens.remove(token_idx);
-                let _ = process_repo.save(&instance).await;
+                let _ = process_store.save(&instance).await;
                 return vec![EngineEvent::ProcessCompleted(payloads::ProcessCompleted {
                     instance_id: e.instance_id.clone(),
                 })];
@@ -161,7 +165,9 @@ impl EventHandler for TokenArrivedHandler {
                 } else {
                     let key = format!("{}:{}:{}", e.instance_id, e.node_id, group_id);
                     let mut state = self.join_state.lock().unwrap();
-                    let (exp, arrived) = state.entry(key.clone()).or_insert((*expected, HashSet::new()));
+                    let (exp, arrived) = state
+                        .entry(key.clone())
+                        .or_insert((*expected, HashSet::new()));
                     arrived.insert(e.token_id.clone());
                     let done = arrived.len() >= *exp;
                     if done {
@@ -190,7 +196,7 @@ impl EventHandler for TokenArrivedHandler {
             }
         }
 
-        let _ = process_repo.save(&instance).await;
+        let _ = process_store.save(&instance).await;
         out
     }
 }

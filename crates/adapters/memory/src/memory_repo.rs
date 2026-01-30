@@ -2,10 +2,12 @@
 //! Implements all storage traits for runtime EngineContext.
 
 use async_trait::async_trait;
-use bpm_core::{ExternalTask, ExternalTaskState, InstanceState, ProcessInstance, Token, TokenStatus};
+use bpm_core::{
+    ExternalTask, ExternalTaskState, InstanceState, ProcessInstance, Token, TokenStatus,
+};
 use bpm_storage::{
     CompensationRecordRepo, CompensationRecordRow, ExternalTaskStore, OutboxEvent, OutboxRepo,
-    ParallelJoinRepo, ProcessInstanceRepo, TimerRecord, TimerRepo, TokenRepo,
+    ParallelJoinRepo, ProcessInstanceStore, TimerRecord, TimerStore, TokenStore,
 };
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -17,7 +19,10 @@ fn utc_now() -> String {
 }
 
 fn unix_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +90,7 @@ impl Default for MemoryRepo {
 }
 
 #[async_trait]
-impl ProcessInstanceRepo for MemoryRepo {
+impl ProcessInstanceStore for MemoryRepo {
     async fn load(&self, id: &str) -> anyhow::Result<Option<ProcessInstance>> {
         Ok(self.instances.read().unwrap().get(id).cloned())
     }
@@ -120,7 +125,7 @@ impl ProcessInstanceRepo for MemoryRepo {
 }
 
 #[async_trait]
-impl TokenRepo for MemoryRepo {
+impl TokenStore for MemoryRepo {
     async fn load_by_instance(&self, instance_id: &str) -> anyhow::Result<Vec<Token>> {
         Ok(self
             .instances
@@ -155,7 +160,12 @@ impl TokenRepo for MemoryRepo {
         Ok(true)
     }
 
-    async fn claim_token(&self, instance_id: &str, token_id: &str, version: u32) -> anyhow::Result<bool> {
+    async fn claim_token(
+        &self,
+        instance_id: &str,
+        token_id: &str,
+        version: u32,
+    ) -> anyhow::Result<bool> {
         let mut guard = self.instances.write().unwrap();
         let inst = match guard.get_mut(instance_id) {
             Some(i) => i,
@@ -218,7 +228,13 @@ impl OutboxRepo for MemoryRepo {
     }
 
     async fn mark_published(&self, id: &str) -> anyhow::Result<()> {
-        if let Some(ev) = self.outbox.write().unwrap().iter_mut().find(|ev| ev.id == id) {
+        if let Some(ev) = self
+            .outbox
+            .write()
+            .unwrap()
+            .iter_mut()
+            .find(|ev| ev.id == id)
+        {
             ev.status = "Published".to_string();
         }
         Ok(())
@@ -269,7 +285,7 @@ impl OutboxRepo for MemoryRepo {
 }
 
 #[async_trait]
-impl TimerRepo for MemoryRepo {
+impl TimerStore for MemoryRepo {
     async fn get_by_id(&self, id: &str) -> anyhow::Result<Option<TimerRecord>> {
         Ok(self.timers.read().unwrap().get(id).cloned())
     }
@@ -379,7 +395,10 @@ impl ExternalTaskStore for MemoryRepo {
             created_at: now.clone(),
             updated_at: now,
         };
-        self.external_tasks.write().unwrap().insert(task_id.clone(), row);
+        self.external_tasks
+            .write()
+            .unwrap()
+            .insert(task_id.clone(), row);
         Ok(task_id)
     }
 
@@ -404,7 +423,11 @@ impl ExternalTaskStore for MemoryRepo {
                 .collect()
         };
         order.sort_by(|a, b| a.1.cmp(&b.1));
-        let take: Vec<String> = order.into_iter().take(max_tasks).map(|(id, _)| id).collect();
+        let take: Vec<String> = order
+            .into_iter()
+            .take(max_tasks)
+            .map(|(id, _)| id)
+            .collect();
         let mut guard = self.external_tasks.write().unwrap();
         let mut out = vec![];
         for task_id in take {
@@ -427,7 +450,9 @@ impl ExternalTaskStore for MemoryRepo {
     ) -> anyhow::Result<()> {
         let now_secs = unix_secs();
         let mut guard = self.external_tasks.write().unwrap();
-        let r = guard.get_mut(task_id).ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        let r = guard
+            .get_mut(task_id)
+            .ok_or_else(|| anyhow::anyhow!("task not found"))?;
         if r.state != ExternalTaskState::Locked {
             anyhow::bail!("task not locked");
         }
@@ -457,7 +482,9 @@ impl ExternalTaskStore for MemoryRepo {
         _retry_after: Option<Duration>,
     ) -> anyhow::Result<()> {
         let mut guard = self.external_tasks.write().unwrap();
-        let r = guard.get_mut(task_id).ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        let r = guard
+            .get_mut(task_id)
+            .ok_or_else(|| anyhow::anyhow!("task not found"))?;
         if r.state != ExternalTaskState::Locked {
             anyhow::bail!("task not locked");
         }
@@ -529,7 +556,12 @@ mod tests {
         assert!(!task_id.is_empty());
 
         let tasks = repo
-            .fetch_and_lock("worker-1", &["payment".to_string()], 10, Duration::from_secs(30))
+            .fetch_and_lock(
+                "worker-1",
+                &["payment".to_string()],
+                10,
+                Duration::from_secs(30),
+            )
             .await
             .unwrap();
         assert_eq!(tasks.len(), 1);
@@ -557,9 +589,14 @@ mod tests {
             .await
             .unwrap();
 
-        repo.fetch_and_lock("worker-1", &["notify".to_string()], 10, Duration::from_secs(30))
-            .await
-            .unwrap();
+        repo.fetch_and_lock(
+            "worker-1",
+            &["notify".to_string()],
+            10,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
         repo.fail(&task_id, "worker-1", "timeout".to_string(), None)
             .await
             .unwrap();
@@ -567,9 +604,14 @@ mod tests {
         assert_eq!(task.state, ExternalTaskState::Ready);
         assert_eq!(task.retries, 1);
 
-        repo.fetch_and_lock("worker-1", &["notify".to_string()], 10, Duration::from_secs(30))
-            .await
-            .unwrap();
+        repo.fetch_and_lock(
+            "worker-1",
+            &["notify".to_string()],
+            10,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
         repo.fail(&task_id, "worker-1", "again".to_string(), None)
             .await
             .unwrap();
@@ -590,10 +632,15 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
         let n = repo.reclaim_expired_locks().await.unwrap();
         assert!(n >= 1);
-        let tasks = repo.fetch_and_lock("worker-2", &["job".to_string()], 10, Duration::from_secs(30))
+        let tasks = repo
+            .fetch_and_lock(
+                "worker-2",
+                &["job".to_string()],
+                10,
+                Duration::from_secs(30),
+            )
             .await
             .unwrap();
         assert_eq!(tasks.len(), 1);
     }
 }
-

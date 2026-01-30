@@ -17,13 +17,13 @@ impl EventHandler for ProcessStartHandler {
             return vec![];
         };
         info!(instance_id = %e.instance_id, process_id = %e.process_id, "process started");
-        let Some(process_repo) = ctx.process_repo.as_ref() else {
+        let Some(process_store) = ctx.process_store.as_ref() else {
             return vec![];
         };
-        let Some(process_def_repo) = ctx.process_def_repo.as_ref() else {
+        let Some(process_def_store) = ctx.process_def_store.as_ref() else {
             return vec![];
         };
-        let Some(def) = process_def_repo.load(&e.process_id).await.ok().flatten() else {
+        let Some(def) = process_def_store.load(&e.process_id).await.ok().flatten() else {
             return vec![];
         };
         let token_id = uuid::Uuid::new_v4().to_string();
@@ -46,7 +46,7 @@ impl EventHandler for ProcessStartHandler {
             state: InstanceState::Running,
             version: 0,
         };
-        let _ = process_repo.save(&instance).await;
+        let _ = process_store.save(&instance).await;
         vec![EngineEvent::TokenArrived(payloads::TokenArrived {
             instance_id: e.instance_id.clone(),
             token_id,

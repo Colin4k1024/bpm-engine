@@ -29,7 +29,9 @@ pub enum NodeType {
     },
     ExclusiveGateway,
     ParallelFork,
-    ParallelJoin { expected: usize },
+    ParallelJoin {
+        expected: usize,
+    },
 }
 
 #[derive(Debug, Clone)]

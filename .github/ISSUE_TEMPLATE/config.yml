@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/fanjia1024/bpm-engine/tree/master/docs
+    about: Browse docs (architecture, execution model, FAQ, SDK)
+  - name: Discussions
+    url: https://github.com/fanjia1024/bpm-engine/discussions
+    about: Ask questions and discuss ideas (if enabled)

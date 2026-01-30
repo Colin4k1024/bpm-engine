@@ -11,7 +11,7 @@ pub struct TimerRecord {
 }
 
 #[async_trait]
-pub trait TimerRepo: Send + Sync {
+pub trait TimerStore: Send + Sync {
     async fn get_by_id(&self, id: &str) -> anyhow::Result<Option<TimerRecord>>;
     async fn mark_fired(&self, id: &str) -> anyhow::Result<()>;
     async fn insert(&self, record: &TimerRecord) -> anyhow::Result<()>;

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use bpm_core::ProcessDefinition;
-use bpm_storage::ProcessDefinitionRepo;
+use bpm_storage::ProcessDefinitionStore;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -17,10 +17,7 @@ impl ProcessDefStore {
     }
 
     pub fn register(&self, def: ProcessDefinition) {
-        self.defs
-            .write()
-            .unwrap()
-            .insert(def.id.to_string(), def);
+        self.defs.write().unwrap().insert(def.id.to_string(), def);
     }
 }
 
@@ -31,7 +28,7 @@ impl Default for ProcessDefStore {
 }
 
 #[async_trait]
-impl ProcessDefinitionRepo for ProcessDefStore {
+impl ProcessDefinitionStore for ProcessDefStore {
     async fn load(&self, id: &str) -> anyhow::Result<Option<ProcessDefinition>> {
         Ok(self.defs.read().unwrap().get(id).cloned())
     }

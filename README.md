@@ -112,7 +112,7 @@ See [docs/invariants.md](docs/invariants.md) for details.
 External Workers (fetch / lock / complete via API)
 ```
 
-The persistence layer is the **single source of truth**. The default backend is **in-memory** (no database required for quick start). The engine can recover by re-running its schedulers. For a persistence-oriented deployment with PostgreSQL, see [docs/docs_recovery.md](docs/docs_recovery.md) and [docs/docs_database_schema.md](docs/docs_database_schema.md).
+The persistence layer is the **single source of truth**. The default backend is **in-memory** (no database required for quick start). The engine can recover by re-running its schedulers. For a persistence-oriented deployment with PostgreSQL, see [docs/recovery.md](docs/recovery.md) and [docs/database-schema.md](docs/database-schema.md).
 
 ---
 
@@ -236,7 +236,7 @@ Optional header: `x-tenant-id` for tenant isolation.
 ### Workspace crates
 
 - **bpm-core**: ProcessDefinition, NodeType (Start, End, UserTask, ExternalTask, gateways), Token, ProcessInstance, EngineEvent
-- **bpm-storage**: Async traits (ProcessInstanceRepo, TokenRepo, ExternalTaskStore, etc.)
+- **bpm-storage**: Async traits (ProcessInstanceStore, TokenStore, ExternalTaskStore, etc.)
 - **bpm-runtime**: BpmEngine, handlers, transition helpers
 - **bpm-adapter-memory**: MemoryRepo; ProcessDefStore for in-memory definitions
 - **bpm-bpmn**: BPMN 2.0 XML parser and compiler to ProcessDefinition
@@ -249,16 +249,19 @@ Using the engine as a library: depend on the crates above by path, build an [Eng
 
 ## Documentation
 
-- [Architecture Overview](docs/docs_architecture.md)
-- [Execution Model (Token & Concurrency)](docs/docs_execution_model.md)
+- [Architecture Overview](docs/architecture.md)
+- [Execution Model (Token & Concurrency)](docs/execution-model.md)
 - [Invariants](docs/invariants.md)
-- [Persistence & Recovery](docs/docs_recovery.md)
-- [Database Schema](docs/docs_database_schema.md)
+- [Persistence & Recovery](docs/recovery.md)
+- [Database Schema](docs/database-schema.md)
 - [Saga & Compensation](docs/docs_saga.md)
 - [Testing Strategy](docs/docs_testing_strategy.md)
-- [BPMN mapping](docs/docs_bpmn_mapping.md)
-- [API spec](docs/docs_api_spec.md)
-- [FAQ](docs/docs_faq.md)
+- [BPMN mapping](docs/bpmn-spec-mapping.md)
+- [API spec](docs/api-spec.md)
+- [FAQ](docs/faq.md)
+- [Cheat sheet](docs/cheat-sheet.md)
+- [Rust Worker SDK](docs/sdk-rust.md)
+- [Python SDK (planned)](docs/sdk-python.md)
 
 ---
 

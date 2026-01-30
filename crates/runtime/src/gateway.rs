@@ -18,7 +18,7 @@ impl GatewayEvaluator for ExclusiveGatewayEvaluator {
                 None => return vec![edge.target],
                 Some(EdgeCondition::Default) => default_target = Some(edge.target),
                 Some(EdgeCondition::VariableEq { key, value }) => {
-                    if variables.get(key).as_deref() == Some(value) {
+                    if variables.get(key) == Some(value) {
                         return vec![edge.target];
                     }
                 }

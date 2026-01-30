@@ -39,6 +39,7 @@ bpm-core = { path = "crates/core" }
 bpm-storage = { path = "crates/storage" }
 bpm-runtime = { path = "crates/runtime" }
 bpm-adapter-memory = { path = "crates/adapters/memory" }
+bpm-bpmn = { path = "crates/bpmn" }
 uuid = { version = "1.4", features = ["v4"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }

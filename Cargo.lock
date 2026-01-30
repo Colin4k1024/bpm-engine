@@ -163,6 +163,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "bpm-adapter-memory",
+ "bpm-bpmn",
  "bpm-core",
  "bpm-runtime",
  "bpm-storage",

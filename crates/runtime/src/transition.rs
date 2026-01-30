@@ -41,7 +41,7 @@ pub fn evaluate_exclusive_gateway(
             None => return Some(new_token(edge.target.to_string(), None)),
             Some(EdgeCondition::Default) => default_target = Some(edge.target),
             Some(EdgeCondition::VariableEq { key, value }) => {
-                if variables.get(key).as_deref() == Some(value) {
+                if variables.get(key) == Some(value) {
                     return Some(new_token(edge.target.to_string(), None));
                 }
             }
