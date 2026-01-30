@@ -8,5 +8,8 @@ bpm-core = { path = "../../core" }
 bpm-storage = { path = "../../storage" }
 anyhow = { workspace = true }
 async-trait = "0.1"
-tokio = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

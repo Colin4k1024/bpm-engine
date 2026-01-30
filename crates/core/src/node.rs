@@ -21,6 +21,12 @@ pub enum NodeType {
     End,
     ServiceTask(fn(&mut super::instance::ProcessInstance)),
     UserTask,
+    /// Pull-based external task: worker fetches, locks, completes/fails.
+    ExternalTask {
+        task_type: String,
+        retries: i32,
+        timeout_secs: u64,
+    },
     ExclusiveGateway,
     ParallelFork,
     ParallelJoin { expected: usize },

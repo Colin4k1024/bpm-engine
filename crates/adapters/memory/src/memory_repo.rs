@@ -1,28 +1,68 @@
-//! Unified in-memory store: ProcessInstance (with tokens), Outbox, Timer, ParallelJoin, Compensation.
+//! Unified in-memory store: ProcessInstance (with tokens), Outbox, Timer, ParallelJoin, Compensation, ExternalTask.
 //! Implements all storage traits for runtime EngineContext.
 
 use async_trait::async_trait;
-use bpm_core::{InstanceState, ProcessInstance, Token, TokenStatus};
+use bpm_core::{ExternalTask, ExternalTaskState, InstanceState, ProcessInstance, Token, TokenStatus};
 use bpm_storage::{
-    CompensationRecordRepo, CompensationRecordRow, OutboxEvent, OutboxRepo, ParallelJoinRepo,
-    ProcessInstanceRepo, TimerRecord, TimerRepo, TokenRepo,
+    CompensationRecordRepo, CompensationRecordRow, ExternalTaskStore, OutboxEvent, OutboxRepo,
+    ParallelJoinRepo, ProcessInstanceRepo, TimerRecord, TimerRepo, TokenRepo,
 };
 use std::collections::HashMap;
 use std::sync::RwLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn utc_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
     let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     format!("{}", d.as_secs())
 }
 
-/// Unified in-memory repo: instances (with tokens inside), outbox, timers, parallel_join, compensation.
+fn unix_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+}
+
+#[derive(Debug, Clone)]
+struct ExternalTaskRow {
+    task_id: String,
+    token_id: String,
+    process_instance_id: String,
+    task_type: String,
+    state: ExternalTaskState,
+    lock_owner: Option<String>,
+    lock_expire_at: Option<u64>,
+    retries: i32,
+    error_message: Option<String>,
+    variables: HashMap<String, String>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl ExternalTaskRow {
+    fn to_external_task(&self) -> ExternalTask {
+        ExternalTask {
+            task_id: self.task_id.clone(),
+            token_id: self.token_id.clone(),
+            process_instance_id: self.process_instance_id.clone(),
+            task_type: self.task_type.clone(),
+            state: self.state,
+            lock_owner: self.lock_owner.clone(),
+            lock_expire_at: self.lock_expire_at.map(|t| t.to_string()),
+            retries: self.retries,
+            error_message: self.error_message.clone(),
+            variables: self.variables.clone(),
+            created_at: Some(self.created_at.clone()),
+            updated_at: Some(self.updated_at.clone()),
+        }
+    }
+}
+
+/// Unified in-memory repo: instances (with tokens inside), outbox, timers, parallel_join, compensation, external_tasks.
 pub struct MemoryRepo {
     instances: RwLock<HashMap<String, ProcessInstance>>,
     outbox: RwLock<Vec<OutboxEvent>>,
     timers: RwLock<HashMap<String, TimerRecord>>,
     parallel_join: RwLock<HashMap<String, (u32, u32, bool)>>,
     compensation: RwLock<Vec<CompensationRecordRow>>,
+    external_tasks: RwLock<HashMap<String, ExternalTaskRow>>,
 }
 
 impl MemoryRepo {
@@ -33,6 +73,7 @@ impl MemoryRepo {
             timers: RwLock::new(HashMap::new()),
             parallel_join: RwLock::new(HashMap::new()),
             compensation: RwLock::new(Vec::new()),
+            external_tasks: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -307,6 +348,252 @@ impl CompensationRecordRepo for MemoryRepo {
             .collect();
         out.sort_by_key(|r| r.order);
         out
+    }
+}
+
+#[async_trait]
+impl ExternalTaskStore for MemoryRepo {
+    async fn create(
+        &self,
+        token_id: &str,
+        process_instance_id: &str,
+        task_type: &str,
+        retries: i32,
+        _timeout_secs: u64,
+        variables: HashMap<String, String>,
+    ) -> anyhow::Result<String> {
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let now = utc_now();
+        let _now_secs = unix_secs();
+        let row = ExternalTaskRow {
+            task_id: task_id.clone(),
+            token_id: token_id.to_string(),
+            process_instance_id: process_instance_id.to_string(),
+            task_type: task_type.to_string(),
+            state: ExternalTaskState::Ready,
+            lock_owner: None,
+            lock_expire_at: None,
+            retries,
+            error_message: None,
+            variables,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        self.external_tasks.write().unwrap().insert(task_id.clone(), row);
+        Ok(task_id)
+    }
+
+    async fn fetch_and_lock(
+        &self,
+        worker_id: &str,
+        task_types: &[String],
+        max_tasks: usize,
+        lock_duration: Duration,
+    ) -> anyhow::Result<Vec<ExternalTask>> {
+        let _ = self.reclaim_expired_locks().await?;
+        let expire_at = unix_secs() + lock_duration.as_secs();
+        let task_types: std::collections::HashSet<_> = task_types.iter().cloned().collect();
+        let mut order: Vec<(String, String)> = {
+            let guard = self.external_tasks.read().unwrap();
+            guard
+                .iter()
+                .filter(|(_, r)| {
+                    r.state == ExternalTaskState::Ready && task_types.contains(&r.task_type)
+                })
+                .map(|(id, r)| (id.clone(), r.created_at.clone()))
+                .collect()
+        };
+        order.sort_by(|a, b| a.1.cmp(&b.1));
+        let take: Vec<String> = order.into_iter().take(max_tasks).map(|(id, _)| id).collect();
+        let mut guard = self.external_tasks.write().unwrap();
+        let mut out = vec![];
+        for task_id in take {
+            if let Some(r) = guard.get_mut(&task_id) {
+                r.state = ExternalTaskState::Locked;
+                r.lock_owner = Some(worker_id.to_string());
+                r.lock_expire_at = Some(expire_at);
+                r.updated_at = utc_now();
+                out.push(r.to_external_task());
+            }
+        }
+        Ok(out)
+    }
+
+    async fn complete(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        variables: HashMap<String, String>,
+    ) -> anyhow::Result<()> {
+        let now_secs = unix_secs();
+        let mut guard = self.external_tasks.write().unwrap();
+        let r = guard.get_mut(task_id).ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        if r.state != ExternalTaskState::Locked {
+            anyhow::bail!("task not locked");
+        }
+        if r.lock_owner.as_deref() != Some(worker_id) {
+            anyhow::bail!("lock owner mismatch");
+        }
+        if let Some(exp) = r.lock_expire_at {
+            if exp <= now_secs {
+                anyhow::bail!("lock expired");
+            }
+        }
+        r.state = ExternalTaskState::Completed;
+        for (k, v) in variables {
+            r.variables.insert(k, v);
+        }
+        r.lock_owner = None;
+        r.lock_expire_at = None;
+        r.updated_at = utc_now();
+        Ok(())
+    }
+
+    async fn fail(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        error: String,
+        _retry_after: Option<Duration>,
+    ) -> anyhow::Result<()> {
+        let mut guard = self.external_tasks.write().unwrap();
+        let r = guard.get_mut(task_id).ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        if r.state != ExternalTaskState::Locked {
+            anyhow::bail!("task not locked");
+        }
+        if r.lock_owner.as_deref() != Some(worker_id) {
+            anyhow::bail!("lock owner mismatch");
+        }
+        r.retries -= 1;
+        r.error_message = Some(error);
+        r.lock_owner = None;
+        r.lock_expire_at = None;
+        r.updated_at = utc_now();
+        if r.retries > 0 {
+            r.state = ExternalTaskState::Ready;
+        } else {
+            r.state = ExternalTaskState::Failed;
+        }
+        Ok(())
+    }
+
+    async fn reclaim_expired_locks(&self) -> anyhow::Result<usize> {
+        let now_secs = unix_secs();
+        let mut guard = self.external_tasks.write().unwrap();
+        let mut n = 0;
+        for r in guard.values_mut() {
+            if r.state == ExternalTaskState::Locked {
+                if let Some(exp) = r.lock_expire_at {
+                    if exp <= now_secs {
+                        r.state = ExternalTaskState::Ready;
+                        r.lock_owner = None;
+                        r.lock_expire_at = None;
+                        r.updated_at = utc_now();
+                        n += 1;
+                    }
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    async fn get(&self, task_id: &str) -> anyhow::Result<Option<ExternalTask>> {
+        Ok(self
+            .external_tasks
+            .read()
+            .unwrap()
+            .get(task_id)
+            .map(|r| r.to_external_task()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn external_task_store_create_fetch_lock_complete() {
+        let repo = MemoryRepo::new();
+        let task_id = repo
+            .create(
+                "token-1",
+                "instance-1",
+                "payment",
+                3,
+                60,
+                HashMap::from([("amount".to_string(), "100".to_string())]),
+            )
+            .await
+            .unwrap();
+        assert!(!task_id.is_empty());
+
+        let tasks = repo
+            .fetch_and_lock("worker-1", &["payment".to_string()], 10, Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, task_id);
+        assert_eq!(tasks[0].state, ExternalTaskState::Locked);
+        assert_eq!(tasks[0].lock_owner.as_deref(), Some("worker-1"));
+
+        repo.complete(
+            &task_id,
+            "worker-1",
+            HashMap::from([("result".to_string(), "ok".to_string())]),
+        )
+        .await
+        .unwrap();
+
+        let task = repo.get(&task_id).await.unwrap().unwrap();
+        assert_eq!(task.state, ExternalTaskState::Completed);
+    }
+
+    #[tokio::test]
+    async fn external_task_store_fail_retry_then_fail() {
+        let repo = MemoryRepo::new();
+        let task_id = repo
+            .create("token-1", "instance-1", "notify", 2, 60, HashMap::new())
+            .await
+            .unwrap();
+
+        repo.fetch_and_lock("worker-1", &["notify".to_string()], 10, Duration::from_secs(30))
+            .await
+            .unwrap();
+        repo.fail(&task_id, "worker-1", "timeout".to_string(), None)
+            .await
+            .unwrap();
+        let task = repo.get(&task_id).await.unwrap().unwrap();
+        assert_eq!(task.state, ExternalTaskState::Ready);
+        assert_eq!(task.retries, 1);
+
+        repo.fetch_and_lock("worker-1", &["notify".to_string()], 10, Duration::from_secs(30))
+            .await
+            .unwrap();
+        repo.fail(&task_id, "worker-1", "again".to_string(), None)
+            .await
+            .unwrap();
+        let task = repo.get(&task_id).await.unwrap().unwrap();
+        assert_eq!(task.state, ExternalTaskState::Failed);
+    }
+
+    #[tokio::test]
+    async fn external_task_store_reclaim_expired_locks() {
+        let repo = MemoryRepo::new();
+        let _ = repo
+            .create("token-1", "instance-1", "job", 1, 60, HashMap::new())
+            .await
+            .unwrap();
+        repo.fetch_and_lock("worker-1", &["job".to_string()], 10, Duration::from_secs(0))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let n = repo.reclaim_expired_locks().await.unwrap();
+        assert!(n >= 1);
+        let tasks = repo.fetch_and_lock("worker-2", &["job".to_string()], 10, Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
     }
 }
 

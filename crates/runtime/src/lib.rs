@@ -16,6 +16,7 @@ pub mod token_arrived_handler;
 pub use engine::*;
 pub use scheduler::*;
 pub use executor::*;
+#[allow(unused_imports)]
 pub use dispatcher::*;
 pub use handler::*;
 pub use pump::*;

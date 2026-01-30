@@ -3,6 +3,7 @@ use bpm_storage::{TimerRecord, TimerRepo};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+#[allow(dead_code)]
 fn utc_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();

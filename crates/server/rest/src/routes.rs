@@ -1,11 +1,14 @@
-//! REST API v1 routes: process-instances, tasks.
+//! REST API v1 routes: process-instances, tasks, external-tasks.
 
-use bpm_core::{payloads, EngineEvent, InstanceState, NodeType, ProcessInstance, TokenStatus};
-use bpm_runtime::EngineContext;
-use bpm_storage::{
-    CompensationRecordRepo, ParallelJoinRepo, ProcessDefinitionRepo, ProcessInstanceRepo,
-    TimerRepo, TokenRepo,
+use bpm_core::{
+    payloads, EngineEvent, ExternalTaskState, InstanceState, NodeType, ProcessInstance, TokenStatus,
 };
+use bpm_runtime::{transition, EngineContext};
+use bpm_storage::{
+    CompensationRecordRepo, ExternalTaskStore, ParallelJoinRepo, ProcessDefinitionRepo,
+    ProcessInstanceRepo, TimerRepo, TokenRepo,
+};
+use std::time::Duration;
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -17,6 +20,44 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::state::AppState;
+
+// --- External task API (plan §6) ---
+
+#[derive(Deserialize)]
+pub struct FetchAndLockRequest {
+    pub worker_id: String,
+    pub task_types: Vec<String>,
+    #[serde(default = "default_max_tasks")]
+    pub max_tasks: u32,
+    pub lock_duration_ms: u64,
+}
+
+fn default_max_tasks() -> u32 {
+    10
+}
+
+#[derive(Serialize)]
+pub struct ExternalTaskResponse {
+    pub task_id: String,
+    pub token_id: String,
+    pub process_instance_id: String,
+    pub task_type: String,
+    pub variables: HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+pub struct ExternalTaskCompleteRequest {
+    pub worker_id: String,
+    #[serde(default)]
+    pub variables: HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+pub struct ExternalTaskFailRequest {
+    pub worker_id: String,
+    pub error: String,
+    pub retry_after_ms: Option<u64>,
+}
 
 fn tenant_from_headers(headers: &HeaderMap) -> Option<String> {
     headers
@@ -54,8 +95,9 @@ fn build_ctx(state: &AppState, tenant_id: Option<String>) -> EngineContext {
         process_def_repo: Some(def_store.clone() as Arc<dyn ProcessDefinitionRepo>),
         parallel_join_repo: Some(repo.clone() as Arc<dyn ParallelJoinRepo>),
         timer_repo: Some(repo.clone() as Arc<dyn TimerRepo>),
-        compensation_repo: Some(repo as Arc<dyn CompensationRecordRepo>),
+        compensation_repo: Some(repo.clone() as Arc<dyn CompensationRecordRepo>),
         outbox_repo: None,
+        external_task_repo: Some(repo.clone() as Arc<dyn ExternalTaskStore>),
         tenant_id,
     }
 }
@@ -186,7 +228,7 @@ pub async fn list_tasks(
             };
             let task_type = match &node.node_type {
                 NodeType::UserTask => "user",
-                NodeType::ServiceTask(_) => "external",
+                NodeType::ServiceTask(_) | NodeType::ExternalTask { .. } => "external",
                 _ => continue,
             };
             if let Some(filter) = type_filter {
@@ -243,6 +285,230 @@ pub async fn complete_task_by_id(
     }))
 }
 
+/// POST /api/v1/external-tasks/fetch-and-lock
+pub async fn external_task_fetch_and_lock(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<FetchAndLockRequest>,
+) -> Result<Json<Vec<ExternalTaskResponse>>, (StatusCode, Json<ErrorResponse>)> {
+    let repo = Arc::clone(&state.repo);
+    let _ = repo.reclaim_expired_locks().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    let lock_duration = Duration::from_millis(body.lock_duration_ms);
+    let max_tasks = body.max_tasks as usize;
+    let tasks = repo
+        .fetch_and_lock(
+            &body.worker_id,
+            &body.task_types,
+            max_tasks,
+            lock_duration,
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e.to_string() }),
+            )
+        })?;
+    let out: Vec<ExternalTaskResponse> = tasks
+        .into_iter()
+        .map(|t| ExternalTaskResponse {
+            task_id: t.task_id,
+            token_id: t.token_id,
+            process_instance_id: t.process_instance_id,
+            task_type: t.task_type,
+            variables: t.variables,
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+/// POST /api/v1/external-tasks/:task_id/complete
+pub async fn external_task_complete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+    Json(body): Json<ExternalTaskCompleteRequest>,
+) -> Result<Json<CompleteTaskResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let repo = Arc::clone(&state.repo);
+    repo.complete(&task_id, &body.worker_id, body.variables.clone())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { error: e.to_string() }),
+            )
+        })?;
+    let task = repo.get(&task_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e.to_string() }),
+        )
+    })?.ok_or((
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: format!("task not found after complete: {}", task_id),
+        }),
+    ))?;
+    let tenant_id = tenant_from_headers(&headers);
+    let mut ctx = build_ctx(state.as_ref(), tenant_id);
+    let process_repo = ctx.process_repo.as_ref().ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "process_repo not configured".to_string(),
+        }),
+    ))?;
+    let process_def_repo = ctx.process_def_repo.as_ref().ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "process_def_repo not configured".to_string(),
+        }),
+    ))?;
+    let mut instance = process_repo
+        .load(&task.process_instance_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e.to_string() }),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("instance not found: {}", task.process_instance_id),
+            }),
+        ))?;
+    let token = instance
+        .tokens
+        .iter()
+        .find(|t| t.id == task.token_id)
+        .cloned();
+    let node_id = token
+        .as_ref()
+        .map(|t| t.node_id.clone())
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("token not found in instance: {}", task.token_id),
+            }),
+        ))?;
+    let def = process_def_repo
+        .load(&instance.process_def_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e.to_string() }),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("process def not found: {}", instance.process_def_id),
+            }),
+        ))?;
+    let node = def.nodes.get(node_id.as_str()).ok_or((
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: format!("node not found: {}", node_id),
+        }),
+    ))?;
+    instance.tokens.retain(|t| t.id != task.token_id);
+    let new_tokens = transition::move_token(node);
+    for (k, v) in body.variables {
+        instance.variables.insert(k, v);
+    }
+    instance.tokens.extend(new_tokens.clone());
+    process_repo.save(&instance).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e.to_string() }),
+        )
+    })?;
+    for t in &new_tokens {
+        let ev = EngineEvent::TokenArrived(payloads::TokenArrived {
+            instance_id: task.process_instance_id.clone(),
+            token_id: t.id.clone(),
+            node_id: t.node_id.clone(),
+        });
+        state.engine.run_async(ev, &mut ctx).await;
+    }
+    Ok(Json(CompleteTaskResponse {
+        status: "COMPLETED".to_string(),
+    }))
+}
+
+/// POST /api/v1/external-tasks/:task_id/fail
+pub async fn external_task_fail(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+    Json(body): Json<ExternalTaskFailRequest>,
+) -> Result<Json<CompleteTaskResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let repo = Arc::clone(&state.repo);
+    let retry_after = body
+        .retry_after_ms
+        .map(Duration::from_millis);
+    repo.fail(
+        &task_id,
+        &body.worker_id,
+        body.error.clone(),
+        retry_after,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse { error: e.to_string() }),
+        )
+    })?;
+    let task = repo.get(&task_id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e.to_string() }),
+        )
+    })?.ok_or((
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: format!("task not found after fail: {}", task_id),
+        }),
+    ))?;
+    if task.state == ExternalTaskState::Failed {
+        let tenant_id = None::<String>;
+        let mut ctx = build_ctx(state.as_ref(), tenant_id);
+        let inst = state
+            .repo
+            .load(&task.process_instance_id)
+            .await
+            .ok()
+            .flatten();
+        let node_id = inst
+            .as_ref()
+            .and_then(|i| {
+                i.tokens
+                    .iter()
+                    .find(|t| t.id == task.token_id)
+                    .map(|t| t.node_id.clone())
+            })
+            .unwrap_or_default();
+        let ev = EngineEvent::TokenFailed(payloads::TokenFailed {
+            instance_id: task.process_instance_id.clone(),
+            token_id: task.token_id.clone(),
+            node_id,
+            reason: task.error_message.unwrap_or_else(|| body.error),
+        });
+        state.engine.run_async(ev, &mut ctx).await;
+    }
+    Ok(Json(CompleteTaskResponse {
+        status: "FAILED".to_string(),
+    }))
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .nest(
@@ -252,6 +518,9 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .route("/process-instances/:id", get(get_instance))
                 .route("/tasks", get(list_tasks))
                 .route("/tasks/:task_id/complete", post(complete_task_by_id))
+                .route("/external-tasks/fetch-and-lock", post(external_task_fetch_and_lock))
+                .route("/external-tasks/:task_id/complete", post(external_task_complete))
+                .route("/external-tasks/:task_id/fail", post(external_task_fail))
                 .with_state(state),
         )
 }

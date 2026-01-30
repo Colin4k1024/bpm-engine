@@ -2,9 +2,7 @@
 //! Handles ParallelFork / ParallelJoin.
 
 use async_trait::async_trait;
-use bpm_core::{
-    payloads, EngineEvent, InstanceState, NodeType, ProcessInstance, Token, TokenStatus,
-};
+use bpm_core::{payloads, EngineEvent, InstanceState, NodeType, TokenStatus};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use tracing::{debug, warn};
@@ -95,6 +93,26 @@ impl EventHandler for TokenArrivedHandler {
                 instance.tokens.extend(new_tokens);
             }
             NodeType::UserTask => {
+                instance.tokens[token_idx].status = TokenStatus::Waiting;
+            }
+            NodeType::ExternalTask {
+                task_type,
+                retries,
+                timeout_secs,
+            } => {
+                if let Some(ref ext_store) = ctx.external_task_repo {
+                    let variables = instance.variables.clone();
+                    let _ = ext_store
+                        .create(
+                            &e.token_id,
+                            &e.instance_id,
+                            task_type,
+                            *retries,
+                            *timeout_secs,
+                            variables,
+                        )
+                        .await;
+                }
                 instance.tokens[token_idx].status = TokenStatus::Waiting;
             }
             NodeType::ExclusiveGateway => {
