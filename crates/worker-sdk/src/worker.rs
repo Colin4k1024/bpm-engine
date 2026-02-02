@@ -78,7 +78,6 @@ impl Worker {
                 continue;
             }
             let mut backoff = fetch_retry_backoff;
-            let mut last_err = None;
             for attempt in 0..=fetch_retry_max {
                 match self
                     .client
@@ -96,7 +95,6 @@ impl Worker {
                         break;
                     }
                     Err(e) => {
-                        last_err = Some(e);
                         if attempt < fetch_retry_max {
                             let secs = backoff.as_secs().min(BACKOFF_CAP_SECS);
                             warn!(
@@ -110,7 +108,7 @@ impl Worker {
                                 Duration::from_secs(BACKOFF_CAP_SECS),
                             );
                         } else {
-                            warn!(error = %last_err.as_ref().unwrap(), "fetch_and_lock failed after retries");
+                            warn!(error = %e, "fetch_and_lock failed after retries");
                         }
                     }
                 }
@@ -139,7 +137,6 @@ impl Worker {
                 continue;
             }
             let mut backoff = fetch_retry_backoff;
-            let mut last_err = None;
             for attempt in 0..=fetch_retry_max {
                 if shutdown.load(Ordering::Relaxed) {
                     return;
@@ -160,7 +157,6 @@ impl Worker {
                         break;
                     }
                     Err(e) => {
-                        last_err = Some(e);
                         if attempt < fetch_retry_max {
                             let secs = backoff.as_secs().min(BACKOFF_CAP_SECS);
                             warn!(
@@ -174,7 +170,7 @@ impl Worker {
                                 Duration::from_secs(BACKOFF_CAP_SECS),
                             );
                         } else {
-                            warn!(error = %last_err.as_ref().unwrap(), "fetch_and_lock failed after retries");
+                            warn!(error = %e, "fetch_and_lock failed after retries");
                         }
                     }
                 }
