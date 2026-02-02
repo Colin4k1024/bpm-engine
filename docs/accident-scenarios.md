@@ -4,6 +4,42 @@ These scenarios answer: **After something goes wrong, can the engine show exactl
 
 ---
 
+## Accident-driven example: payment timeout → worker restart → idempotent complete
+
+**Scenario:** The payment task times out (or the worker crashes) before completing; after restart, the same task is fetched again and completed once. We show that history is correct and invariants hold.
+
+**What happened (timeline):**
+
+| Step | Who | Action |
+|------|-----|--------|
+| 1 | Client | `POST /process-instances` — start payment-flow |
+| 2 | Worker A | `POST .../external-tasks/fetch-and-lock` — locks payment task |
+| 3 | — | Worker A is killed (e.g. `kill -9`) or times out; does not call complete/fail |
+| 4 | Engine | Lease expires (or reclaim); task becomes available again |
+| 5 | Worker B (or A restarted) | `POST .../external-tasks/fetch-and-lock` — locks same task |
+| 6 | Worker B | `POST .../external-tasks/:id/complete` — completes once (idempotent handler) |
+
+**What history looks like:**  
+`GET /api/v1/process-instances/:id/history` returns events in order, for example:
+
+- `ProcessStarted`
+- `TokenArrived` (at payment node)
+- `ExternalTaskLocked` (worker A)
+- (after expiry) `ExternalTaskLocked` (worker B) — same task, new lease
+- `ExternalTaskCompleted` — **exactly once**
+- `TokenCompleted`, then `ProcessCompleted`
+
+There is no duplicate `ExternalTaskCompleted` and no duplicate `TokenCompleted` for the same token.
+
+**Why invariants hold:**
+
+- **Token completed once:** The engine records completion only when the current lease holder calls complete; a second complete from a different worker returns 4xx with `X-Invariant-Violation: ExternalTaskLeaseConflict`.
+- **External task single owner:** Only the worker that holds the lease can complete; history reflects one Locked (B) and one Completed for that task.
+
+This single-page story is the core “accident → history → invariant” narrative. For more scenarios, see below.
+
+---
+
 ## 1. Payment + timeout + retry + completion
 
 **Question:** Payment task times out or fails; we retry and then complete. Can we see the full lifecycle?

@@ -4,6 +4,12 @@ Short-term and long-term direction for the BPM engine, aligned with [opti.md](op
 
 ---
 
+## Stability window (current phase)
+
+Until we have real usage feedback, we **do not** add new BPMN features, performance optimizations, UI, or multi-language SDKs. New ideas belong in **issues**; priority is to observe where users get stuck. This phase is **convergence, not expansion**.
+
+---
+
 ## Current (v0.1)
 
 * Core execution semantics: token state machine, event-driven handlers, CAS claim

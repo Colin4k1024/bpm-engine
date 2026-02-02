@@ -343,6 +343,14 @@ message FailRequest {
 
 ## 8. API & Semantic Stability
 
+### API Stability Policy
+
+- **Stable**: The APIs and semantics listed in this section (and in §9 for History/Trace) are committed to backward-compatible changes only (new fields, new endpoints, new optional parameters).
+- **Experimental**: Replay API, UI/Inspector, and any endpoint not listed in the stable set may be adjusted or deprecated; backward compatibility is not guaranteed.
+- **Breaking changes**: Allowed only on a **major version** bump; the stable set’s semantics and response shapes will not be broken before then.
+
+---
+
 From **v0.1.0** onward, the following API and semantics are committed to **no breaking changes** (backward-compatible):
 
 **Stable (v0.1.0)**

@@ -1,8 +1,8 @@
 # bpm-engine
 
-A native Rust BPM engine with strong correctness guarantees.
+**A correctness-first workflow execution kernel in Rust, designed for deterministic replay and crash-safe long-running processes.**
 
-This project focuses on **execution semantics, persistence correctness, and crash safety**, rather than UI or low-code features. It is designed as a **token-driven, persistence-first BPM engine** with deterministic replay and formally defined invariants.
+This project focuses on **execution semantics, persistence correctness, and crash safety**, rather than UI or low-code features. It is designed as a **token-driven, persistence-first BPM engine** with formally defined invariants.
 
 ---
 
@@ -96,6 +96,8 @@ Timers are persistent and scheduler-driven:
 - **Aggregated trace**: `GET /api/v1/process-instances/:id/trace` — token timelines and external-task history for a high-level view.
 
 **History API Semantics:** Events are append-only; sequence is globally ordered per instance; replay reproduces the same token state; schema is backward-compatible once released. API stability and History/Trace semantic guarantees: see [api-spec.md](docs/api-spec.md) (§ API & Semantic Stability, § History & Trace Semantic Guarantees).
+
+**Crash recovery verification:** To verify correctness after kill → restart (no duplicate completion, ordered history), follow [deploy/README.md](deploy/README.md) and run `./deploy/verify-recovery.sh` from the repo root. For an accident-driven narrative (payment timeout → worker restart → idempotent complete, and why invariants hold), see [docs/accident-scenarios.md](docs/accident-scenarios.md).
 
 ### Invariants
 
