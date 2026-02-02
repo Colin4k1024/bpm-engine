@@ -72,17 +72,34 @@ pub struct ExternalTaskFailRequest {
     pub retry_after_ms: Option<u64>,
 }
 
-/// Build 4xx error response; adds X-Invariant-Violation header when error is InvariantViolation.
+/// Build 4xx error response; adds X-Invariant-Violation header and body field when error is InvariantViolation.
 fn external_task_error_response(e: anyhow::Error) -> Response {
-    let mut res = (
-        StatusCode::BAD_REQUEST,
-        Json(ErrorResponse {
-            error: e.to_string(),
-        }),
-    )
-        .into_response();
-    if let Some(inv) = e.downcast_ref::<InvariantViolation>() {
-        if let Ok(hv) = HeaderValue::try_from(inv.kind.to_string().as_str()) {
+    let (invariant_violation, body) = if let Some(inv) = e.downcast_ref::<InvariantViolation>() {
+        tracing::warn!(
+            kind = %inv.kind,
+            context = %inv.context,
+            "invariant violation"
+        );
+        let kind_str = inv.kind.to_string();
+        (
+            Some(kind_str.clone()),
+            ErrorResponse {
+                error: e.to_string(),
+                invariant_violation: Some(kind_str),
+            },
+        )
+    } else {
+        (
+            None,
+            ErrorResponse {
+                error: e.to_string(),
+                invariant_violation: None,
+            },
+        )
+    };
+    let mut res = (StatusCode::BAD_REQUEST, Json(body)).into_response();
+    if let Some(ref kind) = invariant_violation {
+        if let Ok(hv) = HeaderValue::try_from(kind.as_str()) {
             res.headers_mut().insert("X-Invariant-Violation", hv);
         }
     }
@@ -202,6 +219,18 @@ pub struct TaskListItem {
 #[derive(Serialize)]
 pub struct ErrorResponse {
     pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invariant_violation: Option<String>,
+}
+
+impl ErrorResponse {
+    /// Build error response without invariant violation (for non-invariant 4xx/5xx).
+    pub fn new(msg: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            invariant_violation: None,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -328,9 +357,10 @@ pub async fn get_instance(
         })),
         None => Err((
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("process instance not found: {}", id),
-            }),
+            Json(ErrorResponse::new(format!(
+                "process instance not found: {}",
+                id
+            ))),
         )),
     }
 }
@@ -419,9 +449,10 @@ pub async fn get_instance_trace(
     let repo = Arc::clone(&state.repo);
     let inst = repo.load(&id).await.ok().flatten().ok_or((
         StatusCode::NOT_FOUND,
-        Json(ErrorResponse {
-            error: format!("process instance not found: {}", id),
-        }),
+        Json(ErrorResponse::new(format!(
+            "process instance not found: {}",
+            id
+        ))),
     ))?;
     let instance_response = InstanceStateResponse {
         instance_id: inst.id.clone(),
@@ -435,9 +466,7 @@ pub async fn get_instance_trace(
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
+                Json(ErrorResponse::new(e.to_string())),
             )
         })?;
     let token_ids_in_instance: std::collections::HashMap<
@@ -568,9 +597,10 @@ pub async fn get_process_definition(
 ) -> Result<Json<ProcessDefinitionView>, (StatusCode, Json<ErrorResponse>)> {
     let def = state.def_store.load(&id).await.ok().flatten().ok_or((
         StatusCode::NOT_FOUND,
-        Json(ErrorResponse {
-            error: format!("process definition not found: {}", id),
-        }),
+        Json(ErrorResponse::new(format!(
+            "process definition not found: {}",
+            id
+        ))),
     ))?;
     Ok(Json(process_definition_to_view(&def)))
 }
@@ -589,9 +619,7 @@ pub async fn get_instance_history(
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
+                Json(ErrorResponse::new(e.to_string())),
             )
         })?;
     events.sort_by(|a, b| {
@@ -687,9 +715,7 @@ pub async fn complete_task_by_id(
 ) -> Result<Json<CompleteTaskResponse>, (StatusCode, Json<ErrorResponse>)> {
     let (instance_id, node_id) = parse_task_id(&task_id).ok_or((
         StatusCode::BAD_REQUEST,
-        Json(ErrorResponse {
-            error: format!("invalid task_id: {}", task_id),
-        }),
+        Json(ErrorResponse::new(format!("invalid task_id: {}", task_id))),
     ))?;
     let tenant_id = tenant_from_headers(&headers);
     let mut ctx = build_ctx(state.as_ref(), tenant_id);
@@ -714,9 +740,7 @@ pub async fn external_task_fetch_and_lock(
     let _ = repo.reclaim_expired_locks().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
+            Json(ErrorResponse::new(e.to_string())),
         )
     })?;
     let lock_duration = Duration::from_millis(body.lock_duration_ms);
@@ -727,9 +751,7 @@ pub async fn external_task_fetch_and_lock(
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
+                Json(ErrorResponse::new(e.to_string())),
             )
         })?;
     let occurred_at = occurred_at_now();
@@ -780,18 +802,17 @@ pub async fn external_task_complete(
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
+                Json(ErrorResponse::new(e.to_string())),
             )
                 .into_response()
         })?
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: format!("task not found after complete: {}", task_id),
-                }),
+                Json(ErrorResponse::new(format!(
+                    "task not found after complete: {}",
+                    task_id
+                ))),
             )
                 .into_response()
         })?;
@@ -815,18 +836,18 @@ pub async fn external_task_complete(
     let process_store = ctx.process_store.as_ref().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "process_store not configured".to_string(),
-            }),
+            Json(ErrorResponse::new(
+                "process_store not configured".to_string(),
+            )),
         )
             .into_response()
     })?;
     let process_def_store = ctx.process_def_store.as_ref().ok_or_else(|| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "process_def_store not configured".to_string(),
-            }),
+            Json(ErrorResponse::new(
+                "process_def_store not configured".to_string(),
+            )),
         )
             .into_response()
     })?;
@@ -836,18 +857,17 @@ pub async fn external_task_complete(
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
+                Json(ErrorResponse::new(e.to_string())),
             )
                 .into_response()
         })?
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: format!("instance not found: {}", task.process_instance_id),
-                }),
+                Json(ErrorResponse::new(format!(
+                    "instance not found: {}",
+                    task.process_instance_id
+                ))),
             )
                 .into_response()
         })?;
@@ -859,9 +879,10 @@ pub async fn external_task_complete(
     let node_id = token.as_ref().map(|t| t.node_id.clone()).ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("token not found in instance: {}", task.token_id),
-            }),
+            Json(ErrorResponse::new(format!(
+                "token not found in instance: {}",
+                task.token_id
+            ))),
         )
             .into_response()
     })?;
@@ -871,27 +892,24 @@ pub async fn external_task_complete(
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
+                Json(ErrorResponse::new(e.to_string())),
             )
                 .into_response()
         })?
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: format!("process def not found: {}", instance.process_def_id),
-                }),
+                Json(ErrorResponse::new(format!(
+                    "process def not found: {}",
+                    instance.process_def_id
+                ))),
             )
                 .into_response()
         })?;
     let node = def.nodes.get(node_id.as_str()).ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("node not found: {}", node_id),
-            }),
+            Json(ErrorResponse::new(format!("node not found: {}", node_id))),
         )
             .into_response()
     })?;
@@ -904,9 +922,7 @@ pub async fn external_task_complete(
     process_store.save(&instance).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
+            Json(ErrorResponse::new(e.to_string())),
         )
             .into_response()
     })?;
@@ -940,18 +956,17 @@ pub async fn external_task_fail(
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
+                Json(ErrorResponse::new(e.to_string())),
             )
                 .into_response()
         })?
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: format!("task not found after fail: {}", task_id),
-                }),
+                Json(ErrorResponse::new(format!(
+                    "task not found after fail: {}",
+                    task_id
+                ))),
             )
                 .into_response()
         })?;
@@ -1086,18 +1101,17 @@ pub async fn create_replay(
 ) -> Result<(StatusCode, Json<ReplayCreateResponse>), (StatusCode, Json<ErrorResponse>)> {
     let _inst = state.repo.load(&id).await.ok().flatten().ok_or((
         StatusCode::NOT_FOUND,
-        Json(ErrorResponse {
-            error: format!("process instance not found: {}", id),
-        }),
+        Json(ErrorResponse::new(format!(
+            "process instance not found: {}",
+            id
+        ))),
     ))?;
     let events = HistoryRepo::list_by_instance(state.repo.as_ref(), &id, None, None)
         .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
+                Json(ErrorResponse::new(e.to_string())),
             )
         })?;
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -1144,15 +1158,13 @@ pub async fn replay_step(
         let guard = state.replay_sessions.read().unwrap();
         let session = guard.get(&session_id).ok_or((
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "replay session not found or expired".to_string(),
-            }),
+            Json(ErrorResponse::new(
+                "replay session not found or expired".to_string(),
+            )),
         ))?;
         let ev = session.current_event().ok_or((
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "no more events to step".to_string(),
-            }),
+            Json(ErrorResponse::new("no more events to step".to_string())),
         ))?;
         (ev.clone(), session.snapshot.clone())
     };
@@ -1165,9 +1177,7 @@ pub async fn replay_step(
     .await
     .ok_or((
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-            error: "replay apply failed".to_string(),
-        }),
+        Json(ErrorResponse::new("replay apply failed".to_string())),
     ))?;
     let token_id = ev_clone
         .payload
@@ -1189,9 +1199,9 @@ pub async fn replay_step(
         let mut guard = state.replay_sessions.write().unwrap();
         let session = guard.get_mut(&session_id).ok_or((
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "replay session not found or expired".to_string(),
-            }),
+            Json(ErrorResponse::new(
+                "replay session not found or expired".to_string(),
+            )),
         ))?;
         session.snapshot = Some(new_snapshot.clone());
         session.cursor += 1;
@@ -1215,9 +1225,9 @@ pub async fn replay_seek(
         let guard = state.replay_sessions.read().unwrap();
         let session = guard.get(&session_id).ok_or((
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "replay session not found or expired".to_string(),
-            }),
+            Json(ErrorResponse::new(
+                "replay session not found or expired".to_string(),
+            )),
         ))?;
         let cursor = body.cursor.min(session.events.len());
         session.events[..cursor].to_vec()
@@ -1253,9 +1263,9 @@ pub async fn get_replay_snapshot(
     let guard = state.replay_sessions.read().unwrap();
     let session = guard.get(&session_id).ok_or((
         StatusCode::NOT_FOUND,
-        Json(ErrorResponse {
-            error: "replay session not found or expired".to_string(),
-        }),
+        Json(ErrorResponse::new(
+            "replay session not found or expired".to_string(),
+        )),
     ))?;
     let (completed, tokens) = match &session.snapshot {
         Some(i) => (

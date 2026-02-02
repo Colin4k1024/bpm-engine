@@ -17,6 +17,7 @@ bpm-engine-adapter-memory = { path = "../../adapters/memory", version = "0.2.0" 
 bpm-engine-bpmn = { path = "../../bpmn", version = "0.2.0" }
 anyhow = { workspace = true }
 axum = "0.7"
+tracing = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }

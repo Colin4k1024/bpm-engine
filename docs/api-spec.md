@@ -341,11 +341,94 @@ message FailRequest {
 
 ---
 
-## 8. Relationship to Other Docs
+## 8. API & Semantic Stability
+
+From **v0.1.0** onward, the following API and semantics are committed to **no breaking changes** (backward-compatible):
+
+**Stable (v0.1.0)**
+
+- `POST /api/v1/process-instances` — start instance
+- `GET /api/v1/process-instances/:id` — get instance state
+- `GET /api/v1/process-instances/:id/history` — execution history (response: `instance_id` + `events[]` with `sequence`, `category`, `occurred_at`, `payload`)
+- `GET /api/v1/process-instances/:id/trace` — aggregated trace
+- External-task APIs: `POST .../external-tasks/fetch-and-lock`, `.../complete`, `.../fail`
+- **History API semantics**: Events are append-only; sequence is globally ordered per process instance; replay produces the same token state; response schema is backward-compatible once released.
+- **Invariant violations**: REST 4xx for invariant violations include `X-Invariant-Violation` header; the header value (kind name) is part of the stable contract.
+
+**May evolve**
+
+- Replay API (session/step/seek), UI/Inspector, and SDK helper interfaces (e.g. future Python SDK) may be extended or adjusted in later versions; they do not affect the stable set above.
+
+---
+
+## 9. History & Trace Semantic Guarantees
+
+This section defines the **semantic contract** of the History and Trace APIs.
+These guarantees are **intentional design commitments** and should be considered stable once released.
+
+### History Events
+
+The History API exposes a sequence of immutable execution events emitted by the engine.
+
+**Semantic guarantees:**
+
+* **Append-only**
+  History events are never modified or deleted once written.
+
+* **Globally ordered per process instance**
+  Each event has a monotonically increasing `sequence` number that defines a total order within the same process instance.
+
+* **Causally consistent**
+  The order of events reflects the actual execution order of token transitions, external task lifecycle changes, and instance-level state changes.
+
+* **Deterministic replay**
+  Replaying history events in sequence order must reproduce the same token state graph and final instance state.
+
+* **Persistence-first**
+  Every history event corresponds to a persisted state transition; no in-memory-only execution steps are emitted.
+
+### Trace API
+
+The Trace API provides a **derived, read-only view** over the underlying history events.
+
+**Semantic guarantees:**
+
+* Traces are computed exclusively from history events.
+* Traces do not introduce new execution semantics.
+* Multiple trace representations may exist for the same history sequence.
+* Trace output format may evolve, but **must remain semantically consistent** with history.
+
+### Stability & Compatibility
+
+* History event semantics are **backward-compatible once released**.
+* New event types may be added, but existing event meanings will not change.
+* Clients may rely on the History API for:
+
+  * Auditing
+  * Debugging
+  * Post-mortem analysis
+  * Deterministic replay and verification
+
+Breaking changes to history semantics require a **major version change**.
+
+### Non-Goals
+
+The History and Trace APIs are **not intended** to:
+
+* Provide real-time streaming guarantees
+* Replace metrics or logging systems
+* Serve as a low-latency operational dashboard
+
+They are correctness and auditability primitives.
+
+---
+
+## 10. Relationship to Other Docs
 
 - Execution semantics: `execution-model.md`
 - Storage guarantees: `database-schema.md`
 - Testing strategy: `docs_testing_strategy.md`
+- Release checklist: `release-checklist-v0.1.0.md`
 
 ---
 

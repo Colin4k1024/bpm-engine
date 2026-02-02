@@ -26,6 +26,14 @@ The **Rust Worker SDK** lets you implement external-task workers that poll the e
 
 ---
 
+## Worker Responsibility Contract
+
+- Tasks may be **redelivered** (same task_id / token after worker crash or lease expiry).
+- Handlers **must be idempotent** (e.g. keyed by business id or task id; duplicate completion must be safe).
+- Do **not** perform non-rollbackable side effects in the handler unless you implement your own deduplication or compensation (e.g. outbox or saga step).
+
+---
+
 ## Core types
 
 - **EngineClient** — HTTP client for the engine REST API (base URL, fetch-and-lock, complete, fail).

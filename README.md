@@ -95,7 +95,7 @@ Timers are persistent and scheduler-driven:
 - **Execution history**: `GET /api/v1/process-instances/:id/history` — returns events with `sequence` and `category` (instance | token | external) for auditing and debug.
 - **Aggregated trace**: `GET /api/v1/process-instances/:id/trace` — token timelines and external-task history for a high-level view.
 
-**History API Semantics:** Events are append-only; sequence is globally ordered per instance; replay reproduces the same token state; schema is backward-compatible once released.
+**History API Semantics:** Events are append-only; sequence is globally ordered per instance; replay reproduces the same token state; schema is backward-compatible once released. API stability and History/Trace semantic guarantees: see [api-spec.md](docs/api-spec.md) (§ API & Semantic Stability, § History & Trace Semantic Guarantees).
 
 ### Invariants
 

@@ -43,6 +43,8 @@ This checklist verifies that after an engine crash and restart, history and toke
 7. **Verify history**:  
    `GET /api/v1/process-instances/:id/history` for the instance from step 4. Check that events are in order and there is no duplicate token completion (e.g. only one `TokenCompleted` per token, one `ExternalTaskCompleted` per task).
 
+**Automated script:** Run `./deploy/verify-recovery.sh` from the repo root to perform kill → restart → GET instance and history (requires `curl`; optional `jq`). With in-memory backend the instance state is lost after restart; the script still verifies engine restart and API availability.
+
 ---
 
 ## Files
