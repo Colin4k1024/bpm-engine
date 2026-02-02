@@ -392,7 +392,10 @@ pub async fn get_instance_trace(
                 }),
             )
         })?;
-    let token_ids_in_instance: std::collections::HashMap<String, (String, bpm_engine_core::TokenStatus)> = inst
+    let token_ids_in_instance: std::collections::HashMap<
+        String,
+        (String, bpm_engine_core::TokenStatus),
+    > = inst
         .tokens
         .iter()
         .map(|t| (t.id.clone(), (t.node_id.clone(), t.status)))
@@ -1082,8 +1085,16 @@ pub async fn replay_step(
             error: "replay apply failed".to_string(),
         }),
     ))?;
-    let token_id = ev_clone.payload.get("token_id").and_then(|v| v.as_str()).map(String::from);
-    let node_id = ev_clone.payload.get("node_id").and_then(|v| v.as_str()).map(String::from);
+    let token_id = ev_clone
+        .payload
+        .get("token_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let node_id = ev_clone
+        .payload
+        .get("node_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let event_view = ReplayEventView {
         event_type: ev_clone.event_type.clone(),
         occurred_at: ev_clone.occurred_at.clone(),

@@ -46,9 +46,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let worker_id = std::env::var("WORKER_ID").unwrap_or_else(|_| {
-        format!("worker-{}", std::process::id())
-    });
+    let worker_id =
+        std::env::var("WORKER_ID").unwrap_or_else(|_| format!("worker-{}", std::process::id()));
     let client = EngineClient::new("http://127.0.0.1:3000");
     let config = WorkerConfig::new(&worker_id)
         .poll_interval(Duration::from_secs(1))

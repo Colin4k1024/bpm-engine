@@ -30,8 +30,14 @@ async fn token_completes_at_most_once() {
         version: 0,
     };
     repo.save(&inst).await.unwrap();
-    let claimed = repo.claim_token(&instance_id, &token_id, 1).await.unwrap_or(false);
-    assert!(!claimed, "completed token must not be claimable (exactly-once completion)");
+    let claimed = repo
+        .claim_token(&instance_id, &token_id, 1)
+        .await
+        .unwrap_or(false);
+    assert!(
+        !claimed,
+        "completed token must not be claimable (exactly-once completion)"
+    );
 }
 
 #[tokio::test]
@@ -65,12 +71,17 @@ async fn only_one_claim_succeeds_per_token() {
         let r = Arc::clone(&repo);
         let iid = instance_id.clone();
         let tid = token_id.clone();
-        handles.push(tokio::spawn(async move { r.claim_token(&iid, &tid, 0).await.unwrap_or(false) }));
+        handles.push(tokio::spawn(async move {
+            r.claim_token(&iid, &tid, 0).await.unwrap_or(false)
+        }));
     }
     let mut results = Vec::with_capacity(n);
     for h in handles {
         results.push(h.await.unwrap());
     }
     let success_count = results.iter().filter(|&&b| b).count();
-    assert_eq!(success_count, 1, "single owner: exactly one claim should succeed per token");
+    assert_eq!(
+        success_count, 1,
+        "single owner: exactly one claim should succeed per token"
+    );
 }

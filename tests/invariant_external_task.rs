@@ -12,18 +12,16 @@ use std::time::Duration;
 async fn external_task_exactly_one_owner_when_locked() {
     let repo = Arc::new(MemoryRepo::new());
     let _ = repo
-        .create(
-            "token-1",
-            "instance-1",
-            "payment",
-            3,
-            60,
-            HashMap::new(),
-        )
+        .create("token-1", "instance-1", "payment", 3, 60, HashMap::new())
         .await
         .unwrap();
     let tasks = repo
-        .fetch_and_lock("worker-1", &["payment".to_string()], 10, Duration::from_secs(30))
+        .fetch_and_lock(
+            "worker-1",
+            &["payment".to_string()],
+            10,
+            Duration::from_secs(30),
+        )
         .await
         .unwrap();
     assert_eq!(tasks.len(), 1);
@@ -31,10 +29,18 @@ async fn external_task_exactly_one_owner_when_locked() {
     assert_eq!(tasks[0].lock_owner.as_deref(), Some("worker-1"));
 
     let tasks2 = repo
-        .fetch_and_lock("worker-2", &["payment".to_string()], 10, Duration::from_secs(30))
+        .fetch_and_lock(
+            "worker-2",
+            &["payment".to_string()],
+            10,
+            Duration::from_secs(30),
+        )
         .await
         .unwrap();
-    assert!(tasks2.is_empty(), "task already locked by worker-1 must not be given to worker-2");
+    assert!(
+        tasks2.is_empty(),
+        "task already locked by worker-1 must not be given to worker-2"
+    );
 }
 
 #[tokio::test]
@@ -45,12 +51,15 @@ async fn external_task_complete_only_by_owner() {
         .await
         .unwrap();
     let _ = repo
-        .fetch_and_lock("worker-1", &["payment".to_string()], 10, Duration::from_secs(30))
+        .fetch_and_lock(
+            "worker-1",
+            &["payment".to_string()],
+            10,
+            Duration::from_secs(30),
+        )
         .await
         .unwrap();
-    let err = repo
-        .complete(&task_id, "worker-2", HashMap::new())
-        .await;
+    let err = repo.complete(&task_id, "worker-2", HashMap::new()).await;
     assert!(err.is_err(), "complete by non-owner must be rejected");
 }
 
@@ -62,7 +71,12 @@ async fn external_task_retries_monotonic() {
         .await
         .unwrap();
     let _ = repo
-        .fetch_and_lock("worker-1", &["notify".to_string()], 10, Duration::from_secs(30))
+        .fetch_and_lock(
+            "worker-1",
+            &["notify".to_string()],
+            10,
+            Duration::from_secs(30),
+        )
         .await
         .unwrap();
     repo.fail(&task_id, "worker-1", "error".to_string(), None)
@@ -72,7 +86,12 @@ async fn external_task_retries_monotonic() {
     assert_eq!(task.retries, 1, "retries must decrease on fail");
     assert_eq!(task.state, ExternalTaskState::Ready);
     let _ = repo
-        .fetch_and_lock("worker-1", &["notify".to_string()], 10, Duration::from_secs(30))
+        .fetch_and_lock(
+            "worker-1",
+            &["notify".to_string()],
+            10,
+            Duration::from_secs(30),
+        )
         .await
         .unwrap();
     repo.fail(&task_id, "worker-1", "error2".to_string(), None)

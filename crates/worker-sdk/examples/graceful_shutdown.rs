@@ -21,7 +21,11 @@ impl TaskHandler for ExampleHandler {
     }
 
     async fn handle(&self, task: ExternalTask, _ctx: TaskContext) -> TaskResult {
-        let amount = task.variables.get("amount").cloned().unwrap_or_else(|| "0".into());
+        let amount = task
+            .variables
+            .get("amount")
+            .cloned()
+            .unwrap_or_else(|| "0".into());
         tracing::info!(task_id = %task.task_id, amount = %amount, "processing");
         tokio::time::sleep(Duration::from_millis(50)).await;
         let mut variables = HashMap::new();

@@ -75,7 +75,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }))
             .send()
             .await?;
-        if !fetch2.status().is_success() || fetch2.json::<Vec<serde_json::Value>>().await?.is_empty() {
+        if !fetch2.status().is_success()
+            || fetch2.json::<Vec<serde_json::Value>>().await?.is_empty()
+        {
             eprintln!("fetch after fail {} failed or empty", i);
             std::process::exit(1);
         }

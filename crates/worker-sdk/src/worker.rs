@@ -99,7 +99,11 @@ impl Worker {
                         last_err = Some(e);
                         if attempt < fetch_retry_max {
                             let secs = backoff.as_secs().min(BACKOFF_CAP_SECS);
-                            warn!(attempt = attempt + 1, backoff_secs = secs, "fetch_and_lock failed, retrying");
+                            warn!(
+                                attempt = attempt + 1,
+                                backoff_secs = secs,
+                                "fetch_and_lock failed, retrying"
+                            );
                             tokio::time::sleep(backoff).await;
                             backoff = std::cmp::min(
                                 backoff.saturating_mul(2),
@@ -159,7 +163,11 @@ impl Worker {
                         last_err = Some(e);
                         if attempt < fetch_retry_max {
                             let secs = backoff.as_secs().min(BACKOFF_CAP_SECS);
-                            warn!(attempt = attempt + 1, backoff_secs = secs, "fetch_and_lock failed, retrying");
+                            warn!(
+                                attempt = attempt + 1,
+                                backoff_secs = secs,
+                                "fetch_and_lock failed, retrying"
+                            );
                             tokio::time::sleep(backoff).await;
                             backoff = std::cmp::min(
                                 backoff.saturating_mul(2),

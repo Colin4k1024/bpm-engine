@@ -47,7 +47,11 @@ impl TaskHandler for IdempotentPaymentHandler {
             return TaskResult::Complete { variables };
         }
 
-        let amount = task.variables.get("amount").cloned().unwrap_or_else(|| "0".into());
+        let amount = task
+            .variables
+            .get("amount")
+            .cloned()
+            .unwrap_or_else(|| "0".into());
         tracing::info!(task_id = %task.task_id, amount = %amount, "processing payment");
         tokio::time::sleep(Duration::from_millis(100)).await;
 
