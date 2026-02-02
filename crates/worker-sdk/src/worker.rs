@@ -1,9 +1,10 @@
 //! Worker runtime: poll loop and task spawning (design §3, §4).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::client::EngineClient;
@@ -67,31 +68,112 @@ impl Worker {
         let lock_duration_ms = self.config.lock_duration.as_millis() as u64;
         let poll_interval = self.config.poll_interval;
 
+        let fetch_retry_max = self.config.fetch_retry_max;
+        let fetch_retry_backoff = self.config.fetch_retry_backoff;
+        const BACKOFF_CAP_SECS: u64 = 30;
+
         loop {
             if task_types.is_empty() {
                 tokio::time::sleep(poll_interval).await;
                 continue;
             }
-            match self
-                .client
-                .fetch_and_lock(&worker_id, &task_types, max_tasks, lock_duration_ms)
-                .await
-            {
-                Ok(tasks) => {
-                    for task in tasks {
-                        if self.handlers.contains_key(&task.task_type) {
-                            self.spawn_task(task);
+            let mut backoff = fetch_retry_backoff;
+            let mut last_err = None;
+            for attempt in 0..=fetch_retry_max {
+                match self
+                    .client
+                    .fetch_and_lock(&worker_id, &task_types, max_tasks, lock_duration_ms)
+                    .await
+                {
+                    Ok(tasks) => {
+                        for task in tasks {
+                            if self.handlers.contains_key(&task.task_type) {
+                                self.spawn_task(task);
+                            } else {
+                                warn!(task_type = %task.task_type, "no handler for task type");
+                            }
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        if attempt < fetch_retry_max {
+                            let secs = backoff.as_secs().min(BACKOFF_CAP_SECS);
+                            warn!(attempt = attempt + 1, backoff_secs = secs, "fetch_and_lock failed, retrying");
+                            tokio::time::sleep(backoff).await;
+                            backoff = std::cmp::min(
+                                backoff.saturating_mul(2),
+                                Duration::from_secs(BACKOFF_CAP_SECS),
+                            );
                         } else {
-                            warn!(task_type = %task.task_type, "no handler for task type");
+                            warn!(error = %last_err.as_ref().unwrap(), "fetch_and_lock failed after retries");
                         }
                     }
-                }
-                Err(e) => {
-                    warn!(error = %e, "fetch_and_lock failed");
                 }
             }
             tokio::time::sleep(poll_interval).await;
         }
+    }
+
+    /// Run the poll loop until `shutdown` is set to true (e.g. on SIGTERM). Finish current poll cycle then exit.
+    pub async fn start_until_signal(&self, shutdown: Arc<AtomicBool>) {
+        let task_types: Vec<String> = self.handlers.keys().cloned().collect();
+        if task_types.is_empty() {
+            warn!("no handlers registered; worker will not fetch any tasks");
+        }
+        let worker_id = self.config.worker_id.clone();
+        let max_tasks = self.config.max_tasks;
+        let lock_duration_ms = self.config.lock_duration.as_millis() as u64;
+        let poll_interval = self.config.poll_interval;
+        let fetch_retry_max = self.config.fetch_retry_max;
+        let fetch_retry_backoff = self.config.fetch_retry_backoff;
+        const BACKOFF_CAP_SECS: u64 = 30;
+
+        while !shutdown.load(Ordering::Relaxed) {
+            if task_types.is_empty() {
+                tokio::time::sleep(poll_interval).await;
+                continue;
+            }
+            let mut backoff = fetch_retry_backoff;
+            let mut last_err = None;
+            for attempt in 0..=fetch_retry_max {
+                if shutdown.load(Ordering::Relaxed) {
+                    return;
+                }
+                match self
+                    .client
+                    .fetch_and_lock(&worker_id, &task_types, max_tasks, lock_duration_ms)
+                    .await
+                {
+                    Ok(tasks) => {
+                        for task in tasks {
+                            if self.handlers.contains_key(&task.task_type) {
+                                self.spawn_task(task);
+                            } else {
+                                warn!(task_type = %task.task_type, "no handler for task type");
+                            }
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        if attempt < fetch_retry_max {
+                            let secs = backoff.as_secs().min(BACKOFF_CAP_SECS);
+                            warn!(attempt = attempt + 1, backoff_secs = secs, "fetch_and_lock failed, retrying");
+                            tokio::time::sleep(backoff).await;
+                            backoff = std::cmp::min(
+                                backoff.saturating_mul(2),
+                                Duration::from_secs(BACKOFF_CAP_SECS),
+                            );
+                        } else {
+                            warn!(error = %last_err.as_ref().unwrap(), "fetch_and_lock failed after retries");
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+        info!(worker_id = %worker_id, "worker shutting down");
     }
 
     /// Spawn one task; on handler panic, call fail (design §4, §6).

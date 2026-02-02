@@ -1,5 +1,6 @@
 //! BPM Engine REST server. Run: cargo run -p bpm-server-rest
 
+mod replay;
 mod routes;
 mod state;
 
@@ -110,6 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         engine,
         repo,
         def_store,
+        replay_sessions: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
     });
 
     let app = router(state);

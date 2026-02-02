@@ -207,6 +207,7 @@ dependencies = [
  "bpm-engine-runtime",
  "bpm-engine-storage",
  "serde",
+ "serde_json",
  "tokio",
  "tracing-subscriber",
  "uuid",

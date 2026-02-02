@@ -1,0 +1,25 @@
+# Postgres for BPM engine (golden path).
+# Use with DATABASE_URL or equivalent when running the engine with a Postgres backend.
+# Init: docker compose up -d && docker compose exec postgres psql -U postgres -f /docker-entrypoint-initdb.d/schema.sql 2>/dev/null || true
+# Or run schema manually: psql $DATABASE_URL -f deploy/schema.sql
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: bpm
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:

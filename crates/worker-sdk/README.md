@@ -13,10 +13,21 @@ No BPM knowledge required in worker code; workers only see task type and variabl
 ## Usage
 
 ```bash
-cargo run -p bpm-worker-sdk --example payment
+cargo run -p bpm-engine-server-rest   # start the engine first
+cargo run -p bpm-engine-worker-sdk --example payment
 ```
 
-See [crates/worker-sdk/examples/payment.rs](examples/payment.rs) for a full example.
+See [examples/payment.rs](examples/payment.rs) for a full example.
+
+## Retry and backoff
+
+The worker retries `fetch_and_lock` on transport or engine errors with exponential backoff (configurable via `WorkerConfig::fetch_retry_max` and `fetch_retry_backoff`). Default: 5 retries, 1s initial backoff, cap 30s.
+
+## Idempotency and graceful shutdown
+
+- **Idempotency**: If the worker crashes after doing work but before calling `complete`, the engine will reclaim the lock and another worker may get the same task. Use an idempotency key (e.g. `task_id` or a business key from variables) and check "already processed?" before doing work. See [examples/idempotency.rs](examples/idempotency.rs).
+- **Graceful shutdown**: Use `Worker::start_until_signal(shutdown: Arc<AtomicBool>)` and set the flag on SIGINT/SIGTERM; the worker finishes the current poll cycle and exits. See [examples/graceful_shutdown.rs](examples/graceful_shutdown.rs).
+- **Duplicate workers**: Run multiple workers (different `worker_id`); each task is locked by at most one worker. See [examples/duplicate_workers.rs](examples/duplicate_workers.rs).
 
 ## Documentation
 

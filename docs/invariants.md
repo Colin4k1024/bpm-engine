@@ -4,6 +4,13 @@ This document lists **formal invariants** that the engine enforces. These are de
 
 ---
 
+## Runtime vs test-only invariants
+
+- **Runtime invariants**: Enforced by the engine at runtime (e.g. token state machine, join count, external task single-owner, lock expiry). Violations are rejected or corrected by the runtime (e.g. CAS failure, ownership check).
+- **Test-only invariants**: Verified by tests and replay (e.g. "replay produces the same final state as live execution", "under concurrency only one claim succeeds per token"). They are not asserted in production code; tests and CI fail if they are violated.
+
+---
+
 ## 1. Token invariants
 
 - **Exactly-once completion**: A token can only reach a final state (Completed, Terminated) once. It cannot be re-executed after completion.

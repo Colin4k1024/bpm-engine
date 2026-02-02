@@ -3,7 +3,7 @@
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use bpm_engine_core::{
@@ -19,8 +19,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+fn occurred_at_now() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string()
+}
+
+use super::replay::ReplaySession;
 use super::state::AppState;
+use bpm_engine_adapter_memory::MemoryRepo;
 
 // --- External task API (plan §6) ---
 
@@ -88,8 +99,16 @@ fn current_nodes(inst: &ProcessInstance) -> Vec<String> {
 }
 
 fn build_ctx(state: &AppState, tenant_id: Option<String>) -> EngineContext {
-    let repo = Arc::clone(&state.repo);
-    let def_store = Arc::clone(&state.def_store);
+    build_ctx_with_repo(Arc::clone(&state.repo), &state.def_store, tenant_id)
+}
+
+/// Build engine context with a specific repo (e.g. replay temporary repo).
+fn build_ctx_with_repo(
+    repo: Arc<MemoryRepo>,
+    def_store: &Arc<bpm_engine_adapter_memory::ProcessDefStore>,
+    tenant_id: Option<String>,
+) -> EngineContext {
+    let def_store = Arc::clone(def_store);
     EngineContext {
         process_store: Some(repo.clone() as Arc<dyn ProcessInstanceStore>),
         token_store: Some(repo.clone() as Arc<dyn TokenStore>),
@@ -101,6 +120,23 @@ fn build_ctx(state: &AppState, tenant_id: Option<String>) -> EngineContext {
         external_task_store: Some(repo.clone() as Arc<dyn ExternalTaskStore>),
         history_repo: Some(repo.clone() as Arc<dyn HistoryRepo>),
         tenant_id,
+    }
+}
+
+fn instance_id_from_event(ev: &EngineEvent) -> Option<String> {
+    use bpm_engine_core::EngineEvent;
+    match ev {
+        EngineEvent::ProcessStarted(p) => Some(p.instance_id.clone()),
+        EngineEvent::TokenArrived(p) => Some(p.instance_id.clone()),
+        EngineEvent::TokenCompleted(p) => Some(p.instance_id.clone()),
+        EngineEvent::UserTaskCreated(p) => Some(p.instance_id.clone()),
+        EngineEvent::UserTaskCompleted(p) => Some(p.instance_id.clone()),
+        EngineEvent::TimerFired(_) => None,
+        EngineEvent::TimerScheduled(p) => Some(p.instance_id.clone()),
+        EngineEvent::TokenFailed(p) => Some(p.instance_id.clone()),
+        EngineEvent::SagaStarted(p) => Some(p.instance_id.clone()),
+        EngineEvent::SagaCompleted(p) => Some(p.instance_id.clone()),
+        EngineEvent::ProcessCompleted(p) => Some(p.instance_id.clone()),
     }
 }
 
@@ -281,6 +317,199 @@ pub async fn get_instance(
     }
 }
 
+// --- Trace API (aggregated view) ---
+
+#[derive(Serialize)]
+pub struct TraceEventView {
+    pub event_type: String,
+    pub occurred_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+pub struct TokenTimelineView {
+    pub token_id: String,
+    pub node_id: String,
+    pub status: String,
+    pub events: Vec<TraceEventView>,
+}
+
+#[derive(Serialize)]
+pub struct ExternalTaskHistoryEntryView {
+    pub task_id: String,
+    pub token_id: String,
+    pub process_instance_id: String,
+    pub events: Vec<TraceEventView>,
+}
+
+#[derive(Serialize)]
+pub struct TraceResponse {
+    pub instance: InstanceStateResponse,
+    pub token_timelines: Vec<TokenTimelineView>,
+    pub external_task_history: Vec<ExternalTaskHistoryEntryView>,
+}
+
+fn token_status_str(status: &bpm_engine_core::TokenStatus) -> &'static str {
+    use bpm_engine_core::TokenStatus;
+    match status {
+        TokenStatus::Created => "CREATED",
+        TokenStatus::Ready => "READY",
+        TokenStatus::Executing => "EXECUTING",
+        TokenStatus::Waiting => "WAITING",
+        TokenStatus::Suspended => "SUSPENDED",
+        TokenStatus::Completed => "COMPLETED",
+        TokenStatus::Terminated => "TERMINATED",
+    }
+}
+
+/// GET /api/v1/process-instances/:id/trace — aggregated execution trace (instance + token timelines + external task history).
+pub async fn get_instance_trace(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<TraceResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let repo = Arc::clone(&state.repo);
+    let inst = repo.load(&id).await.ok().flatten().ok_or((
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: format!("process instance not found: {}", id),
+        }),
+    ))?;
+    let instance_response = InstanceStateResponse {
+        instance_id: inst.id.clone(),
+        process_def_id: inst.process_def_id.clone(),
+        status: status_str(inst.state).to_string(),
+        current_nodes: current_nodes(&inst),
+        tokens: inst.tokens.clone(),
+    };
+    let events = HistoryRepo::list_by_instance(state.repo.as_ref(), &id, None, None)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    let token_ids_in_instance: std::collections::HashMap<String, (String, bpm_engine_core::TokenStatus)> = inst
+        .tokens
+        .iter()
+        .map(|t| (t.id.clone(), (t.node_id.clone(), t.status)))
+        .collect();
+    let mut by_token: std::collections::HashMap<String, Vec<TraceEventView>> =
+        std::collections::HashMap::new();
+    for ev in &events {
+        let token_id = ev
+            .payload
+            .get("token_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let Some(token_id) = token_id else {
+            continue;
+        };
+        if token_id.is_empty() {
+            continue;
+        }
+        let entry = by_token.entry(token_id).or_default();
+        entry.push(TraceEventView {
+            event_type: ev.event_type.clone(),
+            occurred_at: ev.occurred_at.clone(),
+            payload: Some(ev.payload.clone()),
+        });
+    }
+    let mut token_timelines: Vec<TokenTimelineView> = by_token
+        .into_iter()
+        .map(|(token_id, evs)| {
+            let (node_id, status) = token_ids_in_instance
+                .get(&token_id)
+                .map(|(n, s)| (n.clone(), token_status_str(s).to_string()))
+                .unwrap_or_else(|| {
+                    let node_id = evs
+                        .last()
+                        .and_then(|e| e.payload.as_ref())
+                        .and_then(|p| p.get("node_id").and_then(|v| v.as_str()))
+                        .unwrap_or("")
+                        .to_string();
+                    let status = evs
+                        .last()
+                        .map(|e| e.event_type.as_str())
+                        .map(|t| match t {
+                            "TokenCompleted" => "COMPLETED",
+                            "TokenFailed" => "TERMINATED",
+                            _ => "UNKNOWN",
+                        })
+                        .unwrap_or("UNKNOWN")
+                        .to_string();
+                    (node_id, status)
+                });
+            TokenTimelineView {
+                token_id,
+                node_id,
+                status,
+                events: evs,
+            }
+        })
+        .collect();
+    token_timelines.sort_by(|a, b| {
+        a.events
+            .first()
+            .zip(b.events.first())
+            .map(|(ea, eb)| ea.occurred_at.cmp(&eb.occurred_at))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let ext_events: Vec<&bpm_engine_storage::HistoryEvent> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.event_type.as_str(),
+                "ExternalTaskLocked" | "ExternalTaskFailed" | "ExternalTaskCompleted"
+            )
+        })
+        .collect();
+    let mut by_task: std::collections::HashMap<String, Vec<TraceEventView>> =
+        std::collections::HashMap::new();
+    for ev in ext_events {
+        let task_id = ev
+            .payload
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| ev.id.clone());
+        let entry = by_task.entry(task_id).or_default();
+        entry.push(TraceEventView {
+            event_type: ev.event_type.clone(),
+            occurred_at: ev.occurred_at.clone(),
+            payload: Some(ev.payload.clone()),
+        });
+    }
+    let external_task_history: Vec<ExternalTaskHistoryEntryView> = by_task
+        .into_iter()
+        .map(|(task_id, evs)| {
+            let first = evs.first().and_then(|e| e.payload.as_ref());
+            let token_id = first
+                .and_then(|p| p.get("token_id").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .to_string();
+            let process_instance_id = first
+                .and_then(|p| p.get("process_instance_id").and_then(|v| v.as_str()))
+                .unwrap_or(id.as_str())
+                .to_string();
+            ExternalTaskHistoryEntryView {
+                task_id,
+                token_id,
+                process_instance_id,
+                events: evs,
+            }
+        })
+        .collect();
+    Ok(Json(TraceResponse {
+        instance: instance_response,
+        token_timelines,
+        external_task_history,
+    }))
+}
+
 /// GET /api/v1/process-definitions/:id — process definition view for Trace UI diagram.
 pub async fn get_process_definition(
     State(state): State<Arc<AppState>>,
@@ -431,6 +660,24 @@ pub async fn external_task_fetch_and_lock(
                 }),
             )
         })?;
+    let occurred_at = occurred_at_now();
+    for t in &tasks {
+        let payload = serde_json::json!({
+            "task_id": t.task_id,
+            "token_id": t.token_id,
+            "process_instance_id": t.process_instance_id,
+            "worker_id": body.worker_id,
+            "retries": t.retries,
+        });
+        let _ = HistoryRepo::append(
+            state.repo.as_ref(),
+            &t.process_instance_id,
+            "ExternalTaskLocked",
+            &payload,
+            &occurred_at,
+        )
+        .await;
+    }
     let out: Vec<ExternalTaskResponse> = tasks
         .into_iter()
         .map(|t| ExternalTaskResponse {
@@ -479,6 +726,21 @@ pub async fn external_task_complete(
                 error: format!("task not found after complete: {}", task_id),
             }),
         ))?;
+    let occurred_at = occurred_at_now();
+    let payload = serde_json::json!({
+        "task_id": task.task_id,
+        "token_id": task.token_id,
+        "process_instance_id": task.process_instance_id,
+        "worker_id": body.worker_id,
+    });
+    let _ = HistoryRepo::append(
+        state.repo.as_ref(),
+        &task.process_instance_id,
+        "ExternalTaskCompleted",
+        &payload,
+        &occurred_at,
+    )
+    .await;
     let tenant_id = tenant_from_headers(&headers);
     let mut ctx = build_ctx(state.as_ref(), tenant_id);
     let process_store = ctx.process_store.as_ref().ok_or((
@@ -606,6 +868,23 @@ pub async fn external_task_fail(
                 error: format!("task not found after fail: {}", task_id),
             }),
         ))?;
+    let occurred_at = occurred_at_now();
+    let payload = serde_json::json!({
+        "task_id": task.task_id,
+        "token_id": task.token_id,
+        "process_instance_id": task.process_instance_id,
+        "worker_id": body.worker_id,
+        "retries": task.retries,
+        "error_message": body.error,
+    });
+    let _ = HistoryRepo::append(
+        state.repo.as_ref(),
+        &task.process_instance_id,
+        "ExternalTaskFailed",
+        &payload,
+        &occurred_at,
+    )
+    .await;
     if task.state == ExternalTaskState::Failed {
         let tenant_id = None::<String>;
         let mut ctx = build_ctx(state.as_ref(), tenant_id);
@@ -635,6 +914,284 @@ pub async fn external_task_fail(
     Ok(Json(CompleteTaskResponse {
         status: "FAILED".to_string(),
     }))
+}
+
+// --- Replay API (docs_replay_rest_api.md) ---
+
+#[derive(Serialize)]
+pub struct ReplayCreateResponse {
+    pub session_id: String,
+    pub instance_id: String,
+    pub total_events: usize,
+}
+
+#[derive(Serialize)]
+pub struct ReplayEventView {
+    pub event_type: String,
+    pub occurred_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ReplayTokenView {
+    pub token_id: String,
+    pub node_id: String,
+    pub state: String,
+}
+
+#[derive(Serialize)]
+pub struct ReplaySnapshotView {
+    pub completed: bool,
+    pub tokens: Vec<ReplayTokenView>,
+}
+
+#[derive(Serialize)]
+pub struct ReplayStepResponse {
+    pub cursor: usize,
+    pub event: ReplayEventView,
+    pub snapshot: ReplaySnapshotView,
+}
+
+#[derive(Deserialize)]
+pub struct ReplaySeekRequest {
+    pub cursor: usize,
+}
+
+#[derive(Serialize)]
+pub struct ReplaySeekResponse {
+    pub cursor: usize,
+    pub snapshot: ReplaySnapshotView,
+}
+
+#[derive(Serialize)]
+pub struct ReplaySnapshotResponse {
+    pub cursor: usize,
+    pub total_events: usize,
+    pub completed: bool,
+    pub tokens: Vec<ReplayTokenView>,
+}
+
+fn replay_snapshot_from_instance(inst: Option<&ProcessInstance>) -> ReplaySnapshotView {
+    let (completed, tokens) = match inst {
+        Some(i) => (
+            i.state == InstanceState::Completed,
+            i.tokens
+                .iter()
+                .map(|t| ReplayTokenView {
+                    token_id: t.id.clone(),
+                    node_id: t.node_id.clone(),
+                    state: token_status_str(&t.status).to_string(),
+                })
+                .collect(),
+        ),
+        None => (false, vec![]),
+    };
+    ReplaySnapshotView { completed, tokens }
+}
+
+/// POST /api/v1/process-instances/:id/replay — create replay session.
+pub async fn create_replay(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<ReplayCreateResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let _inst = state.repo.load(&id).await.ok().flatten().ok_or((
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: format!("process instance not found: {}", id),
+        }),
+    ))?;
+    let events = HistoryRepo::list_by_instance(state.repo.as_ref(), &id, None, None)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let session = ReplaySession::new(id.clone(), events);
+    let total_events = session.total_events();
+    {
+        let mut guard = state.replay_sessions.write().unwrap();
+        guard.insert(session_id.clone(), session);
+    }
+    Ok((
+        StatusCode::CREATED,
+        Json(ReplayCreateResponse {
+            session_id,
+            instance_id: id,
+            total_events,
+        }),
+    ))
+}
+
+/// Apply one event to a temporary repo and return new snapshot.
+async fn replay_apply_one(
+    engine: &bpm_engine_runtime::BpmEngine,
+    def_store: &Arc<bpm_engine_adapter_memory::ProcessDefStore>,
+    snapshot: Option<&ProcessInstance>,
+    ev: &bpm_engine_storage::HistoryEvent,
+) -> Option<ProcessInstance> {
+    let engine_ev = ReplaySession::parse_event(ev)?;
+    let instance_id = instance_id_from_event(&engine_ev)?;
+    let replay_repo = Arc::new(MemoryRepo::new());
+    if let Some(inst) = snapshot {
+        let _ = replay_repo.save(inst).await;
+    }
+    let mut ctx = build_ctx_with_repo(replay_repo.clone(), def_store, None);
+    engine.run_async(engine_ev, &mut ctx).await;
+    replay_repo.load(&instance_id).await.ok().flatten()
+}
+
+/// POST /api/v1/replay/:session_id/step — step forward one event.
+pub async fn replay_step(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<ReplayStepResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let (ev_clone, snapshot_clone) = {
+        let guard = state.replay_sessions.read().unwrap();
+        let session = guard.get(&session_id).ok_or((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "replay session not found or expired".to_string(),
+            }),
+        ))?;
+        let ev = session.current_event().ok_or((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "no more events to step".to_string(),
+            }),
+        ))?;
+        (ev.clone(), session.snapshot.clone())
+    };
+    let new_snapshot = replay_apply_one(
+        &state.engine,
+        &state.def_store,
+        snapshot_clone.as_ref(),
+        &ev_clone,
+    )
+    .await
+    .ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "replay apply failed".to_string(),
+        }),
+    ))?;
+    let token_id = ev_clone.payload.get("token_id").and_then(|v| v.as_str()).map(String::from);
+    let node_id = ev_clone.payload.get("node_id").and_then(|v| v.as_str()).map(String::from);
+    let event_view = ReplayEventView {
+        event_type: ev_clone.event_type.clone(),
+        occurred_at: ev_clone.occurred_at.clone(),
+        token_id,
+        node_id,
+    };
+    let cursor = {
+        let mut guard = state.replay_sessions.write().unwrap();
+        let session = guard.get_mut(&session_id).ok_or((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "replay session not found or expired".to_string(),
+            }),
+        ))?;
+        session.snapshot = Some(new_snapshot.clone());
+        session.cursor += 1;
+        session.cursor
+    };
+    let snapshot_view = replay_snapshot_from_instance(Some(&new_snapshot));
+    Ok(Json(ReplayStepResponse {
+        cursor,
+        event: event_view,
+        snapshot: snapshot_view,
+    }))
+}
+
+/// POST /api/v1/replay/:session_id/seek — jump to cursor (replay events[0..cursor]).
+pub async fn replay_seek(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(body): Json<ReplaySeekRequest>,
+) -> Result<Json<ReplaySeekResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let events_to_apply: Vec<bpm_engine_storage::HistoryEvent> = {
+        let guard = state.replay_sessions.read().unwrap();
+        let session = guard.get(&session_id).ok_or((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "replay session not found or expired".to_string(),
+            }),
+        ))?;
+        let cursor = body.cursor.min(session.events.len());
+        session.events[..cursor].to_vec()
+    };
+    let cursor = events_to_apply.len();
+    let mut snapshot: Option<ProcessInstance> = None;
+    for ev in &events_to_apply {
+        if let Some(inst) =
+            replay_apply_one(&state.engine, &state.def_store, snapshot.as_ref(), ev).await
+        {
+            snapshot = Some(inst);
+        }
+    }
+    {
+        let mut guard = state.replay_sessions.write().unwrap();
+        if let Some(session) = guard.get_mut(&session_id) {
+            session.cursor = cursor;
+            session.snapshot = snapshot.clone();
+        }
+    }
+    let snapshot_view = replay_snapshot_from_instance(snapshot.as_ref());
+    Ok(Json(ReplaySeekResponse {
+        cursor,
+        snapshot: snapshot_view,
+    }))
+}
+
+/// GET /api/v1/replay/:session_id/snapshot — read-only snapshot.
+pub async fn get_replay_snapshot(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<ReplaySnapshotResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let guard = state.replay_sessions.read().unwrap();
+    let session = guard.get(&session_id).ok_or((
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: "replay session not found or expired".to_string(),
+        }),
+    ))?;
+    let (completed, tokens) = match &session.snapshot {
+        Some(i) => (
+            i.state == InstanceState::Completed,
+            i.tokens
+                .iter()
+                .map(|t| ReplayTokenView {
+                    token_id: t.id.clone(),
+                    node_id: t.node_id.clone(),
+                    state: token_status_str(&t.status).to_string(),
+                })
+                .collect(),
+        ),
+        None => (false, vec![]),
+    };
+    Ok(Json(ReplaySnapshotResponse {
+        cursor: session.cursor,
+        total_events: session.total_events(),
+        completed,
+        tokens,
+    }))
+}
+
+/// DELETE /api/v1/replay/:session_id — destroy session.
+pub async fn delete_replay_session(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let mut guard = state.replay_sessions.write().unwrap();
+    guard.remove(&session_id);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// POST /api/v1/process-definitions/deploy — deploy a process definition from BPMN 2.0 XML.
@@ -675,7 +1232,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         Router::new()
             .route("/process-instances", post(start_instance))
             .route("/process-instances/:id", get(get_instance))
+            .route("/process-instances/:id/trace", get(get_instance_trace))
             .route("/process-instances/:id/history", get(get_instance_history))
+            .route("/process-instances/:id/replay", post(create_replay))
+            .route("/replay/:session_id/step", post(replay_step))
+            .route("/replay/:session_id/seek", post(replay_seek))
+            .route("/replay/:session_id/snapshot", get(get_replay_snapshot))
+            .route("/replay/:session_id", delete(delete_replay_session))
             .route("/process-definitions/:id", get(get_process_definition))
             .route("/tasks", get(list_tasks))
             .route("/tasks/:task_id/complete", post(complete_task_by_id))

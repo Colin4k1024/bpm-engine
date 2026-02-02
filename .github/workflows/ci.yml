@@ -29,3 +29,6 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+
+      - name: Run invariant tests
+        run: cargo test --test invariant_token --test invariant_join --test invariant_external_task

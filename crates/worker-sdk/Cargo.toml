@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 reqwest = { version = "0.12", features = ["json"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
@@ -16,6 +16,18 @@ tracing = "0.1"
 [[example]]
 name = "payment"
 path = "examples/payment.rs"
+
+[[example]]
+name = "graceful_shutdown"
+path = "examples/graceful_shutdown.rs"
+
+[[example]]
+name = "idempotency"
+path = "examples/idempotency.rs"
+
+[[example]]
+name = "duplicate_workers"
+path = "examples/duplicate_workers.rs"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

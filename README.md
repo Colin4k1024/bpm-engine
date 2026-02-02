@@ -25,7 +25,7 @@ This makes the engine suitable for **long-running, distributed, and failure-pron
 
 Most BPM engines optimize for **features and modeling UX**.
 
-This engine optimizes for **correctness**.
+This engine is a **correctness-first workflow execution kernel**: it optimizes for **correctness**.
 
 Specifically:
 
@@ -37,6 +37,18 @@ Specifically:
 - Core behavior is protected by **formal invariants**
 
 If you care about _why_ a process reached a certain state — not just _that_ it did — this engine is for you.
+
+---
+
+## When NOT to use bpm-engine
+
+This engine is built for **correctness and auditability first**. Consider alternatives if:
+
+- **You need low-code BPMN modeling and form designers** — Use Camunda or similar platforms that offer visual modeling and task UIs out of the box.
+- **You rely heavily on complex human workflows and approval UIs** — This engine focuses on execution and semantics; it does not provide built-in task lists or forms.
+- **Execution semantics do not matter; you only need “fast” or simple DAGs** — Lighter options (e.g. AWS Step Functions) may be simpler to adopt.
+
+If your priority is **correctness, replay, and clear execution semantics**, this engine is a good fit.
 
 ---
 
@@ -86,7 +98,7 @@ The engine enforces formal invariants such as:
 - External tasks have exactly one owner at a time
 - Retries are monotonic
 
-See [docs/invariants.md](docs/invariants.md) for details.
+See [docs/invariants.md](docs/invariants.md) for details. For a semantic comparison with Camunda, Temporal, and AWS Step Functions, see [docs/why-correctness.md](docs/why-correctness.md).
 
 ---
 
@@ -253,6 +265,8 @@ Using the engine as a library: depend on the crates above by path, build an [Eng
 - [Execution Model (Token & Concurrency)](docs/execution-model.md)
 - [Invariants](docs/invariants.md)
 - [Persistence & Recovery](docs/recovery.md)
+- [Recovery demo (kill → restart)](docs/recovery-demo.md)
+- [Accident-level scenarios](docs/accident-scenarios.md) (payment+retry, fork fail, worker reclaim)
 - [Database Schema](docs/database-schema.md)
 - [Saga & Compensation](docs/docs_saga.md)
 - [Testing Strategy](docs/docs_testing_strategy.md)
