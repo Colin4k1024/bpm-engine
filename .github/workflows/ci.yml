@@ -1,3 +1,4 @@
+# Same checks can be run locally before pushing: ./scripts/ci.sh
 name: CI
 
 on:

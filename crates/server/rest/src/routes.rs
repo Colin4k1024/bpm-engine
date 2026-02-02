@@ -372,14 +372,8 @@ pub struct HistoryResponse {
 fn event_type_to_category(event_type: &str) -> &'static str {
     match event_type {
         "ProcessStarted" | "ProcessCompleted" => "instance",
-        "TokenArrived"
-        | "TokenCompleted"
-        | "TokenFailed"
-        | "UserTaskCreated"
-        | "UserTaskCompleted"
-        | "TimerScheduled"
-        | "TimerFired"
-        | "SagaStarted"
+        "TokenArrived" | "TokenCompleted" | "TokenFailed" | "UserTaskCreated"
+        | "UserTaskCompleted" | "TimerScheduled" | "TimerFired" | "SagaStarted"
         | "SagaCompleted" => "token",
         "ExternalTaskLocked" | "ExternalTaskCompleted" | "ExternalTaskFailed" => "external",
         _ => "token",
