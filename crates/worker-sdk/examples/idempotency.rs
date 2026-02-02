@@ -27,7 +27,7 @@ fn mark_done(id: &str) {
 
 fn already_done(id: &str) -> bool {
     let g = PROCESSED.lock().unwrap();
-    g.as_ref().map_or(false, |m| m.contains_key(id))
+    g.as_ref().is_some_and(|m| m.contains_key(id))
 }
 
 struct IdempotentPaymentHandler;

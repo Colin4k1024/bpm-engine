@@ -114,6 +114,59 @@ Response:
 
 ---
 
+#### Get Instance Execution History
+
+```
+GET /process-instances/{instance_id}/history
+```
+
+Query (optional):
+
+- `token_id` — filter events for a single token
+- `event_type` — filter by event type (e.g. `ProcessStarted`, `TokenArrived`, `ExternalTaskLocked`)
+
+Response:
+
+```json
+{
+  "instance_id": "pi_abc123",
+  "events": [
+    {
+      "sequence": 0,
+      "id": "event-uuid",
+      "event_type": "ProcessStarted",
+      "category": "instance",
+      "occurred_at": "1738454400",
+      "payload": { "instance_id": "pi_abc123", "process_id": "order_process", ... }
+    },
+    {
+      "sequence": 1,
+      "id": "event-uuid-2",
+      "event_type": "TokenArrived",
+      "category": "token",
+      "occurred_at": "1738454401",
+      "payload": { "instance_id": "pi_abc123", "token_id": "...", "node_id": "task_a" }
+    }
+  ]
+}
+```
+
+- **sequence**: Zero-based index; events are in causal order (by `occurred_at`, then `id`). Use for replay and debug.
+- **category**: `instance` (ProcessStarted, ProcessCompleted), `token` (Token*, UserTask*, Timer*, Saga*), or `external` (ExternalTaskLocked, ExternalTaskCompleted, ExternalTaskFailed).
+- Same event source as replay; use for auditing and debugging.
+
+---
+
+#### Get Instance Trace (aggregated view)
+
+```
+GET /process-instances/{instance_id}/trace
+```
+
+Returns instance state plus token timelines and external-task history aggregated by token/task. Use for a high-level view; use `/history` for the raw event timeline with sequence and category.
+
+---
+
 ### 3.3 Tasks
 
 #### List Pending Tasks

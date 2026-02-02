@@ -89,6 +89,11 @@ Timers are persistent and scheduler-driven:
 - Execution can be replayed deterministically
 - History can be used for debugging, auditing, and verification
 
+**Observability APIs:**
+
+- **Execution history**: `GET /api/v1/process-instances/:id/history` — returns events with `sequence` and `category` (instance | token | external) for auditing and debug.
+- **Aggregated trace**: `GET /api/v1/process-instances/:id/trace` — token timelines and external-task history for a high-level view.
+
 ### Invariants
 
 The engine enforces formal invariants such as:

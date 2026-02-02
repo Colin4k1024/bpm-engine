@@ -350,6 +350,42 @@ pub struct TraceResponse {
     pub external_task_history: Vec<ExternalTaskHistoryEntryView>,
 }
 
+// --- History API (auditable execution timeline) ---
+
+#[derive(Serialize)]
+pub struct HistoryEventView {
+    pub sequence: u64,
+    pub id: String,
+    pub event_type: String,
+    pub category: String,
+    pub occurred_at: String,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Serialize)]
+pub struct HistoryResponse {
+    pub instance_id: String,
+    pub events: Vec<HistoryEventView>,
+}
+
+/// Map event_type to human-friendly category: instance | token | external.
+fn event_type_to_category(event_type: &str) -> &'static str {
+    match event_type {
+        "ProcessStarted" | "ProcessCompleted" => "instance",
+        "TokenArrived"
+        | "TokenCompleted"
+        | "TokenFailed"
+        | "UserTaskCreated"
+        | "UserTaskCompleted"
+        | "TimerScheduled"
+        | "TimerFired"
+        | "SagaStarted"
+        | "SagaCompleted" => "token",
+        "ExternalTaskLocked" | "ExternalTaskCompleted" | "ExternalTaskFailed" => "external",
+        _ => "token",
+    }
+}
+
 fn token_status_str(status: &bpm_engine_core::TokenStatus) -> &'static str {
     use bpm_engine_core::TokenStatus;
     match status {
@@ -527,15 +563,16 @@ pub async fn get_process_definition(
     Ok(Json(process_definition_to_view(&def)))
 }
 
-/// GET /api/v1/process-instances/:id/history — execution history for Trace UI timeline.
+/// GET /api/v1/process-instances/:id/history — execution history for Trace UI and auditing.
+/// Returns events in causal order with sequence and category (instance | token | external).
 pub async fn get_instance_history(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<bpm_engine_storage::HistoryEvent>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<HistoryResponse>, (StatusCode, Json<ErrorResponse>)> {
     let token_id = params.get("token_id").map(String::as_str);
     let event_type = params.get("event_type").map(String::as_str);
-    let events = HistoryRepo::list_by_instance(state.repo.as_ref(), &id, token_id, event_type)
+    let mut events = HistoryRepo::list_by_instance(state.repo.as_ref(), &id, token_id, event_type)
         .await
         .map_err(|e| {
             (
@@ -545,7 +582,27 @@ pub async fn get_instance_history(
                 }),
             )
         })?;
-    Ok(Json(events))
+    events.sort_by(|a, b| {
+        a.occurred_at
+            .cmp(&b.occurred_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let events: Vec<HistoryEventView> = events
+        .into_iter()
+        .enumerate()
+        .map(|(seq, ev)| HistoryEventView {
+            sequence: seq as u64,
+            id: ev.id,
+            event_type: ev.event_type.clone(),
+            category: event_type_to_category(&ev.event_type).to_string(),
+            occurred_at: ev.occurred_at,
+            payload: ev.payload,
+        })
+        .collect();
+    Ok(Json(HistoryResponse {
+        instance_id: id,
+        events,
+    }))
 }
 
 /// GET /api/v1/tasks?type=user|external
