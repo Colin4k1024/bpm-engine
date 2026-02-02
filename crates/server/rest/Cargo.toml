@@ -15,6 +15,7 @@ bpm-engine-runtime = { path = "../../runtime", version = "0.2.0" }
 bpm-engine-storage = { path = "../../storage", version = "0.2.0" }
 bpm-engine-adapter-memory = { path = "../../adapters/memory", version = "0.2.0" }
 bpm-engine-bpmn = { path = "../../bpmn", version = "0.2.0" }
+anyhow = { workspace = true }
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

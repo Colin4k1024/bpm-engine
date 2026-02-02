@@ -469,7 +469,16 @@ impl ExternalTaskStore for MemoryRepo {
             anyhow::bail!("task not locked");
         }
         if r.lock_owner.as_deref() != Some(worker_id) {
-            anyhow::bail!("lock owner mismatch");
+            return Err(bpm_engine_storage::InvariantViolation::new(
+                bpm_engine_storage::InvariantViolationKind::ExternalTaskLeaseConflict,
+                format!(
+                    "task_id={} expected_owner={:?} actual_worker={}",
+                    task_id,
+                    r.lock_owner.as_deref(),
+                    worker_id
+                ),
+            )
+            .into());
         }
         if let Some(exp) = r.lock_expire_at {
             if exp <= now_secs {
@@ -501,7 +510,16 @@ impl ExternalTaskStore for MemoryRepo {
             anyhow::bail!("task not locked");
         }
         if r.lock_owner.as_deref() != Some(worker_id) {
-            anyhow::bail!("lock owner mismatch");
+            return Err(bpm_engine_storage::InvariantViolation::new(
+                bpm_engine_storage::InvariantViolationKind::ExternalTaskLeaseConflict,
+                format!(
+                    "task_id={} expected_owner={:?} actual_worker={}",
+                    task_id,
+                    r.lock_owner.as_deref(),
+                    worker_id
+                ),
+            )
+            .into());
         }
         r.retries -= 1;
         r.error_message = Some(error);

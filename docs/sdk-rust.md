@@ -19,6 +19,13 @@ The **Rust Worker SDK** lets you implement external-task workers that poll the e
 
 ---
 
+## Delivery and idempotency
+
+- The **engine** guarantees **exactly-once token completion**: each token is advanced at most once.
+- **Workers** receive tasks **at least once**: the same task may be fetched again after a crash or lease expiry. Handlers **must be idempotent** (e.g. keyed by business id or task id).
+
+---
+
 ## Core types
 
 - **EngineClient** — HTTP client for the engine REST API (base URL, fetch-and-lock, complete, fail).
@@ -29,6 +36,8 @@ The **Rust Worker SDK** lets you implement external-task workers that poll the e
 ---
 
 ## Implementing a handler
+
+Handler must be idempotent; the same task may be delivered more than once.
 
 ```rust
 use async_trait::async_trait;

@@ -19,6 +19,7 @@ impl TaskHandler for PaymentHandler {
         "payment"
     }
 
+    // Handler must be idempotent: the same task may be delivered more than once (e.g. after worker crash or lease expiry).
     async fn handle(&self, task: ExternalTask, _ctx: TaskContext) -> TaskResult {
         let amount = task
             .variables

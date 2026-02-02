@@ -74,6 +74,7 @@ External tasks allow work to be executed by external workers:
 - Workers fetch tasks by topic
 - Tasks are protected by **leases**
 - Retries, timeouts, and crashes are handled by the engine
+- **Engine** guarantees exactly-once token completion; **workers** are at-least-once and **must** implement idempotent handlers
 
 ### Timer
 
@@ -93,6 +94,8 @@ Timers are persistent and scheduler-driven:
 
 - **Execution history**: `GET /api/v1/process-instances/:id/history` — returns events with `sequence` and `category` (instance | token | external) for auditing and debug.
 - **Aggregated trace**: `GET /api/v1/process-instances/:id/trace` — token timelines and external-task history for a high-level view.
+
+**History API Semantics:** Events are append-only; sequence is globally ordered per instance; replay reproduces the same token state; schema is backward-compatible once released.
 
 ### Invariants
 
@@ -130,6 +133,14 @@ External Workers (fetch / lock / complete via API)
 ```
 
 The persistence layer is the **single source of truth**. The default backend is **in-memory** (no database required for quick start). The engine can recover by re-running its schedulers. For a persistence-oriented deployment with PostgreSQL, see [docs/recovery.md](docs/recovery.md) and [docs/database-schema.md](docs/database-schema.md).
+
+### Where to start reading the code
+
+- **Engine entry**: `bpm-engine-runtime::BpmEngine::run_async`
+- **Token transitions**: `crates/runtime/src/handler/*` (and related handlers)
+- **Persistence boundary**: `bpm-engine-storage` traits (process, token, history, external task, timer)
+- **History emission**: `EngineEvent` and `HistoryHandler` in runtime; `GET .../history` in REST
+- **Invariants**: [docs/invariants.md](docs/invariants.md) and `tests/invariant_*.rs`
 
 ---
 

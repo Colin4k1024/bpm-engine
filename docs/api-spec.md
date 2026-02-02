@@ -155,6 +155,13 @@ Response:
 - **category**: `instance` (ProcessStarted, ProcessCompleted), `token` (Token*, UserTask*, Timer*, Saga*), or `external` (ExternalTaskLocked, ExternalTaskCompleted, ExternalTaskFailed).
 - Same event source as replay; use for auditing and debugging.
 
+**History API Semantics**
+
+- History events are **append-only**.
+- Sequence is **globally ordered per process instance** (by `occurred_at`, then `id`).
+- Replaying history must produce the same token state graph as live execution.
+- History response schema is **backward-compatible** once released.
+
 ---
 
 #### Get Instance Trace (aggregated view)
@@ -163,7 +170,7 @@ Response:
 GET /process-instances/{instance_id}/trace
 ```
 
-Returns instance state plus token timelines and external-task history aggregated by token/task. Use for a high-level view; use `/history` for the raw event timeline with sequence and category.
+Returns instance state plus token timelines and external-task history aggregated by token/task. Use for a high-level view; use `/history` for the raw event timeline with sequence and category. Trace and History use the same event source; Trace is an aggregated view and shares the same semantics as History.
 
 ---
 

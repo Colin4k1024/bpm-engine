@@ -55,3 +55,16 @@ Tests are written to assert these invariants under concurrency and failure:
 - **External task**: Lock, complete, and fail only by the owning worker; idempotent complete/fail where specified.
 
 Adding or changing behavior should preserve these invariants; new tests should be added when extending the engine.
+
+---
+
+## 6. Invariant violations in errors
+
+When the runtime rejects an operation because it would violate an invariant, it returns an error that carries an **invariant violation kind** (`InvariantViolationKind`). This makes failures identifiable in logs, crash post-mortems, and issue reports, and supports future tooling (e.g. Execution Inspector UI).
+
+- **TokenFinalizedTwice** — Token already in a final state (Completed/Terminated); corresponds to §1 (Exactly-once completion).
+- **JoinIncomplete** — Parallel join advanced before all branches arrived; corresponds to §2 (All branches required).
+- **ExternalTaskLeaseConflict** — Complete or fail called by a worker that does not hold the task lock; corresponds to §3 (Exactly one owner).
+- **TokenInvalidTransition** — Invalid token state transition; corresponds to §1 (Valid state transitions).
+
+REST API: when an external-task complete or fail call fails with an invariant violation, the response includes a `X-Invariant-Violation` header with the kind name (e.g. `ExternalTaskLeaseConflict`).

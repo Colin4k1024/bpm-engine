@@ -200,6 +200,7 @@ dependencies = [
 name = "bpm-engine-server-rest"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
  "axum",
  "bpm-engine-adapter-memory",
  "bpm-engine-bpmn",
@@ -222,6 +223,7 @@ dependencies = [
  "bpm-engine-core",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]

@@ -2,7 +2,8 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -12,7 +13,7 @@ use bpm_engine_core::{
 };
 use bpm_engine_runtime::{transition, EngineContext};
 use bpm_engine_storage::{
-    CompensationRecordRepo, ExternalTaskStore, HistoryRepo, ParallelJoinRepo,
+    CompensationRecordRepo, ExternalTaskStore, HistoryRepo, InvariantViolation, ParallelJoinRepo,
     ProcessDefinitionStore, ProcessInstanceStore, TimerStore, TokenStore,
 };
 use serde::{Deserialize, Serialize};
@@ -69,6 +70,23 @@ pub struct ExternalTaskFailRequest {
     pub worker_id: String,
     pub error: String,
     pub retry_after_ms: Option<u64>,
+}
+
+/// Build 4xx error response; adds X-Invariant-Violation header when error is InvariantViolation.
+fn external_task_error_response(e: anyhow::Error) -> Response {
+    let mut res = (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: e.to_string(),
+        }),
+    )
+        .into_response();
+    if let Some(inv) = e.downcast_ref::<InvariantViolation>() {
+        if let Ok(hv) = HeaderValue::try_from(inv.kind.to_string().as_str()) {
+            res.headers_mut().insert("X-Invariant-Violation", hv);
+        }
+    }
+    res
 }
 
 fn tenant_from_headers(headers: &HeaderMap) -> Option<String> {
@@ -751,18 +769,11 @@ pub async fn external_task_complete(
     headers: HeaderMap,
     Path(task_id): Path<String>,
     Json(body): Json<ExternalTaskCompleteRequest>,
-) -> Result<Json<CompleteTaskResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<CompleteTaskResponse>, Response> {
     let repo = Arc::clone(&state.repo);
     repo.complete(&task_id, &body.worker_id, body.variables.clone())
         .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        .map_err(external_task_error_response)?;
     let task = repo
         .get(&task_id)
         .await
@@ -773,13 +784,17 @@ pub async fn external_task_complete(
                     error: e.to_string(),
                 }),
             )
+                .into_response()
         })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("task not found after complete: {}", task_id),
-            }),
-        ))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("task not found after complete: {}", task_id),
+                }),
+            )
+                .into_response()
+        })?;
     let occurred_at = occurred_at_now();
     let payload = serde_json::json!({
         "task_id": task.task_id,
@@ -797,18 +812,24 @@ pub async fn external_task_complete(
     .await;
     let tenant_id = tenant_from_headers(&headers);
     let mut ctx = build_ctx(state.as_ref(), tenant_id);
-    let process_store = ctx.process_store.as_ref().ok_or((
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-            error: "process_store not configured".to_string(),
-        }),
-    ))?;
-    let process_def_store = ctx.process_def_store.as_ref().ok_or((
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-            error: "process_def_store not configured".to_string(),
-        }),
-    ))?;
+    let process_store = ctx.process_store.as_ref().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "process_store not configured".to_string(),
+            }),
+        )
+            .into_response()
+    })?;
+    let process_def_store = ctx.process_def_store.as_ref().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "process_def_store not configured".to_string(),
+            }),
+        )
+            .into_response()
+    })?;
     let mut instance = process_store
         .load(&task.process_instance_id)
         .await
@@ -819,24 +840,31 @@ pub async fn external_task_complete(
                     error: e.to_string(),
                 }),
             )
+                .into_response()
         })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("instance not found: {}", task.process_instance_id),
-            }),
-        ))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("instance not found: {}", task.process_instance_id),
+                }),
+            )
+                .into_response()
+        })?;
     let token = instance
         .tokens
         .iter()
         .find(|t| t.id == task.token_id)
         .cloned();
-    let node_id = token.as_ref().map(|t| t.node_id.clone()).ok_or((
-        StatusCode::BAD_REQUEST,
-        Json(ErrorResponse {
-            error: format!("token not found in instance: {}", task.token_id),
-        }),
-    ))?;
+    let node_id = token.as_ref().map(|t| t.node_id.clone()).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("token not found in instance: {}", task.token_id),
+            }),
+        )
+            .into_response()
+    })?;
     let def = process_def_store
         .load(&instance.process_def_id)
         .await
@@ -847,19 +875,26 @@ pub async fn external_task_complete(
                     error: e.to_string(),
                 }),
             )
+                .into_response()
         })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("process def not found: {}", instance.process_def_id),
+                }),
+            )
+                .into_response()
+        })?;
+    let node = def.nodes.get(node_id.as_str()).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: format!("process def not found: {}", instance.process_def_id),
+                error: format!("node not found: {}", node_id),
             }),
-        ))?;
-    let node = def.nodes.get(node_id.as_str()).ok_or((
-        StatusCode::BAD_REQUEST,
-        Json(ErrorResponse {
-            error: format!("node not found: {}", node_id),
-        }),
-    ))?;
+        )
+            .into_response()
+    })?;
     instance.tokens.retain(|t| t.id != task.token_id);
     let new_tokens = transition::move_token(node);
     for (k, v) in body.variables {
@@ -873,6 +908,7 @@ pub async fn external_task_complete(
                 error: e.to_string(),
             }),
         )
+            .into_response()
     })?;
     for t in &new_tokens {
         let ev = EngineEvent::TokenArrived(payloads::TokenArrived {
@@ -892,19 +928,12 @@ pub async fn external_task_fail(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
     Json(body): Json<ExternalTaskFailRequest>,
-) -> Result<Json<CompleteTaskResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<CompleteTaskResponse>, Response> {
     let repo = Arc::clone(&state.repo);
     let retry_after = body.retry_after_ms.map(Duration::from_millis);
     repo.fail(&task_id, &body.worker_id, body.error.clone(), retry_after)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        .map_err(external_task_error_response)?;
     let task = repo
         .get(&task_id)
         .await
@@ -915,13 +944,17 @@ pub async fn external_task_fail(
                     error: e.to_string(),
                 }),
             )
+                .into_response()
         })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("task not found after fail: {}", task_id),
-            }),
-        ))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("task not found after fail: {}", task_id),
+                }),
+            )
+                .into_response()
+        })?;
     let occurred_at = occurred_at_now();
     let payload = serde_json::json!({
         "task_id": task.task_id,
