@@ -4,9 +4,9 @@
 
 - **项目名**: bpm-engine
 - **类型**: 开源 Rust BPM 引擎
-- **当前任务**: bpm-engine-evolution-plan（已关闭）
+- **当前任务**: chinese-docs-support（已完成）
 - **任务日期**: 2026-04-04
-- **任务状态**: closed
+- **任务状态**: completed
 
 ## Tech Stack
 
@@ -64,7 +64,7 @@ crates/worker-sdk   # External task worker
 
 ## 下一步
 
-1. **短期**：无紧急项
+1. **短期**：中文文档支持（chinese-docs-support）
 2. **中期**：PostgreSQL 适配器完整实现
 3. **长期**：开源发布准备、Dashboard、Python Worker SDK
 
