@@ -24,6 +24,15 @@ pub fn move_token(node: &Node) -> Vec<Token> {
         .collect()
 }
 
+/// Move token while preserving the parallel_group_id from the incoming token.
+/// Used by nodes that need to maintain group context (ServiceTask, etc.)
+pub fn move_token_preserving_group(node: &Node, parallel_group_id: Option<String>) -> Vec<Token> {
+    node.outgoing_edges
+        .iter()
+        .map(|e| new_token(e.target.to_string(), parallel_group_id.clone()))
+        .collect()
+}
+
 pub fn move_token_with_group(node: &Node, parallel_group_id: String) -> Vec<Token> {
     node.outgoing_edges
         .iter()

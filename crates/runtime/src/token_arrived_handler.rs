@@ -8,7 +8,9 @@ use std::sync::Mutex;
 use tracing::{debug, warn};
 
 use super::handler::{EngineContext, EventHandler};
-use super::transition::{evaluate_exclusive_gateway, move_token, move_token_with_group};
+use super::transition::{
+    evaluate_exclusive_gateway, move_token, move_token_preserving_group, move_token_with_group,
+};
 
 pub struct TokenArrivedHandler {
     join_state: Mutex<HashMap<String, (usize, HashSet<String>)>>,
@@ -49,14 +51,19 @@ impl EventHandler for TokenArrivedHandler {
         let Some(token_idx) = instance.tokens.iter().position(|t| t.id == e.token_id) else {
             return vec![];
         };
-        let token = &instance.tokens[token_idx];
+        // Extract group_id early to avoid borrow conflicts
+        let parallel_group_id = instance.tokens[token_idx].parallel_group_id.clone();
         if let Some(tr) = ctx.token_store.as_ref() {
             if !tr
-                .claim_token(&e.instance_id, &token.id, token.version)
+                .claim_token(
+                    &e.instance_id,
+                    &e.token_id,
+                    instance.tokens[token_idx].version,
+                )
                 .await
                 .unwrap_or(false)
             {
-                warn!(instance_id = %e.instance_id, token_id = %token.id, "token claim failed (CAS)");
+                warn!(instance_id = %e.instance_id, token_id = %e.token_id, "token claim failed (CAS)");
                 return vec![];
             }
             instance.tokens[token_idx].status = TokenStatus::Executing;
@@ -86,7 +93,7 @@ impl EventHandler for TokenArrivedHandler {
             NodeType::ServiceTask(service) => {
                 service(&mut instance);
                 instance.tokens[token_idx].status = TokenStatus::Waiting;
-                let new_tokens = move_token(node);
+                let new_tokens = move_token_preserving_group(node, parallel_group_id.clone());
                 for t in &new_tokens {
                     out.push(EngineEvent::TokenArrived(payloads::TokenArrived {
                         instance_id: e.instance_id.clone(),

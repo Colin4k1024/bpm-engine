@@ -99,10 +99,32 @@ fn eval_neq(
 
 fn parse_f64(s: &str, variables: &HashMap<String, String>) -> Result<f64, ElError> {
     let s = s.trim();
+    // Handle negative numbers: if the string starts with '-' followed by a number,
+    // parse the number part and negate it. This handles cases like "-1" or "- 1".
+    if s.starts_with('-') && s.len() > 1 {
+        let rest = &s[1..];
+        // If the rest (after minus) is a valid number literal, parse and negate
+        if let Ok(val) = rest.trim().parse::<f64>() {
+            return Ok(-val);
+        }
+    }
     if let Some(q) = unquote(s) {
+        // Check for negative inside quotes too
+        if q.starts_with('-') && q.len() > 1 {
+            if let Ok(val) = q[1..].trim().parse::<f64>() {
+                return Ok(-val);
+            }
+        }
         q.parse::<f64>()
             .map_err(|_| ElError(format!("not a number: {}", q)))
     } else if let Some(v) = variables.get(s) {
+        // Check for negative variable values
+        let v_trim = v.trim();
+        if v_trim.starts_with('-') && v_trim.len() > 1 {
+            if let Ok(val) = v_trim[1..].trim().parse::<f64>() {
+                return Ok(-val);
+            }
+        }
         v.trim()
             .parse::<f64>()
             .map_err(|_| ElError(format!("variable {} is not a number: {:?}", s, v)))
@@ -129,4 +151,78 @@ where
     })?;
     let b = parse_f64(right, variables)?;
     Ok(op(a, b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_negative_number_literal_in_comparison() {
+        // x >= -5: left value "10" should be >= -5
+        let mut vars = HashMap::new();
+        vars.insert("x".to_string(), "10".to_string());
+        assert!(eval_condition("x >= -5", &vars).unwrap());
+
+        // x >= -5: left value "-10" should NOT be >= -5
+        let mut vars = HashMap::new();
+        vars.insert("x".to_string(), "-10".to_string());
+        assert!(!eval_condition("x >= -5", &vars).unwrap());
+
+        // x > -5: left value "-4" should be > -5
+        let mut vars = HashMap::new();
+        vars.insert("x".to_string(), "-4".to_string());
+        assert!(eval_condition("x > -5", &vars).unwrap());
+
+        // x < -5: left value "-10" should be < -5
+        let mut vars = HashMap::new();
+        vars.insert("x".to_string(), "-10".to_string());
+        assert!(eval_condition("x < -5", &vars).unwrap());
+    }
+
+    #[test]
+    fn test_negative_number_with_spaces() {
+        // x >= - 5 (with space after minus)
+        let mut vars = HashMap::new();
+        vars.insert("x".to_string(), "10".to_string());
+        assert!(eval_condition("x >= - 5", &vars).unwrap());
+    }
+
+    #[test]
+    fn test_negative_variable_value() {
+        // x >= y where y has a negative value
+        let mut vars = HashMap::new();
+        vars.insert("x".to_string(), "10".to_string());
+        vars.insert("y".to_string(), "-5".to_string());
+        assert!(eval_condition("x >= y", &vars).unwrap());
+
+        // x >= y where both are negative
+        let mut vars = HashMap::new();
+        vars.insert("x".to_string(), "-10".to_string());
+        vars.insert("y".to_string(), "-5".to_string());
+        assert!(!eval_condition("x >= y", &vars).unwrap());
+    }
+
+    #[test]
+    fn test_negative_number_quoted() {
+        // x >= "-5" with quoted negative literal
+        let mut vars = HashMap::new();
+        vars.insert("x".to_string(), "10".to_string());
+        assert!(eval_condition("x >= \"-5\"", &vars).unwrap());
+    }
+
+    #[test]
+    fn test_parse_f64_negative() {
+        let vars = HashMap::new();
+
+        // Direct negative number parsing
+        assert_eq!(parse_f64("-5", &vars).unwrap(), -5.0);
+        assert_eq!(parse_f64("- 5", &vars).unwrap(), -5.0);
+        assert_eq!(parse_f64("-123.45", &vars).unwrap(), -123.45);
+        assert_eq!(parse_f64("- 123.45", &vars).unwrap(), -123.45);
+
+        // Positive numbers still work
+        assert_eq!(parse_f64("5", &vars).unwrap(), 5.0);
+        assert_eq!(parse_f64("123.45", &vars).unwrap(), 123.45);
+    }
 }

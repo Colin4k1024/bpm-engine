@@ -4,6 +4,7 @@ members = [
     "crates/storage",
     "crates/runtime",
     "crates/adapters/memory",
+    "crates/adapters/postgres",
     "crates/bpmn",
     "crates/server/rest",
     "crates/worker-sdk",
