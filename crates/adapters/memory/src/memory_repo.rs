@@ -424,23 +424,22 @@ impl ExternalTaskStore for MemoryRepo {
         let _ = self.reclaim_expired_locks().await?;
         let expire_at = unix_secs() + lock_duration.as_secs();
         let task_types: std::collections::HashSet<_> = task_types.iter().cloned().collect();
-        let mut order: Vec<(String, String)> = {
-            let guard = self.external_tasks.read().unwrap();
-            guard
-                .iter()
-                .filter(|(_, r)| {
-                    r.state == ExternalTaskState::Ready && task_types.contains(&r.task_type)
-                })
-                .map(|(id, r)| (id.clone(), r.created_at.clone()))
-                .collect()
-        };
+        // Atomically filter, sort, select, and lock — single WriteLock critical section
+        // eliminates TOCTOU race where two workers could acquire the same task.
+        let mut guard = self.external_tasks.write().unwrap();
+        let mut order: Vec<(String, String)> = guard
+            .iter()
+            .filter(|(_, r)| {
+                r.state == ExternalTaskState::Ready && task_types.contains(&r.task_type)
+            })
+            .map(|(id, r)| (id.clone(), r.created_at.clone()))
+            .collect();
         order.sort_by(|a, b| a.1.cmp(&b.1));
         let take: Vec<String> = order
             .into_iter()
             .take(max_tasks)
             .map(|(id, _)| id)
             .collect();
-        let mut guard = self.external_tasks.write().unwrap();
         let mut out = vec![];
         for task_id in take {
             if let Some(r) = guard.get_mut(&task_id) {
