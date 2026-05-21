@@ -2,6 +2,12 @@
 
 **A correctness-first workflow execution kernel in Rust, designed for deterministic replay and crash-safe long-running processes.**
 
+[![Docs](https://img.shields.io/badge/docs-github.pages-blue)](https://fanjia1024.github.io/bpm-engine/)
+[![crates.io](https://img.shields.io/crates/v/bpm-engine)](https://crates.io/crates/bpm-engine)
+[![CI](https://github.com/fanjia1024/bpm-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/fanjia1024/bpm-engine/actions/workflows/ci.yml)
+
+> **Documentation Site**: [https://fanjia1024.github.io/bpm-engine/](https://fanjia1024.github.io/bpm-engine/)
+
 This project focuses on **execution semantics, persistence correctness, and crash safety**, rather than UI or low-code features. It is designed as a **token-driven, persistence-first BPM engine** with formally defined invariants.
 
 ---

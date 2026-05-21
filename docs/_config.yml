@@ -1,0 +1,44 @@
+title: bpm-engine
+description: A correctness-first, token-driven workflow execution kernel in Rust
+theme: jekyll-theme-minimal
+github:
+  repository_url: https://github.com/fanjia1024/bpm-engine
+  repository_name: fanjia1024/bpm-engine
+
+# Jekyll settings
+markdown: kramdown
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+
+# Exclude from processing
+exclude:
+  - README.md
+  - LICENSE.txt
+  - CHANGELOG.md
+  - CLAUDE.md
+  - CLAUDE_zh.md
+
+# Collections
+collections:
+  adr:
+    output: true
+    permalink: /adr/:name/
+
+# Defaults
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+
+# Plugins
+plugins:
+  - jekyll-github-metadata
+  - jekyll-remote-theme
+
+# Minify HTML
+compress_html:
+  clippings: all
+  comments: all
+  startings: [html, head, body]
