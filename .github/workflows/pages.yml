@@ -35,7 +35,7 @@ jobs:
       - name: Install dependencies
         run: |
           cd docs
-          gem install jekyll jekyll-remote-theme jekyll-github-metadata
+          gem install jekyll
           gem install kramdown-parser-gfm rouge
 
       - name: Build Jekyll site
