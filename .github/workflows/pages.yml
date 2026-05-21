@@ -41,7 +41,7 @@ jobs:
       - name: Build Jekyll site
         run: |
           cd docs
-          jekyll build --baseurl ${{ steps.pages.outputs.base_path }}
+          jekyll build
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
