@@ -2,13 +2,17 @@
 
 use std::collections::HashMap;
 
-/// External task lifecycle (plan §3).
+/// Lifecycle state of an external task. See [`ExternalTaskStore`](bpm_engine_storage::ExternalTaskStore) for transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ExternalTaskState {
+    /// Available for workers to fetch and lock.
     Ready,
+    /// Held by a worker under a time-limited lease.
     Locked,
+    /// Worker reported successful completion.
     Completed,
+    /// All retries exhausted — requires manual intervention.
     Failed,
 }
 
@@ -23,7 +27,10 @@ impl ExternalTaskState {
     }
 }
 
-/// External task DTO for API and store (plan §5).
+/// Data transfer object for an external task (used by REST API and storage).
+///
+/// External tasks delegate work to stateless workers via a fetch-and-lock protocol.
+/// The engine guarantees exactly one owner at a time through lease-based exclusivity.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExternalTask {
     pub task_id: String,

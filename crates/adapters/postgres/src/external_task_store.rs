@@ -228,50 +228,49 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
         let retries: i32 = row.as_ref().map(|r| r.get("retries")).unwrap_or(0);
 
         if retries > 0 {
-            // Return to Ready for retry
-            let lock_expire_at = retry_after
-                .map(|d| {
-                    SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs() as i64
-                        + d.as_secs() as i64
-                })
-                .map(|t| format!("to_timestamp({})", t));
+            let lock_expire_epoch: Option<i64> = retry_after.map(|d| {
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64
+                    + d.as_secs() as i64
+            });
 
-            let query = if let Some(ref le) = lock_expire_at {
-                format!(
-                    r#"
-                    UPDATE external_task
-                    SET state = 'Ready',
-                        retries = retries - 1,
-                        lock_expire_at = {},
-                        worker_id = NULL,
-                        error_message = $3,
-                        updated_at = CURRENT_TIMESTAMP,
-                        version = version + 1
-                    WHERE id = $1 AND worker_id = $2 AND state = 'Locked'
-                    "#,
-                    le
-                )
+            let result = if let Some(epoch) = lock_expire_epoch {
+                client
+                    .execute(
+                        r#"
+                        UPDATE external_task
+                        SET state = 'Ready',
+                            retries = retries - 1,
+                            lock_expire_at = to_timestamp($4),
+                            worker_id = NULL,
+                            error_message = $3,
+                            updated_at = CURRENT_TIMESTAMP,
+                            version = version + 1
+                        WHERE id = $1 AND worker_id = $2 AND state = 'Locked'
+                        "#,
+                        &[&task_id, &worker_id, &error, &(epoch as f64)],
+                    )
+                    .await?
             } else {
-                r#"
-                UPDATE external_task
-                SET state = 'Ready',
-                    retries = retries - 1,
-                    lock_expire_at = NULL,
-                    worker_id = NULL,
-                    error_message = $3,
-                    updated_at = CURRENT_TIMESTAMP,
-                    version = version + 1
-                WHERE id = $1 AND worker_id = $2 AND state = 'Locked'
-                "#
-                .to_string()
+                client
+                    .execute(
+                        r#"
+                        UPDATE external_task
+                        SET state = 'Ready',
+                            retries = retries - 1,
+                            lock_expire_at = NULL,
+                            worker_id = NULL,
+                            error_message = $3,
+                            updated_at = CURRENT_TIMESTAMP,
+                            version = version + 1
+                        WHERE id = $1 AND worker_id = $2 AND state = 'Locked'
+                        "#,
+                        &[&task_id, &worker_id, &error],
+                    )
+                    .await?
             };
-
-            let result = client
-                .execute(&query, &[&task_id, &worker_id, &error])
-                .await?;
 
             if result == 0 {
                 anyhow::bail!("task not found or not locked by worker");

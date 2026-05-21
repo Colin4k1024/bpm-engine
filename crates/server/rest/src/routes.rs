@@ -3,6 +3,7 @@
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
+    middleware as axum_mw,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -21,6 +22,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use super::middleware;
+use super::replay::evict_expired;
 
 fn occurred_at_now() -> String {
     SystemTime::now()
@@ -106,6 +110,25 @@ fn external_task_error_response(e: anyhow::Error) -> Response {
     res
 }
 
+/// Log error details server-side and return a generic 500 response.
+fn internal_error(e: anyhow::Error) -> Response {
+    tracing::error!(error = %e, "internal server error");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse::new("internal server error".to_string())),
+    )
+        .into_response()
+}
+
+/// Log error details server-side and return a generic 500 tuple (for non-Response handlers).
+fn internal_error_tuple(e: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
+    tracing::error!(error = %e, "internal server error");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse::new("internal server error".to_string())),
+    )
+}
+
 fn tenant_from_headers(headers: &HeaderMap) -> Option<String> {
     headers
         .get("x-tenant-id")
@@ -144,18 +167,20 @@ fn build_ctx_with_repo(
     tenant_id: Option<String>,
 ) -> EngineContext {
     let def_store = Arc::clone(def_store);
-    EngineContext {
-        process_store: Some(repo.clone() as Arc<dyn ProcessInstanceStore>),
-        token_store: Some(repo.clone() as Arc<dyn TokenStore>),
-        process_def_store: Some(def_store.clone() as Arc<dyn ProcessDefinitionStore>),
-        parallel_join_repo: Some(repo.clone() as Arc<dyn ParallelJoinRepo>),
-        timer_store: Some(repo.clone() as Arc<dyn TimerStore>),
-        compensation_repo: Some(repo.clone() as Arc<dyn CompensationRecordRepo>),
-        outbox_repo: None,
-        external_task_store: Some(repo.clone() as Arc<dyn ExternalTaskStore>),
-        history_repo: Some(repo.clone() as Arc<dyn HistoryRepo>),
-        tenant_id,
+    let mut builder = EngineContext::builder(
+        repo.clone() as Arc<dyn ProcessInstanceStore>,
+        repo.clone() as Arc<dyn TokenStore>,
+        def_store as Arc<dyn ProcessDefinitionStore>,
+    )
+    .parallel_join_repo(repo.clone() as Arc<dyn ParallelJoinRepo>)
+    .timer_store(repo.clone() as Arc<dyn TimerStore>)
+    .compensation_repo(repo.clone() as Arc<dyn CompensationRecordRepo>)
+    .external_task_store(repo.clone() as Arc<dyn ExternalTaskStore>)
+    .history_repo(repo.clone() as Arc<dyn HistoryRepo>);
+    if let Some(id) = tenant_id {
+        builder = builder.tenant_id(id);
     }
+    builder.build()
 }
 
 fn instance_id_from_event(ev: &EngineEvent) -> Option<String> {
@@ -463,12 +488,7 @@ pub async fn get_instance_trace(
     };
     let events = HistoryRepo::list_by_instance(state.repo.as_ref(), &id, None, None)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(e.to_string())),
-            )
-        })?;
+        .map_err(internal_error_tuple)?;
     let token_ids_in_instance: std::collections::HashMap<
         String,
         (String, bpm_engine_core::TokenStatus),
@@ -616,12 +636,7 @@ pub async fn get_instance_history(
     let event_type = params.get("event_type").map(String::as_str);
     let mut events = HistoryRepo::list_by_instance(state.repo.as_ref(), &id, token_id, event_type)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(e.to_string())),
-            )
-        })?;
+        .map_err(internal_error_tuple)?;
     events.sort_by(|a, b| {
         a.occurred_at
             .cmp(&b.occurred_at)
@@ -737,23 +752,16 @@ pub async fn external_task_fetch_and_lock(
     Json(body): Json<FetchAndLockRequest>,
 ) -> Result<Json<Vec<ExternalTaskResponse>>, (StatusCode, Json<ErrorResponse>)> {
     let repo = Arc::clone(&state.repo);
-    let _ = repo.reclaim_expired_locks().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new(e.to_string())),
-        )
-    })?;
+    let _ = repo
+        .reclaim_expired_locks()
+        .await
+        .map_err(internal_error_tuple)?;
     let lock_duration = Duration::from_millis(body.lock_duration_ms);
     let max_tasks = body.max_tasks as usize;
     let tasks = repo
         .fetch_and_lock(&body.worker_id, &body.task_types, max_tasks, lock_duration)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(e.to_string())),
-            )
-        })?;
+        .map_err(internal_error_tuple)?;
     let occurred_at = occurred_at_now();
     for t in &tasks {
         let payload = serde_json::json!({
@@ -799,13 +807,7 @@ pub async fn external_task_complete(
     let task = repo
         .get(&task_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(e.to_string())),
-            )
-                .into_response()
-        })?
+        .map_err(internal_error)?
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
@@ -833,34 +835,11 @@ pub async fn external_task_complete(
     .await;
     let tenant_id = tenant_from_headers(&headers);
     let mut ctx = build_ctx(state.as_ref(), tenant_id);
-    let process_store = ctx.process_store.as_ref().ok_or_else(|| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new(
-                "process_store not configured".to_string(),
-            )),
-        )
-            .into_response()
-    })?;
-    let process_def_store = ctx.process_def_store.as_ref().ok_or_else(|| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new(
-                "process_def_store not configured".to_string(),
-            )),
-        )
-            .into_response()
-    })?;
-    let mut instance = process_store
+    let mut instance = ctx
+        .process_store
         .load(&task.process_instance_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(e.to_string())),
-            )
-                .into_response()
-        })?
+        .map_err(internal_error)?
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
@@ -886,16 +865,11 @@ pub async fn external_task_complete(
         )
             .into_response()
     })?;
-    let def = process_def_store
+    let def = ctx
+        .process_def_store
         .load(&instance.process_def_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(e.to_string())),
-            )
-                .into_response()
-        })?
+        .map_err(internal_error)?
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
@@ -913,19 +887,25 @@ pub async fn external_task_complete(
         )
             .into_response()
     })?;
-    instance.tokens.retain(|t| t.id != task.token_id);
-    let new_tokens = transition::move_token(node);
+    // Merge variables into instance before advancing
     for (k, v) in body.variables {
         instance.variables.insert(k, v);
     }
+    // Emit TokenCompleted through engine for history recording
+    let completed_ev = EngineEvent::TokenCompleted(payloads::TokenCompleted {
+        instance_id: task.process_instance_id.clone(),
+        token_id: task.token_id.clone(),
+    });
+    state.engine.run_async(completed_ev, &mut ctx).await;
+    // Advance: remove completed token, create new tokens, persist
+    instance.tokens.retain(|t| t.id != task.token_id);
+    let new_tokens = transition::move_token(node);
     instance.tokens.extend(new_tokens.clone());
-    process_store.save(&instance).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new(e.to_string())),
-        )
-            .into_response()
-    })?;
+    ctx.process_store
+        .save(&instance)
+        .await
+        .map_err(internal_error)?;
+    // Emit TokenArrived for each new token through engine event loop
     for t in &new_tokens {
         let ev = EngineEvent::TokenArrived(payloads::TokenArrived {
             instance_id: task.process_instance_id.clone(),
@@ -953,13 +933,7 @@ pub async fn external_task_fail(
     let task = repo
         .get(&task_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(e.to_string())),
-            )
-                .into_response()
-        })?
+        .map_err(internal_error)?
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
@@ -1108,17 +1082,18 @@ pub async fn create_replay(
     ))?;
     let events = HistoryRepo::list_by_instance(state.repo.as_ref(), &id, None, None)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new(e.to_string())),
-            )
-        })?;
+        .map_err(internal_error_tuple)?;
     let session_id = uuid::Uuid::new_v4().to_string();
     let session = ReplaySession::new(id.clone(), events);
     let total_events = session.total_events();
     {
-        let mut guard = state.replay_sessions.write().unwrap();
+        evict_expired(&state.replay_sessions);
+        let mut guard = state.replay_sessions.write().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("internal lock error".to_string())),
+            )
+        })?;
         guard.insert(session_id.clone(), session);
     }
     Ok((
@@ -1155,7 +1130,12 @@ pub async fn replay_step(
     Path(session_id): Path<String>,
 ) -> Result<Json<ReplayStepResponse>, (StatusCode, Json<ErrorResponse>)> {
     let (ev_clone, snapshot_clone) = {
-        let guard = state.replay_sessions.read().unwrap();
+        let guard = state.replay_sessions.read().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("internal lock error".to_string())),
+            )
+        })?;
         let session = guard.get(&session_id).ok_or((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new(
@@ -1196,13 +1176,19 @@ pub async fn replay_step(
         node_id,
     };
     let cursor = {
-        let mut guard = state.replay_sessions.write().unwrap();
+        let mut guard = state.replay_sessions.write().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("internal lock error".to_string())),
+            )
+        })?;
         let session = guard.get_mut(&session_id).ok_or((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new(
                 "replay session not found or expired".to_string(),
             )),
         ))?;
+        session.touch();
         session.snapshot = Some(new_snapshot.clone());
         session.cursor += 1;
         session.cursor
@@ -1222,7 +1208,12 @@ pub async fn replay_seek(
     Json(body): Json<ReplaySeekRequest>,
 ) -> Result<Json<ReplaySeekResponse>, (StatusCode, Json<ErrorResponse>)> {
     let events_to_apply: Vec<bpm_engine_storage::HistoryEvent> = {
-        let guard = state.replay_sessions.read().unwrap();
+        let guard = state.replay_sessions.read().map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("internal lock error".to_string())),
+            )
+        })?;
         let session = guard.get(&session_id).ok_or((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new(
@@ -1242,10 +1233,12 @@ pub async fn replay_seek(
         }
     }
     {
-        let mut guard = state.replay_sessions.write().unwrap();
-        if let Some(session) = guard.get_mut(&session_id) {
-            session.cursor = cursor;
-            session.snapshot = snapshot.clone();
+        if let Ok(mut guard) = state.replay_sessions.write() {
+            if let Some(session) = guard.get_mut(&session_id) {
+                session.touch();
+                session.cursor = cursor;
+                session.snapshot = snapshot.clone();
+            }
         }
     }
     let snapshot_view = replay_snapshot_from_instance(snapshot.as_ref());
@@ -1260,7 +1253,12 @@ pub async fn get_replay_snapshot(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> Result<Json<ReplaySnapshotResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let guard = state.replay_sessions.read().unwrap();
+    let guard = state.replay_sessions.read().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new("internal lock error".to_string())),
+        )
+    })?;
     let session = guard.get(&session_id).ok_or((
         StatusCode::NOT_FOUND,
         Json(ErrorResponse::new(
@@ -1294,7 +1292,12 @@ pub async fn delete_replay_session(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let mut guard = state.replay_sessions.write().unwrap();
+    let mut guard = state.replay_sessions.write().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new("internal lock error".to_string())),
+        )
+    })?;
     guard.remove(&session_id);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1332,6 +1335,10 @@ pub async fn deploy_bpmn(
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
+    let rate_limiter = std::sync::Arc::new(tokio::sync::Mutex::new(
+        middleware::RateLimiterState::new(100, 60),
+    ));
+
     Router::new().nest(
         "/api/v1",
         Router::new()
@@ -1357,6 +1364,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             )
             .route("/external-tasks/:task_id/fail", post(external_task_fail))
             .route("/process-definitions/deploy", post(deploy_bpmn))
-            .with_state(state),
+            .with_state(state)
+            .layer(axum_mw::from_fn(middleware::api_key_auth))
+            .layer(axum_mw::from_fn_with_state(
+                rate_limiter,
+                middleware::rate_limit,
+            )),
     )
 }

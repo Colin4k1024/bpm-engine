@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 bpm-engine-core = { path = "../../core", version = "0.2.0" }
 bpm-engine-storage = { path = "../../storage", version = "0.2.0" }
+bpm-engine-bpmn = { path = "../../bpmn", version = "0.2.0" }
 
 anyhow = { workspace = true }
 async-trait = "0.1"
@@ -23,3 +24,5 @@ url = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+testcontainers = "0.15"
+testcontainers-modules = { version = "0.3", features = ["postgres"] }

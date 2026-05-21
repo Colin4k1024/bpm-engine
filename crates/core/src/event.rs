@@ -1,4 +1,4 @@
-// Placeholder; full content in step 2 (payloads + event_from_outbox need serde_json).
+/// Event payloads carried by [`EngineEvent`] variants.
 pub mod payloads {
     use std::collections::HashMap;
 
@@ -80,6 +80,11 @@ pub mod payloads {
     }
 }
 
+/// Immutable event driving all state transitions in the BPM engine.
+///
+/// Events are the sole input to [`EventHandler`](crate::EngineEvent) implementations.
+/// Each event variant carries a typed payload describing what happened.
+/// The engine event pump drives events through handlers until quiescence.
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
     ProcessStarted(payloads::ProcessStarted),
@@ -95,6 +100,9 @@ pub enum EngineEvent {
     ProcessCompleted(payloads::ProcessCompleted),
 }
 
+/// Reconstruct an [`EngineEvent`] from outbox columns (event_type + JSON payload).
+///
+/// Returns `None` if the event_type is unknown or the payload fails deserialization.
 pub fn event_from_outbox(event_type: &str, payload: &str) -> Option<EngineEvent> {
     let ev = match event_type {
         "ProcessStarted" => EngineEvent::ProcessStarted(serde_json::from_str(payload).ok()?),

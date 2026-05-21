@@ -146,7 +146,7 @@ impl TokenStore for PostgresTokenStore {
                     &(token.attempt as i32),
                     &token.parallel_group_id,
                     &token.updated_at,
-                    &((token.version - 1) as i32),
+                    &(token.version.saturating_sub(1) as i32),
                 ],
             )
             .await?;

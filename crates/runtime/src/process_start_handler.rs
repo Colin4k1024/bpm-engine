@@ -17,12 +17,8 @@ impl EventHandler for ProcessStartHandler {
             return vec![];
         };
         info!(instance_id = %e.instance_id, process_id = %e.process_id, "process started");
-        let Some(process_store) = ctx.process_store.as_ref() else {
-            return vec![];
-        };
-        let Some(process_def_store) = ctx.process_def_store.as_ref() else {
-            return vec![];
-        };
+        let process_store = &ctx.process_store;
+        let process_def_store = &ctx.process_def_store;
         let Some(def) = process_def_store.load(&e.process_id).await.ok().flatten() else {
             return vec![];
         };

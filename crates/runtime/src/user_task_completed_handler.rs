@@ -16,12 +16,8 @@ impl EventHandler for UserTaskCompletedHandler {
             return vec![];
         };
         info!(instance_id = %e.instance_id, node_id = %e.node_id, "user task completed");
-        let Some(process_store) = ctx.process_store.as_ref() else {
-            return vec![];
-        };
-        let Some(process_def_store) = ctx.process_def_store.as_ref() else {
-            return vec![];
-        };
+        let process_store = &ctx.process_store;
+        let process_def_store = &ctx.process_def_store;
         let Ok(Some(mut instance)) = process_store.load(&e.instance_id).await else {
             return vec![];
         };

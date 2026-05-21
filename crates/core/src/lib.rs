@@ -1,3 +1,9 @@
+//! Core domain types for the BPM engine.
+//!
+//! This crate is **pure logic** — no I/O, no async, no storage traits.
+//! It defines the fundamental abstractions: tokens, events, process definitions,
+//! external tasks, and the token state machine.
+
 pub mod error;
 pub mod event;
 pub mod external_task;
@@ -374,7 +380,7 @@ mod tests {
         records: &[TestCompensationRecord],
     ) -> Vec<&TestCompensationRecord> {
         let mut pending: Vec<_> = records.iter().filter(|r| r.status == "Pending").collect();
-        pending.sort_by(|a, b| b.order.cmp(&a.order));
+        pending.sort_by_key(|r| std::cmp::Reverse(r.order));
         pending
     }
 

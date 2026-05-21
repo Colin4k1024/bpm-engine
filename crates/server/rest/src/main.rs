@@ -1,5 +1,6 @@
 //! BPM Engine REST server. Run: cargo run -p bpm-server-rest
 
+mod middleware;
 mod replay;
 mod routes;
 mod state;

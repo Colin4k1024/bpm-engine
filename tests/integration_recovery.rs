@@ -77,12 +77,12 @@ async fn engine_continues_after_state_persisted() {
         Box::new(ProcessCompletedHandler),
     ]);
 
-    let mut ctx = EngineContext {
-        process_store: Some(repo.clone() as Arc<_>),
-        token_store: Some(repo.clone() as Arc<_>),
-        process_def_store: Some(def_store.clone() as Arc<_>),
-        ..Default::default()
-    };
+    let mut ctx = EngineContext::builder(
+        repo.clone() as Arc<_>,
+        repo.clone() as Arc<_>,
+        def_store.clone() as Arc<_>,
+    )
+    .build();
 
     let ev = EngineEvent::TokenArrived(payloads::TokenArrived {
         instance_id: instance_id.clone(),

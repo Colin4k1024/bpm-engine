@@ -1,3 +1,9 @@
+//! Async persistence traits for the BPM engine.
+//!
+//! This crate defines the storage interface (trait objects) that the runtime depends on.
+//! Concrete implementations live in adapter crates (`bpm-engine-adapter-postgres`,
+//! `bpm-engine-adapter-memory`).
+
 pub mod compensation;
 pub mod event_store;
 pub mod external_task_store;

@@ -26,6 +26,7 @@ pub mod event_store;
 pub mod external_task_store;
 pub mod history;
 pub mod parallel_join;
+pub mod process_def_store;
 pub mod process_store;
 pub mod timer_store;
 pub mod token_store;
@@ -35,6 +36,7 @@ pub use event_store::PostgresOutboxRepo;
 pub use external_task_store::PostgresExternalTaskStore;
 pub use history::PostgresHistoryRepo;
 pub use parallel_join::PostgresParallelJoinRepo;
+pub use process_def_store::PostgresProcessDefStore;
 pub use process_store::PostgresProcessStore;
 pub use timer_store::PostgresTimerStore;
 pub use token_store::PostgresTokenStore;
@@ -101,19 +103,33 @@ pub fn create_pool(url: &str) -> anyhow::Result<Pool> {
 pub async fn migrate(pool: &Pool) -> anyhow::Result<()> {
     let client = pool.get().await?;
 
+    // Create process_definition table
+    client
+        .execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS process_definition (
+                id TEXT PRIMARY KEY,
+                bpmn_xml TEXT NOT NULL,
+                created_at TEXT
+            )
+            "#,
+            &[],
+        )
+        .await?;
+
     // Create process_instance table
     client
         .execute(
             r#"
             CREATE TABLE IF NOT EXISTS process_instance (
-                id VARCHAR(255) PRIMARY KEY,
-                process_def_id VARCHAR(255) NOT NULL,
-                tenant_id VARCHAR(255),
+                id TEXT PRIMARY KEY,
+                process_def_id TEXT NOT NULL,
+                tenant_id TEXT,
                 variables TEXT NOT NULL DEFAULT '{}',
-                state VARCHAR(50) NOT NULL DEFAULT 'Running',
+                state TEXT NOT NULL DEFAULT 'Running',
                 version INTEGER NOT NULL DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT,
+                updated_at TEXT
             )
             "#,
             &[],
@@ -125,16 +141,16 @@ pub async fn migrate(pool: &Pool) -> anyhow::Result<()> {
         .execute(
             r#"
             CREATE TABLE IF NOT EXISTS token (
-                id VARCHAR(255) NOT NULL,
-                instance_id VARCHAR(255) NOT NULL,
-                node_id VARCHAR(255) NOT NULL,
-                status VARCHAR(50) NOT NULL DEFAULT 'Created',
-                mode VARCHAR(50) NOT NULL DEFAULT 'Forward',
+                id TEXT NOT NULL,
+                instance_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Created',
+                mode TEXT NOT NULL DEFAULT 'Forward',
                 version INTEGER NOT NULL DEFAULT 1,
                 attempt INTEGER NOT NULL DEFAULT 0,
-                parallel_group_id VARCHAR(255),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                parallel_group_id TEXT,
+                created_at TEXT,
+                updated_at TEXT,
                 PRIMARY KEY (id, instance_id),
                 CONSTRAINT fk_token_instance FOREIGN KEY (instance_id)
                     REFERENCES process_instance(id) ON DELETE CASCADE
@@ -170,19 +186,20 @@ pub async fn migrate(pool: &Pool) -> anyhow::Result<()> {
         .execute(
             r#"
             CREATE TABLE IF NOT EXISTS external_task (
-                id VARCHAR(255) PRIMARY KEY,
-                token_id VARCHAR(255) NOT NULL,
-                process_instance_id VARCHAR(255) NOT NULL,
-                task_type VARCHAR(255) NOT NULL,
+                id TEXT PRIMARY KEY,
+                token_id TEXT NOT NULL,
+                process_instance_id TEXT NOT NULL,
+                task_type TEXT NOT NULL,
                 retries INTEGER NOT NULL DEFAULT 3,
-                timeout_secs BIGINT NOT NULL DEFAULT 300,
+                timeout_secs INTEGER NOT NULL DEFAULT 300,
                 variables TEXT NOT NULL DEFAULT '{}',
-                state VARCHAR(50) NOT NULL DEFAULT 'Ready',
-                worker_id VARCHAR(255),
-                lock_expire_at TIMESTAMP,
+                state TEXT NOT NULL DEFAULT 'Ready',
+                worker_id TEXT,
+                lock_expire_at TEXT,
                 error_message TEXT,
                 version INTEGER NOT NULL DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TEXT,
+                updated_at TEXT,
                 CONSTRAINT fk_external_task_instance FOREIGN KEY (process_instance_id)
                     REFERENCES process_instance(id) ON DELETE CASCADE
             )
@@ -217,12 +234,12 @@ pub async fn migrate(pool: &Pool) -> anyhow::Result<()> {
         .execute(
             r#"
             CREATE TABLE IF NOT EXISTS timer (
-                id VARCHAR(255) PRIMARY KEY,
-                token_id VARCHAR(255) NOT NULL,
-                instance_id VARCHAR(255) NOT NULL,
-                due_at VARCHAR(100) NOT NULL,
-                status VARCHAR(50) NOT NULL DEFAULT 'Scheduled',
-                created_at VARCHAR(100) NOT NULL,
+                id TEXT PRIMARY KEY,
+                token_id TEXT NOT NULL,
+                instance_id TEXT NOT NULL,
+                due_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Scheduled',
+                created_at TEXT NOT NULL,
                 CONSTRAINT fk_timer_instance FOREIGN KEY (instance_id)
                     REFERENCES process_instance(id) ON DELETE CASCADE
             )
@@ -247,11 +264,11 @@ pub async fn migrate(pool: &Pool) -> anyhow::Result<()> {
         .execute(
             r#"
             CREATE TABLE IF NOT EXISTS history_event (
-                id VARCHAR(255) PRIMARY KEY,
-                instance_id VARCHAR(255) NOT NULL,
-                event_type VARCHAR(255) NOT NULL,
+                id TEXT PRIMARY KEY,
+                instance_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
                 payload TEXT NOT NULL,
-                occurred_at VARCHAR(100) NOT NULL,
+                occurred_at TEXT NOT NULL,
                 CONSTRAINT fk_history_instance FOREIGN KEY (instance_id)
                     REFERENCES process_instance(id) ON DELETE CASCADE
             )
@@ -276,13 +293,11 @@ pub async fn migrate(pool: &Pool) -> anyhow::Result<()> {
         .execute(
             r#"
             CREATE TABLE IF NOT EXISTS event_outbox (
-                id VARCHAR(255) PRIMARY KEY,
-                tenant_id VARCHAR(255),
-                event_type VARCHAR(255) NOT NULL,
+                id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
                 payload TEXT NOT NULL,
-                status VARCHAR(50) NOT NULL DEFAULT 'Pending',
-                claimed_by VARCHAR(255),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                status TEXT NOT NULL DEFAULT 'Pending',
+                created_at TEXT
             )
             "#,
             &[],
@@ -305,13 +320,13 @@ pub async fn migrate(pool: &Pool) -> anyhow::Result<()> {
         .execute(
             r#"
             CREATE TABLE IF NOT EXISTS compensation_record (
-                id VARCHAR(255) PRIMARY KEY,
-                instance_id VARCHAR(255) NOT NULL,
-                node_id VARCHAR(255) NOT NULL,
-                handler_ref VARCHAR(255) NOT NULL,
-                "order" INTEGER NOT NULL DEFAULT 1,
-                status VARCHAR(50) NOT NULL DEFAULT 'Pending',
-                created_at VARCHAR(100) NOT NULL,
+                id TEXT PRIMARY KEY,
+                instance_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                handler_ref TEXT,
+                "order" INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Pending',
+                created_at TEXT,
                 CONSTRAINT fk_compensation_instance FOREIGN KEY (instance_id)
                     REFERENCES process_instance(id) ON DELETE CASCADE
             )
@@ -336,22 +351,10 @@ pub async fn migrate(pool: &Pool) -> anyhow::Result<()> {
         .execute(
             r#"
             CREATE TABLE IF NOT EXISTS parallel_join (
-                id VARCHAR(255) PRIMARY KEY,
-                parallel_group_id VARCHAR(255) NOT NULL UNIQUE,
+                parallel_group_id TEXT PRIMARY KEY,
                 expected INTEGER NOT NULL,
                 joined INTEGER NOT NULL DEFAULT 0
             )
-            "#,
-            &[],
-        )
-        .await?;
-
-    // Create indexes for parallel_join
-    client
-        .execute(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_parallel_join_group
-            ON parallel_join(parallel_group_id)
             "#,
             &[],
         )

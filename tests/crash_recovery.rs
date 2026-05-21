@@ -150,12 +150,12 @@ async fn token_executing_recovered_on_restart() {
     let def_store = Arc::new(bpm_engine::bpm_engine_adapter_memory::ProcessDefStore::new());
     def_store.register(minimal_def());
 
-    let mut ctx = EngineContext {
-        process_store: Some(repo.clone() as Arc<_>),
-        token_store: Some(repo.clone() as Arc<_>),
-        process_def_store: Some(def_store as Arc<_>),
-        ..Default::default()
-    };
+    let mut ctx = EngineContext::builder(
+        repo.clone() as Arc<_>,
+        repo.clone() as Arc<_>,
+        def_store as Arc<_>,
+    )
+    .build();
 
     // Engine restarts and processes the recovered token
     let ev = EngineEvent::TokenArrived(payloads::TokenArrived {
@@ -315,12 +315,12 @@ async fn timer_due_before_crash_fired_after_restart() {
         let def_store = Arc::new(bpm_engine::bpm_engine_adapter_memory::ProcessDefStore::new());
         def_store.register(timer_def());
 
-        let mut ctx = EngineContext {
-            process_store: Some(repo.clone() as Arc<_>),
-            token_store: Some(repo.clone() as Arc<_>),
-            process_def_store: Some(def_store as Arc<_>),
-            ..Default::default()
-        };
+        let mut ctx = EngineContext::builder(
+            repo.clone() as Arc<_>,
+            repo.clone() as Arc<_>,
+            def_store as Arc<_>,
+        )
+        .build();
 
         let ev = EngineEvent::TokenArrived(payloads::TokenArrived {
             instance_id: instance_id.clone(),

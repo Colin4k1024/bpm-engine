@@ -36,12 +36,8 @@ impl EventHandler for TokenArrivedHandler {
         let EngineEvent::TokenArrived(e) = event else {
             return vec![];
         };
-        let Some(process_store) = ctx.process_store.as_ref() else {
-            return vec![];
-        };
-        let Some(process_def_store) = ctx.process_def_store.as_ref() else {
-            return vec![];
-        };
+        let process_store = &ctx.process_store;
+        let process_def_store = &ctx.process_def_store;
         let Ok(Some(mut instance)) = process_store.load(&e.instance_id).await else {
             return vec![];
         };
@@ -53,22 +49,21 @@ impl EventHandler for TokenArrivedHandler {
         };
         // Extract group_id early to avoid borrow conflicts
         let parallel_group_id = instance.tokens[token_idx].parallel_group_id.clone();
-        if let Some(tr) = ctx.token_store.as_ref() {
-            if !tr
-                .claim_token(
-                    &e.instance_id,
-                    &e.token_id,
-                    instance.tokens[token_idx].version,
-                )
-                .await
-                .unwrap_or(false)
-            {
-                warn!(instance_id = %e.instance_id, token_id = %e.token_id, "token claim failed (CAS)");
-                return vec![];
-            }
-            instance.tokens[token_idx].status = TokenStatus::Executing;
-            instance.tokens[token_idx].version += 1;
+        let token_store = &ctx.token_store;
+        if !token_store
+            .claim_token(
+                &e.instance_id,
+                &e.token_id,
+                instance.tokens[token_idx].version,
+            )
+            .await
+            .unwrap_or(false)
+        {
+            warn!(instance_id = %e.instance_id, token_id = %e.token_id, "token claim failed (CAS)");
+            return vec![];
         }
+        instance.tokens[token_idx].status = TokenStatus::Executing;
+        instance.tokens[token_idx].version += 1;
         debug!(instance_id = %e.instance_id, token_id = %e.token_id, node_id = %e.node_id, "token arrived");
         let node = match def.nodes.get(e.node_id.as_str()) {
             Some(n) => n,
