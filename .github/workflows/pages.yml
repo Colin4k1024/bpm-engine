@@ -24,22 +24,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.1'
+
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
-      - name: Build with Jekyll
-        uses: jeffreytse/jekyll-deploy-action@v0.7.1
-        with:
-          provider: 'pages'
-          token: ${{ secrets.GITHUB_TOKEN }}
-          jekyll_config: docs/_config.yml
-          jekyll_src: docs
-          jekyll_dst: _site
+      - name: Install dependencies
+        run: |
+          cd docs
+          gem install jekyll jekyll-remote-theme jekyll-github-metadata
+          gem install kramdown-parser-gfm rouge
+
+      - name: Build Jekyll site
+        run: |
+          cd docs
+          jekyll build --baseurl ${{ steps.pages.outputs.base_path }}
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: '_site'
+          path: 'docs/_site'
 
   deploy:
     environment:
