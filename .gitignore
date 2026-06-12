@@ -1,2 +1,60 @@
-/target
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Database files
 *.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Cargo
+Cargo.lock.bak
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Coverage
+lcov.info
+*.profraw
+*.profdata
+tarpaulin-report.html
+cobertura.xml
+
+# Documentation build
+docs/book/
+docs/_build/
