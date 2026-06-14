@@ -36,22 +36,6 @@ defaults:
     values:
       lang: en
 
-# Plugins
-plugins:
-  - jekyll-seo-tag
-
-# SEO
-seo:
-  title: bpm-engine
-  description: A correctness-first, token-driven workflow execution kernel in Rust
-  author: fanjia1024
-  twitter:
-    username: fanjia1024
-  social:
-    name: bpm-engine
-    links:
-      - https://github.com/fanjia1024/bpm-engine
-
 # Language settings
 languages:
   en:
