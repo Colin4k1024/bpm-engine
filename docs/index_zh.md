@@ -224,10 +224,10 @@ worker.start().await;
   </div>
 
   <div class="arch-links">
-    <a href="docs/architecture_zh.html">📖 架构概览</a>
-    <a href="docs/execution-model.html">⚙️ 执行模型</a>
-    <a href="docs/invariants.html">🛡️ 不变量</a>
-    <a href="docs/recovery.html">💾 持久化与恢复</a>
+    <a href="architecture_zh.html">📖 架构概览</a>
+    <a href="execution-model.html">⚙️ 执行模型</a>
+    <a href="invariants.html">🛡️ 不变量</a>
+    <a href="recovery.html">💾 持久化与恢复</a>
   </div>
 </section>
 
@@ -381,10 +381,10 @@ worker.start().await;
       <div class="doc-card-icon">📖</div>
       <h3>核心概念</h3>
       <ul>
-        <li><a href="docs/architecture_zh.html">架构概览</a></li>
-        <li><a href="docs/execution-model.html">执行模型</a></li>
-        <li><a href="docs/invariants.html">形式化不变量</a></li>
-        <li><a href="docs/why-correctness.html">为什么正确性重要</a></li>
+        <li><a href="architecture_zh.html">架构概览</a></li>
+        <li><a href="execution-model.html">执行模型</a></li>
+        <li><a href="invariants.html">形式化不变量</a></li>
+        <li><a href="why-correctness.html">为什么正确性重要</a></li>
       </ul>
     </div>
 
@@ -392,10 +392,10 @@ worker.start().await;
       <div class="doc-card-icon">🔧</div>
       <h3>开发指南</h3>
       <ul>
-        <li><a href="docs/quick-start_zh.html">快速开始指南</a></li>
-        <li><a href="docs/sdk-rust.html">Rust Worker SDK</a></li>
-        <li><a href="docs/bpmn_zh.html">BPMN 2.0 支持</a></li>
-        <li><a href="docs/api-reference_zh.html">API 规范</a></li>
+        <li><a href="quick-start_zh.html">快速开始指南</a></li>
+        <li><a href="sdk-rust.html">Rust Worker SDK</a></li>
+        <li><a href="bpmn_zh.html">BPMN 2.0 支持</a></li>
+        <li><a href="api-reference_zh.html">API 规范</a></li>
       </ul>
     </div>
 
@@ -403,10 +403,10 @@ worker.start().await;
       <div class="doc-card-icon">🛡️</div>
       <h3>可靠性</h3>
       <ul>
-        <li><a href="docs/recovery.html">持久化与恢复</a></li>
-        <li><a href="docs/accident-scenarios.html">事故场景</a></li>
-        <li><a href="docs/database-schema.html">数据库模式</a></li>
-        <li><a href="docs/saga.html">Saga 与补偿</a></li>
+        <li><a href="recovery.html">持久化与恢复</a></li>
+        <li><a href="accident-scenarios.html">事故场景</a></li>
+        <li><a href="database-schema.html">数据库模式</a></li>
+        <li><a href="saga.html">Saga 与补偿</a></li>
       </ul>
     </div>
 
@@ -414,9 +414,9 @@ worker.start().await;
       <div class="doc-card-icon">❓</div>
       <h3>参考资料</h3>
       <ul>
-        <li><a href="docs/faq.html">常见问题</a></li>
-        <li><a href="docs/cheat-sheet.html">速查表</a></li>
-        <li><a href="docs/roadmap.html">路线图</a></li>
+        <li><a href="faq.html">常见问题</a></li>
+        <li><a href="cheat-sheet.html">速查表</a></li>
+        <li><a href="roadmap.html">路线图</a></li>
         <li><a href="https://github.com/fanjia1024/bpm-engine/blob/master/CONTRIBUTING.md">贡献指南</a></li>
       </ul>
     </div>

@@ -224,10 +224,10 @@ worker.start().await;
   </div>
 
   <div class="arch-links">
-    <a href="docs/architecture.html">📖 Architecture Overview</a>
-    <a href="docs/execution-model.html">⚙️ Execution Model</a>
-    <a href="docs/invariants.html">🛡️ Invariants</a>
-    <a href="docs/recovery.html">💾 Persistence & Recovery</a>
+    <a href="architecture.html">📖 Architecture Overview</a>
+    <a href="execution-model.html">⚙️ Execution Model</a>
+    <a href="invariants.html">🛡️ Invariants</a>
+    <a href="recovery.html">💾 Persistence & Recovery</a>
   </div>
 </section>
 
@@ -381,10 +381,10 @@ worker.start().await;
       <div class="doc-card-icon">📖</div>
       <h3>Core Concepts</h3>
       <ul>
-        <li><a href="docs/architecture.html">Architecture Overview</a></li>
-        <li><a href="docs/execution-model.html">Execution Model</a></li>
-        <li><a href="docs/invariants.html">Formal Invariants</a></li>
-        <li><a href="docs/why-correctness.html">Why Correctness Matters</a></li>
+        <li><a href="architecture.html">Architecture Overview</a></li>
+        <li><a href="execution-model.html">Execution Model</a></li>
+        <li><a href="invariants.html">Formal Invariants</a></li>
+        <li><a href="why-correctness.html">Why Correctness Matters</a></li>
       </ul>
     </div>
 
@@ -392,10 +392,10 @@ worker.start().await;
       <div class="doc-card-icon">🔧</div>
       <h3>Development</h3>
       <ul>
-        <li><a href="docs/quick-start.html">Quick Start Guide</a></li>
-        <li><a href="docs/sdk-rust.html">Rust Worker SDK</a></li>
-        <li><a href="docs/bpmn.html">BPMN 2.0 Support</a></li>
-        <li><a href="docs/api-spec.html">API Specification</a></li>
+        <li><a href="quick-start.html">Quick Start Guide</a></li>
+        <li><a href="sdk-rust.html">Rust Worker SDK</a></li>
+        <li><a href="bpmn.html">BPMN 2.0 Support</a></li>
+        <li><a href="api-spec.html">API Specification</a></li>
       </ul>
     </div>
 
@@ -403,10 +403,10 @@ worker.start().await;
       <div class="doc-card-icon">🛡️</div>
       <h3>Reliability</h3>
       <ul>
-        <li><a href="docs/recovery.html">Persistence & Recovery</a></li>
-        <li><a href="docs/accident-scenarios.html">Accident Scenarios</a></li>
-        <li><a href="docs/database-schema.html">Database Schema</a></li>
-        <li><a href="docs/saga.html">Saga & Compensation</a></li>
+        <li><a href="recovery.html">Persistence & Recovery</a></li>
+        <li><a href="accident-scenarios.html">Accident Scenarios</a></li>
+        <li><a href="database-schema.html">Database Schema</a></li>
+        <li><a href="saga.html">Saga & Compensation</a></li>
       </ul>
     </div>
 
@@ -414,9 +414,9 @@ worker.start().await;
       <div class="doc-card-icon">❓</div>
       <h3>Reference</h3>
       <ul>
-        <li><a href="docs/faq.html">FAQ</a></li>
-        <li><a href="docs/cheat-sheet.html">Cheat Sheet</a></li>
-        <li><a href="docs/roadmap.html">Roadmap</a></li>
+        <li><a href="faq.html">FAQ</a></li>
+        <li><a href="cheat-sheet.html">Cheat Sheet</a></li>
+        <li><a href="roadmap.html">Roadmap</a></li>
         <li><a href="https://github.com/fanjia1024/bpm-engine/blob/master/CONTRIBUTING.md">Contributing Guide</a></li>
       </ul>
     </div>
