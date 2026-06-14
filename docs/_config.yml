@@ -1,5 +1,7 @@
 title: bpm-engine
 description: A correctness-first, token-driven workflow execution kernel in Rust
+baseurl: /bpm-engine
+url: https://colin4k1024.github.io
 github:
   repository_url: https://github.com/fanjia1024/bpm-engine
   repository_name: fanjia1024/bpm-engine
