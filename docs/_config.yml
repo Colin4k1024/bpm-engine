@@ -36,7 +36,13 @@ defaults:
       path: ""
       type: "pages"
     values:
+      layout: default
       lang: en
+  - scope:
+      path: ""
+      type: "posts"
+    values:
+      layout: default
 
 # Language settings
 languages:
