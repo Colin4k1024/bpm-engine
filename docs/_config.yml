@@ -30,3 +30,54 @@ defaults:
       path: ""
     values:
       layout: default
+  - scope:
+      path: ""
+      type: "pages"
+    values:
+      lang: en
+
+# Plugins
+plugins:
+  - jekyll-seo-tag
+
+# SEO
+seo:
+  title: bpm-engine
+  description: A correctness-first, token-driven workflow execution kernel in Rust
+  author: fanjia1024
+  twitter:
+    username: fanjia1024
+  social:
+    name: bpm-engine
+    links:
+      - https://github.com/fanjia1024/bpm-engine
+
+# Language settings
+languages:
+  en:
+    name: English
+    flag: 🇺🇸
+  zh:
+    name: 中文
+    flag: 🇨🇳
+
+# Navigation
+navigation:
+  en:
+    - title: Features
+      url: /#features
+    - title: Quick Start
+      url: /#getting-started
+    - title: Docs
+      url: /docs/architecture.html
+    - title: API
+      url: /#api
+  zh:
+    - title: 特性
+      url: /index_zh.html#features
+    - title: 快速开始
+      url: /index_zh.html#getting-started
+    - title: 文档
+      url: /docs/architecture_zh.html
+    - title: API
+      url: /index_zh.html#api
