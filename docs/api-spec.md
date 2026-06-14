@@ -1,3 +1,7 @@
+---
+layout: default
+---
+
 # REST & gRPC API Specification (Draft)
 
 > This document defines the **external API contract** of the BPM Engine.

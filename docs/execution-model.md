@@ -1,3 +1,7 @@
+---
+layout: default
+---
+
 # Execution Model (Token & Concurrency)
 
 > This document describes **how workflows are actually executed at runtime**.

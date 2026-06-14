@@ -1,3 +1,8 @@
+---
+layout: default
+lang: zh
+---
+
 # 架构概览
 
 > 本文档描述 Rust BPM Engine 的**运行时架构**。

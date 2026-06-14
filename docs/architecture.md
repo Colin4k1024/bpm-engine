@@ -1,3 +1,7 @@
+---
+layout: default
+---
+
 # Architecture Overview
 
 > This document describes the **runtime architecture** of the Rust BPM Engine.

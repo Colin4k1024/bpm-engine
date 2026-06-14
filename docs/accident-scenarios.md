@@ -1,3 +1,7 @@
+---
+layout: default
+---
+
 # Accident-level scenarios: "Can the engine explain what happened?"
 
 These scenarios answer: **After something goes wrong, can the engine show exactly what happened?** Each is runnable and verifiable via the Trace API and Replay.

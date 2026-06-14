@@ -1,3 +1,7 @@
+---
+layout: default
+---
+
 # Recovery & Rehydration Model
 
 > This document describes how the engine **recovers from crashes, restarts, and partial failures**.

@@ -1,3 +1,7 @@
+---
+layout: default
+---
+
 # Database Schema & Transaction Boundaries
 
 > This document defines the **relational database schema** and **transactional rules** for the BPM engine.

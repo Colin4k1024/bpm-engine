@@ -1,3 +1,7 @@
+---
+layout: default
+---
+
 # Why correctness first?
 
 bpm-engine is a **correctness-first workflow execution kernel**: it prioritizes execution semantics, persistence, replay, and formal invariants over feature breadth or low-code UX.

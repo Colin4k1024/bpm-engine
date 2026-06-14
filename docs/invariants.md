@@ -1,3 +1,7 @@
+---
+layout: default
+---
+
 # Invariants
 
 This document lists **formal invariants** that the engine enforces. These are design goals that tests and runtime logic are built to preserve.

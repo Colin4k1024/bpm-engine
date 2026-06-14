@@ -1,3 +1,7 @@
+---
+layout: default
+---
+
 # Cheat Sheet — Quick commands and local run
 
 Short reference for building, testing, and running the BPM engine.

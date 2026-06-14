@@ -1,3 +1,7 @@
+---
+layout: default
+---
+
 # FAQ and common errors (plan v2.0 E.3)
 
 ## Frequently asked questions

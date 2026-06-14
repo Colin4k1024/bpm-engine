@@ -1,3 +1,7 @@
+---
+layout: default
+---
+
 # Rust Worker SDK
 
 The **Rust Worker SDK** lets you implement external-task workers that poll the engine, lock tasks, run your logic, and complete or fail tasks. No BPM knowledge is required in worker code.
