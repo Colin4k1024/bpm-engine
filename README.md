@@ -5,10 +5,22 @@
 [![Docs](https://img.shields.io/badge/docs-github.pages-blue)](https://fanjia1024.github.io/bpm-engine/)
 [![crates.io](https://img.shields.io/crates/v/bpm-engine)](https://crates.io/crates/bpm-engine)
 [![CI](https://github.com/fanjia1024/bpm-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/fanjia1024/bpm-engine/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![GitHub Release](https://img.shields.io/github/v/release/fanjia1024/bpm-engine)](https://github.com/fanjia1024/bpm-engine/releases)
 
 > **Documentation Site**: [https://fanjia1024.github.io/bpm-engine/](https://fanjia1024.github.io/bpm-engine/)
 
 This project focuses on **execution semantics, persistence correctness, and crash safety**, rather than UI or low-code features. It is designed as a **token-driven, persistence-first BPM engine** with formally defined invariants.
+
+## 🎉 Latest Release: v0.2.0
+
+- Complete bilingual documentation site (EN/ZH)
+- PostgreSQL adapter for production use
+- Worker SDK for external task processing
+- BPMN 2.0 XML parser and compiler
+- Formal invariants and crash recovery
+
+[See full changelog →](CHANGELOG.md)
 
 ---
 
