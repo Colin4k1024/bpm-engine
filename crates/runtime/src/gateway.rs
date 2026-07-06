@@ -4,10 +4,13 @@ use std::collections::HashMap;
 
 use bpm_engine_core::{EdgeCondition, Node, NodeId};
 
+/// Trait for evaluating gateway routing decisions.
 pub trait GatewayEvaluator {
+    /// Evaluate which outgoing nodes should receive tokens.
     fn evaluate(&self, node: &Node, variables: &HashMap<String, String>) -> Vec<NodeId>;
 }
 
+/// Evaluator for exclusive (XOR) gateways — selects one outgoing path.
 pub struct ExclusiveGatewayEvaluator;
 
 impl GatewayEvaluator for ExclusiveGatewayEvaluator {

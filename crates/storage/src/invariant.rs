@@ -34,11 +34,14 @@ impl fmt::Display for InvariantViolationKind {
 #[derive(Debug, Error)]
 #[error("invariant violation: {kind} ({context})")]
 pub struct InvariantViolation {
+    /// The kind of invariant violation.
     pub kind: InvariantViolationKind,
+    /// Human-readable context describing where the violation occurred.
     pub context: String,
 }
 
 impl InvariantViolation {
+    /// Create a new invariant violation with the given kind and context.
     pub fn new(kind: InvariantViolationKind, context: impl Into<String>) -> Self {
         Self {
             kind,

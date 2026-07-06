@@ -22,16 +22,19 @@
 //! ```
 
 pub mod compensation;
+pub mod dead_letter_store;
 pub mod event_store;
 pub mod external_task_store;
 pub mod history;
 pub mod parallel_join;
+pub mod pool_metrics;
 pub mod process_def_store;
 pub mod process_store;
 pub mod timer_store;
 pub mod token_store;
 
 pub use compensation::PostgresCompensationRepo;
+pub use dead_letter_store::PostgresDeadLetterStore;
 pub use event_store::PostgresOutboxRepo;
 pub use external_task_store::PostgresExternalTaskStore;
 pub use history::PostgresHistoryRepo;
@@ -109,6 +112,9 @@ pub async fn migrate(pool: &Pool) -> anyhow::Result<()> {
             r#"
             CREATE TABLE IF NOT EXISTS process_definition (
                 id TEXT PRIMARY KEY,
+                def_key TEXT NOT NULL DEFAULT '',
+                version INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'active',
                 bpmn_xml TEXT NOT NULL,
                 created_at TEXT
             )
@@ -128,6 +134,8 @@ pub async fn migrate(pool: &Pool) -> anyhow::Result<()> {
                 variables TEXT NOT NULL DEFAULT '{}',
                 state TEXT NOT NULL DEFAULT 'Running',
                 version INTEGER NOT NULL DEFAULT 1,
+                parent_instance_id TEXT,
+                parent_token_id TEXT,
                 created_at TEXT,
                 updated_at TEXT
             )
@@ -237,6 +245,7 @@ pub async fn migrate(pool: &Pool) -> anyhow::Result<()> {
                 id TEXT PRIMARY KEY,
                 token_id TEXT NOT NULL,
                 instance_id TEXT NOT NULL,
+                node_id TEXT NOT NULL DEFAULT '',
                 due_at TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'Scheduled',
                 created_at TEXT NOT NULL,
@@ -355,6 +364,48 @@ pub async fn migrate(pool: &Pool) -> anyhow::Result<()> {
                 expected INTEGER NOT NULL,
                 joined INTEGER NOT NULL DEFAULT 0
             )
+            "#,
+            &[],
+        )
+        .await?;
+
+    // Create dead_letter table
+    client
+        .execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS dead_letter (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                token_id TEXT NOT NULL,
+                process_instance_id TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                error_message TEXT NOT NULL DEFAULT '',
+                variables TEXT NOT NULL DEFAULT '{}',
+                tenant_id TEXT,
+                created_at TEXT NOT NULL,
+                CONSTRAINT fk_dead_letter_instance FOREIGN KEY (process_instance_id)
+                    REFERENCES process_instance(id) ON DELETE CASCADE
+            )
+            "#,
+            &[],
+        )
+        .await?;
+
+    client
+        .execute(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_dead_letter_instance
+            ON dead_letter(process_instance_id)
+            "#,
+            &[],
+        )
+        .await?;
+
+    client
+        .execute(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_dead_letter_type
+            ON dead_letter(task_type)
             "#,
             &[],
         )

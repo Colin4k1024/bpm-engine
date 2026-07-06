@@ -214,4 +214,44 @@ impl EngineClient {
         }
         Ok(())
     }
+
+    /// Extend the lock on a locked task to prevent timeout during long processing.
+    pub async fn extend_lock(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        extension: Duration,
+    ) -> Result<(), ClientError> {
+        #[derive(Serialize)]
+        struct ExtendLockBody {
+            worker_id: String,
+            extension_ms: u64,
+        }
+        let url = self.url(&format!("/{}/extend-lock", task_id));
+        let body = ExtendLockBody {
+            worker_id: worker_id.to_string(),
+            extension_ms: extension.as_millis() as u64,
+        };
+        debug!(%url, "extend_lock");
+        let res = self
+            .client
+            .post(&url)
+            .json(&body)
+            .headers(self.headers())
+            .send()
+            .await?;
+        if !res.status().is_success() {
+            let status = res.status();
+            let message = res
+                .json::<ErrorBody>()
+                .await
+                .map(|b| b.error)
+                .unwrap_or_else(|_| status.to_string());
+            return Err(ClientError::Engine {
+                status: status.as_u16(),
+                message,
+            });
+        }
+        Ok(())
+    }
 }

@@ -161,8 +161,10 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
         task_id: &str,
         worker_id: &str,
         variables: HashMap<String, String>,
-    ) -> anyhow::Result<()> {
-        let client = self.pool.get().await?;
+    ) -> Result<(), bpm_engine_storage::ExternalTaskError> {
+        let client = self.pool.get().await.map_err(|e| {
+            bpm_engine_storage::ExternalTaskError::Internal(e.to_string())
+        })?;
 
         // Merge variables
         let row = client
@@ -173,7 +175,8 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                 "#,
                 &[&task_id, &worker_id],
             )
-            .await?;
+            .await
+            .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?;
 
         let existing_variables: HashMap<String, String> = row
             .as_ref()
@@ -194,12 +197,17 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                     version = version + 1
                 WHERE id = $1 AND worker_id = $2 AND state = 'Locked'
                 "#,
-                &[&task_id, &worker_id, &serde_json::to_string(&merged)?],
+                &[&task_id, &worker_id, &serde_json::to_string(&merged).map_err(|e| {
+                    bpm_engine_storage::ExternalTaskError::Internal(e.to_string())
+                })?],
             )
-            .await?;
+            .await
+            .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?;
 
         if result == 0 {
-            anyhow::bail!("task not found or not locked by worker");
+            return Err(bpm_engine_storage::ExternalTaskError::TaskNotFound {
+                task_id: task_id.to_string(),
+            });
         }
 
         Ok(())
@@ -211,8 +219,10 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
         worker_id: &str,
         error: String,
         retry_after: Option<Duration>,
-    ) -> anyhow::Result<()> {
-        let client = self.pool.get().await?;
+    ) -> Result<(), bpm_engine_storage::ExternalTaskError> {
+        let client = self.pool.get().await.map_err(|e| {
+            bpm_engine_storage::ExternalTaskError::Internal(e.to_string())
+        })?;
 
         // Get current retries
         let row = client
@@ -223,7 +233,8 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                 "#,
                 &[&task_id, &worker_id],
             )
-            .await?;
+            .await
+            .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?;
 
         let retries: i32 = row.as_ref().map(|r| r.get("retries")).unwrap_or(0);
 
@@ -252,7 +263,10 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                         "#,
                         &[&task_id, &worker_id, &error, &(epoch as f64)],
                     )
-                    .await?
+                    .await
+                    .map_err(|e| {
+                        bpm_engine_storage::ExternalTaskError::Internal(e.to_string())
+                    })?
             } else {
                 client
                     .execute(
@@ -269,11 +283,16 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                         "#,
                         &[&task_id, &worker_id, &error],
                     )
-                    .await?
+                    .await
+                    .map_err(|e| {
+                        bpm_engine_storage::ExternalTaskError::Internal(e.to_string())
+                    })?
             };
 
             if result == 0 {
-                anyhow::bail!("task not found or not locked by worker");
+                return Err(bpm_engine_storage::ExternalTaskError::TaskNotFound {
+                    task_id: task_id.to_string(),
+                });
             }
         } else {
             // No more retries, mark as failed
@@ -289,10 +308,13 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                     "#,
                     &[&task_id, &worker_id, &error],
                 )
-                .await?;
+                .await
+                .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?;
 
             if result == 0 {
-                anyhow::bail!("task not found or not locked by worker");
+                return Err(bpm_engine_storage::ExternalTaskError::TaskNotFound {
+                    task_id: task_id.to_string(),
+                });
             }
         }
 
@@ -352,5 +374,35 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
             }
             None => Ok(None),
         }
+    }
+
+    async fn extend_lock(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        extension: Duration,
+    ) -> anyhow::Result<bool> {
+        let client = self.pool.get().await?;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let new_expire = now + extension.as_secs();
+        let rows = client
+            .execute(
+                r#"
+                UPDATE external_task
+                SET lock_expire_at = $3, updated_at = $4
+                WHERE id = $1 AND state = 'Locked' AND worker_id = $2
+                "#,
+                &[
+                    &task_id,
+                    &worker_id,
+                    &new_expire.to_string(),
+                    &now.to_string(),
+                ],
+            )
+            .await?;
+        Ok(rows > 0)
     }
 }

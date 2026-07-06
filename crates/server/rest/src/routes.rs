@@ -5,16 +5,16 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware as axum_mw,
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use bpm_engine_core::{
-    payloads, EngineEvent, ExternalTaskState, InstanceState, NodeType, ProcessDefinition,
-    ProcessInstance, TokenStatus,
+    payloads, AesGcmEncryptor, EngineEvent, ExternalTaskState, InstanceState, NodeType,
+    ProcessDefinition, ProcessInstance, TokenStatus, VariableEncryptor, ENCRYPTED_PREFIX,
 };
-use bpm_engine_runtime::{transition, EngineContext};
+use bpm_engine_runtime::EngineContext;
 use bpm_engine_storage::{
-    CompensationRecordRepo, ExternalTaskStore, HistoryRepo, InvariantViolation, ParallelJoinRepo,
+    CompensationRecordRepo, ExternalTaskStore, HistoryRepo, InvariantChecker, ParallelJoinRepo,
     ProcessDefinitionStore, ProcessInstanceStore, TimerStore, TokenStore,
 };
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{info, warn};
 
 use super::middleware;
 use super::replay::evict_expired;
@@ -76,38 +77,49 @@ pub struct ExternalTaskFailRequest {
     pub retry_after_ms: Option<u64>,
 }
 
-/// Build 4xx error response; adds X-Invariant-Violation header and body field when error is InvariantViolation.
-fn external_task_error_response(e: anyhow::Error) -> Response {
-    let (invariant_violation, body) = if let Some(inv) = e.downcast_ref::<InvariantViolation>() {
-        tracing::warn!(
-            kind = %inv.kind,
-            context = %inv.context,
-            "invariant violation"
-        );
-        let kind_str = inv.kind.to_string();
-        (
-            Some(kind_str.clone()),
-            ErrorResponse {
+#[derive(Deserialize)]
+pub struct ExtendLockRequest {
+    pub worker_id: String,
+    pub extension_ms: u64,
+}
+
+/// Build 4xx error response for external task errors.
+/// Maps `ExternalTaskError` variants to appropriate HTTP status codes and safe error messages.
+fn external_task_error_response(e: bpm_engine_storage::ExternalTaskError) -> Response {
+    use bpm_engine_storage::ExternalTaskError;
+
+    match &e {
+        ExternalTaskError::InvariantViolation(inv) => {
+            tracing::warn!(
+                kind = %inv.kind,
+                context = %inv.context,
+                "invariant violation"
+            );
+            let kind_str = inv.kind.to_string();
+            let body = ErrorResponse {
                 error: e.to_string(),
-                invariant_violation: Some(kind_str),
-            },
-        )
-    } else {
-        (
-            None,
-            ErrorResponse {
-                error: e.to_string(),
-                invariant_violation: None,
-            },
-        )
-    };
-    let mut res = (StatusCode::BAD_REQUEST, Json(body)).into_response();
-    if let Some(ref kind) = invariant_violation {
-        if let Ok(hv) = HeaderValue::try_from(kind.as_str()) {
-            res.headers_mut().insert("X-Invariant-Violation", hv);
+                invariant_violation: Some(kind_str.clone()),
+            };
+            let mut res = (StatusCode::BAD_REQUEST, Json(body)).into_response();
+            if let Ok(hv) = HeaderValue::try_from(kind_str.as_str()) {
+                res.headers_mut().insert("X-Invariant-Violation", hv);
+            }
+            res
+        }
+        ExternalTaskError::TaskNotFound { .. }
+        | ExternalTaskError::TaskNotLocked { .. }
+        | ExternalTaskError::LockExpired { .. } => {
+            (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(e.to_string()))).into_response()
+        }
+        ExternalTaskError::Internal(msg) => {
+            tracing::error!(error = %msg, "external task internal error");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("internal server error".to_string())),
+            )
+                .into_response()
         }
     }
-    res
 }
 
 /// Log error details server-side and return a generic 500 response.
@@ -160,6 +172,11 @@ fn build_ctx(state: &AppState, tenant_id: Option<String>) -> EngineContext {
     build_ctx_with_repo(Arc::clone(&state.repo), &state.def_store, tenant_id)
 }
 
+/// Build engine context for timer event processing (no tenant).
+pub fn build_ctx_for_timer(state: &AppState) -> EngineContext {
+    build_ctx(state, None)
+}
+
 /// Build engine context with a specific repo (e.g. replay temporary repo).
 fn build_ctx_with_repo(
     repo: Arc<MemoryRepo>,
@@ -197,6 +214,12 @@ fn instance_id_from_event(ev: &EngineEvent) -> Option<String> {
         EngineEvent::SagaStarted(p) => Some(p.instance_id.clone()),
         EngineEvent::SagaCompleted(p) => Some(p.instance_id.clone()),
         EngineEvent::ProcessCompleted(p) => Some(p.instance_id.clone()),
+        EngineEvent::CallActivityStarted(p) => Some(p.parent_instance_id.clone()),
+        EngineEvent::CallActivityCompleted(p) => Some(p.parent_instance_id.clone()),
+        EngineEvent::MessageSent(p) => Some(p.instance_id.clone()),
+        EngineEvent::SignalSent(p) => Some(p.instance_id.clone()),
+        EngineEvent::ProcessTerminated(p) => Some(p.instance_id.clone()),
+        EngineEvent::ExternalTaskCompleted(p) => Some(p.instance_id.clone()),
     }
 }
 
@@ -205,6 +228,9 @@ pub struct StartInstanceRequest {
     pub process_def_id: String,
     #[serde(default)]
     pub variables: HashMap<String, String>,
+    /// List of variable names that should be encrypted before storage.
+    #[serde(default)]
+    pub encrypted: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -220,6 +246,8 @@ pub struct InstanceStateResponse {
     pub status: String,
     pub current_nodes: Vec<String>,
     pub tokens: Vec<bpm_engine_core::Token>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variables: Option<HashMap<String, String>>,
 }
 
 #[derive(Deserialize)]
@@ -302,11 +330,20 @@ fn node_type_str(nt: &NodeType) -> &'static str {
         NodeType::Start => "Start",
         NodeType::End => "End",
         NodeType::ServiceTask(_) => "ServiceTask",
-        NodeType::UserTask => "UserTask",
+        NodeType::UserTask { .. } => "UserTask",
         NodeType::ExternalTask { .. } => "ExternalTask",
         NodeType::ExclusiveGateway => "ExclusiveGateway",
         NodeType::ParallelFork => "ParallelFork",
         NodeType::ParallelJoin { .. } => "ParallelJoin",
+        NodeType::TimerIntermediateCatch { .. } => "TimerIntermediateCatch",
+        NodeType::BoundaryTimer { .. } => "BoundaryTimer",
+        NodeType::BoundaryError { .. } => "BoundaryError",
+        NodeType::CallActivity { .. } => "CallActivity",
+        NodeType::MessageIntermediateCatch { .. } => "MessageIntermediateCatch",
+        NodeType::MessageIntermediateThrow { .. } => "MessageIntermediateThrow",
+        NodeType::SignalIntermediateThrow { .. } => "SignalIntermediateThrow",
+        NodeType::SignalIntermediateCatch { .. } => "SignalIntermediateCatch",
+        NodeType::TerminateEnd => "TerminateEnd",
     }
 }
 
@@ -333,6 +370,76 @@ fn process_definition_to_view(def: &ProcessDefinition) -> ProcessDefinitionView 
     }
 }
 
+/// Read the encryption key from the `BPM_VARIABLE_ENCRYPTION_KEY` environment variable.
+/// Returns `Ok(None)` if the variable is not set.
+fn get_encryption_key() -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
+    match std::env::var("BPM_VARIABLE_ENCRYPTION_KEY") {
+        Ok(key) if !key.is_empty() => Ok(Some(key)),
+        _ => Ok(None),
+    }
+}
+
+/// Encrypt variables that are listed in the `encrypted` set.
+///
+/// If the encryption key is not configured and encrypted variables are requested,
+/// returns an error.
+fn encrypt_variables(
+    variables: &mut HashMap<String, String>,
+    encrypted_names: &[String],
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if encrypted_names.is_empty() {
+        return Ok(());
+    }
+    let key = get_encryption_key()?.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "BPM_VARIABLE_ENCRYPTION_KEY not configured; cannot encrypt variables".to_string(),
+            )),
+        )
+    })?;
+    let encryptor = AesGcmEncryptor::new();
+    for name in encrypted_names {
+        if let Some(value) = variables.get(name) {
+            let encrypted = encryptor.encrypt(&key, value).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new(format!(
+                        "encryption failed for variable '{}': {}",
+                        name, e
+                    ))),
+                )
+            })?;
+            variables.insert(name.clone(), encrypted.to_storage_string());
+        }
+    }
+    Ok(())
+}
+
+/// Decrypt all `__encrypted:` variables in a process instance.
+///
+/// If the encryption key is not configured, encrypted variables are left as-is.
+fn decrypt_instance_variables(
+    variables: &mut HashMap<String, String>,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let Ok(Some(key)) = get_encryption_key() else {
+        return Ok(());
+    };
+    let encryptor = AesGcmEncryptor::new();
+    for value in variables.values_mut() {
+        if value.starts_with(ENCRYPTED_PREFIX) {
+            let var_val = bpm_engine_core::VariableValue::from_storage_string(value);
+            match encryptor.decrypt(&key, &var_val) {
+                Ok(plaintext) => *value = plaintext,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to decrypt variable, leaving encrypted");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// POST /api/v1/process-instances — start a process instance.
 pub async fn start_instance(
     State(state): State<Arc<AppState>>,
@@ -342,10 +449,12 @@ pub async fn start_instance(
     let tenant_id = tenant_from_headers(&headers);
     let mut ctx = build_ctx(state.as_ref(), tenant_id);
     let instance_id = uuid::Uuid::new_v4().to_string();
-    let initial_variables = if body.variables.is_empty() {
+    let mut variables = body.variables;
+    encrypt_variables(&mut variables, &body.encrypted)?;
+    let initial_variables = if variables.is_empty() {
         None
     } else {
-        Some(body.variables)
+        Some(variables)
     };
     let ev = EngineEvent::ProcessStarted(payloads::ProcessStarted {
         process_id: body.process_def_id.clone(),
@@ -353,6 +462,11 @@ pub async fn start_instance(
         initial_variables,
     });
     state.engine.run_async(ev, &mut ctx).await;
+    info!(
+        instance_id = %instance_id,
+        definition_id = %body.process_def_id,
+        "process instance started"
+    );
     Ok((
         StatusCode::CREATED,
         Json(StartInstanceResponse {
@@ -373,13 +487,18 @@ pub async fn get_instance(
     let repo = Arc::clone(&state.repo);
     let inst = repo.load(&id).await.ok().flatten();
     match inst {
-        Some(inst) => Ok(Json(InstanceStateResponse {
-            instance_id: inst.id.clone(),
-            process_def_id: inst.process_def_id.clone(),
-            status: status_str(inst.state).to_string(),
-            current_nodes: current_nodes(&inst),
-            tokens: inst.tokens.clone(),
-        })),
+        Some(inst) => {
+            let mut vars = inst.variables.clone();
+            let _ = decrypt_instance_variables(&mut vars);
+            Ok(Json(InstanceStateResponse {
+                instance_id: inst.id.clone(),
+                process_def_id: inst.process_def_id.clone(),
+                status: status_str(inst.state).to_string(),
+                current_nodes: current_nodes(&inst),
+                tokens: inst.tokens.clone(),
+                variables: Some(vars),
+            }))
+        }
         None => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new(format!(
@@ -479,12 +598,15 @@ pub async fn get_instance_trace(
             id
         ))),
     ))?;
+    let mut vars = inst.variables.clone();
+    let _ = decrypt_instance_variables(&mut vars);
     let instance_response = InstanceStateResponse {
         instance_id: inst.id.clone(),
         process_def_id: inst.process_def_id.clone(),
         status: status_str(inst.state).to_string(),
         current_nodes: current_nodes(&inst),
         tokens: inst.tokens.clone(),
+        variables: Some(vars),
     };
     let events = HistoryRepo::list_by_instance(state.repo.as_ref(), &id, None, None)
         .await
@@ -690,7 +812,7 @@ pub async fn list_tasks(
                 continue;
             };
             let task_type = match &node.node_type {
-                NodeType::UserTask => "user",
+                NodeType::UserTask { .. } => "user",
                 NodeType::ServiceTask(_) | NodeType::ExternalTask { .. } => "external",
                 _ => continue,
             };
@@ -721,6 +843,73 @@ fn parse_task_id(task_id: &str) -> Option<(String, String)> {
     Some((instance_id, node_id))
 }
 
+#[derive(Serialize)]
+pub struct FormSchemaResponse {
+    pub task_id: String,
+    pub node_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub form_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<bpm_engine_core::FormField>>,
+}
+
+/// GET /api/v1/tasks/:task_id/form — return form schema for a user task.
+pub async fn get_task_form(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+) -> Result<Json<FormSchemaResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let (instance_id, node_id) = parse_task_id(&task_id).ok_or((
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse::new(format!("invalid task_id: {}", task_id))),
+    ))?;
+    let repo = Arc::clone(&state.repo);
+    let def_store = Arc::clone(&state.def_store);
+    let instance = repo
+        .load(&instance_id)
+        .await
+        .map_err(internal_error_tuple)?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!(
+                "process instance not found: {}",
+                instance_id
+            ))),
+        ))?;
+    let def = def_store
+        .load(&instance.process_def_id)
+        .await
+        .map_err(internal_error_tuple)?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!(
+                "process definition not found: {}",
+                instance.process_def_id
+            ))),
+        ))?;
+    let node = def.nodes.get(node_id.as_str()).ok_or((
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse::new(format!("node not found: {}", node_id))),
+    ))?;
+    match &node.node_type {
+        NodeType::UserTask {
+            form_key,
+            form_fields,
+        } => Ok(Json(FormSchemaResponse {
+            task_id,
+            node_id,
+            form_key: form_key.clone(),
+            fields: form_fields.clone(),
+        })),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(format!(
+                "node {} is not a user task",
+                node_id
+            ))),
+        )),
+    }
+}
+
 /// POST /api/v1/tasks/:task_id/complete
 pub async fn complete_task_by_id(
     State(state): State<Arc<AppState>>,
@@ -732,6 +921,38 @@ pub async fn complete_task_by_id(
         StatusCode::BAD_REQUEST,
         Json(ErrorResponse::new(format!("invalid task_id: {}", task_id))),
     ))?;
+
+    // Validate required form fields if the user task has a form definition
+    let repo = Arc::clone(&state.repo);
+    let def_store = Arc::clone(&state.def_store);
+    if let Ok(Some(instance)) = repo.load(&instance_id).await {
+        if let Ok(Some(def)) = def_store.load(&instance.process_def_id).await {
+            if let Some(node) = def.nodes.get(node_id.as_str()) {
+                if let NodeType::UserTask {
+                    form_fields: Some(ref fields),
+                    ..
+                } = node.node_type
+                {
+                    let mut missing = Vec::new();
+                    for f in fields {
+                        if f.required && !body.variables.contains_key(&f.id) {
+                            missing.push(f.id.clone());
+                        }
+                    }
+                    if !missing.is_empty() {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse::new(format!(
+                                "missing required fields: {}",
+                                missing.join(", ")
+                            ))),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     let tenant_id = tenant_from_headers(&headers);
     let mut ctx = build_ctx(state.as_ref(), tenant_id);
     let ev = EngineEvent::UserTaskCompleted(payloads::UserTaskCompleted {
@@ -741,6 +962,11 @@ pub async fn complete_task_by_id(
         variables: body.variables,
     });
     state.engine.run_async(ev, &mut ctx).await;
+    info!(
+        task_id = %task_id,
+        instance_id = %instance_id,
+        "user task completed"
+    );
     Ok(Json(CompleteTaskResponse {
         status: "COMPLETED".to_string(),
     }))
@@ -779,6 +1005,12 @@ pub async fn external_task_fetch_and_lock(
             &occurred_at,
         )
         .await;
+        info!(
+            task_id = %t.task_id,
+            worker_id = %body.worker_id,
+            instance_id = %t.process_instance_id,
+            "external task locked"
+        );
     }
     let out: Vec<ExternalTaskResponse> = tasks
         .into_iter()
@@ -818,24 +1050,23 @@ pub async fn external_task_complete(
             )
                 .into_response()
         })?;
-    let occurred_at = occurred_at_now();
-    let payload = serde_json::json!({
-        "task_id": task.task_id,
-        "token_id": task.token_id,
-        "process_instance_id": task.process_instance_id,
-        "worker_id": body.worker_id,
-    });
-    let _ = HistoryRepo::append(
-        state.repo.as_ref(),
-        &task.process_instance_id,
-        "ExternalTaskCompleted",
-        &payload,
-        &occurred_at,
-    )
-    .await;
+    info!(
+        task_id = %task_id,
+        worker_id = %body.worker_id,
+        instance_id = %task.process_instance_id,
+        "external task completed"
+    );
+    // Emit ExternalTaskCompleted through engine event loop.
+    // The ExternalTaskCompletedHandler will:
+    // 1. Merge worker-returned variables into the instance
+    // 2. Remove the completed token
+    // 3. Create new tokens via move_token
+    // 4. Save the instance
+    // 5. Emit TokenArrived events for each new token
     let tenant_id = tenant_from_headers(&headers);
     let mut ctx = build_ctx(state.as_ref(), tenant_id);
-    let mut instance = ctx
+    // Load instance to get the node_id for the token
+    let instance = ctx
         .process_store
         .load(&task.process_instance_id)
         .await
@@ -854,69 +1085,50 @@ pub async fn external_task_complete(
         .tokens
         .iter()
         .find(|t| t.id == task.token_id)
-        .cloned();
-    let node_id = token.as_ref().map(|t| t.node_id.clone()).ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(format!(
-                "token not found in instance: {}",
-                task.token_id
-            ))),
-        )
-            .into_response()
-    })?;
-    let def = ctx
-        .process_def_store
-        .load(&instance.process_def_id)
-        .await
-        .map_err(internal_error)?
         .ok_or_else(|| {
             (
-                StatusCode::NOT_FOUND,
+                StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(format!(
-                    "process def not found: {}",
-                    instance.process_def_id
+                    "token not found in instance: {}",
+                    task.token_id
                 ))),
             )
                 .into_response()
         })?;
-    let node = def.nodes.get(node_id.as_str()).ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(format!("node not found: {}", node_id))),
-        )
-            .into_response()
-    })?;
-    // Merge variables into instance before advancing
-    for (k, v) in body.variables {
-        instance.variables.insert(k, v);
-    }
-    // Emit TokenCompleted through engine for history recording
-    let completed_ev = EngineEvent::TokenCompleted(payloads::TokenCompleted {
+    let node_id = token.node_id.clone();
+    let ev = EngineEvent::ExternalTaskCompleted(payloads::ExternalTaskCompleted {
         instance_id: task.process_instance_id.clone(),
         token_id: task.token_id.clone(),
+        node_id,
+        variables: body.variables,
     });
-    state.engine.run_async(completed_ev, &mut ctx).await;
-    // Advance: remove completed token, create new tokens, persist
-    instance.tokens.retain(|t| t.id != task.token_id);
-    let new_tokens = transition::move_token(node);
-    instance.tokens.extend(new_tokens.clone());
-    ctx.process_store
-        .save(&instance)
-        .await
-        .map_err(internal_error)?;
-    // Emit TokenArrived for each new token through engine event loop
-    for t in &new_tokens {
-        let ev = EngineEvent::TokenArrived(payloads::TokenArrived {
-            instance_id: task.process_instance_id.clone(),
-            token_id: t.id.clone(),
-            node_id: t.node_id.clone(),
-        });
-        state.engine.run_async(ev, &mut ctx).await;
-    }
+    state.engine.run_async(ev, &mut ctx).await;
     Ok(Json(CompleteTaskResponse {
         status: "COMPLETED".to_string(),
     }))
+}
+
+/// POST /api/v1/external-tasks/:task_id/extend-lock — extend lock duration on a locked task.
+pub async fn external_task_extend_lock(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+    Json(body): Json<ExtendLockRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let repo = Arc::clone(&state.repo);
+    let extension = Duration::from_millis(body.extension_ms);
+    let ok = repo
+        .extend_lock(&task_id, &body.worker_id, extension)
+        .await
+        .map_err(internal_error_tuple)?;
+    if !ok {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::new(
+                "task not found, not locked, or owned by different worker".to_string(),
+            )),
+        ));
+    }
+    Ok(Json(serde_json::json!({ "status": "lock_extended" })))
 }
 
 /// POST /api/v1/external-tasks/:task_id/fail
@@ -930,6 +1142,8 @@ pub async fn external_task_fail(
     repo.fail(&task_id, &body.worker_id, body.error.clone(), retry_after)
         .await
         .map_err(external_task_error_response)?;
+    let worker_id_for_log = body.worker_id.clone();
+    let error_for_log = body.error.clone();
     let task = repo
         .get(&task_id)
         .await
@@ -949,9 +1163,9 @@ pub async fn external_task_fail(
         "task_id": task.task_id,
         "token_id": task.token_id,
         "process_instance_id": task.process_instance_id,
-        "worker_id": body.worker_id,
+        "worker_id": worker_id_for_log,
         "retries": task.retries,
-        "error_message": body.error,
+        "error_message": error_for_log,
     });
     let _ = HistoryRepo::append(
         state.repo.as_ref(),
@@ -961,7 +1175,29 @@ pub async fn external_task_fail(
         &occurred_at,
     )
     .await;
+    warn!(
+        task_id = %task_id,
+        worker_id = %body.worker_id,
+        retries = task.retries,
+        instance_id = %task.process_instance_id,
+        error = %body.error,
+        "external task failed"
+    );
     if task.state == ExternalTaskState::Failed {
+        // Insert into dead letter queue
+        let dl_entry = bpm_engine_storage::DeadLetterEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            task_id: task.task_id.clone(),
+            token_id: task.token_id.clone(),
+            process_instance_id: task.process_instance_id.clone(),
+            task_type: task.task_type.clone(),
+            error_message: error_for_log.clone(),
+            variables: serde_json::to_string(&task.variables).unwrap_or_default(),
+            tenant_id: None,
+            created_at: occurred_at.clone(),
+        };
+        let _ = state.dead_letter_store.insert(&dl_entry).await;
+
         let tenant_id = None::<String>;
         let mut ctx = build_ctx(state.as_ref(), tenant_id);
         let inst = state
@@ -1334,41 +1570,310 @@ pub async fn deploy_bpmn(
     ))
 }
 
-pub fn router(state: Arc<AppState>) -> Router {
+// --- Process Definition Version Management ---
+
+#[derive(Serialize)]
+pub struct DefinitionVersionView {
+    pub id: String,
+    pub key: String,
+    pub version: u32,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Serialize)]
+pub struct VersionListResponse {
+    pub key: String,
+    pub versions: Vec<DefinitionVersionView>,
+}
+
+#[derive(Serialize)]
+pub struct ActivateResponse {
+    pub id: String,
+    pub status: String,
+}
+
+/// GET /api/v1/process-definitions/versions/:key — list all versions for a key.
+pub async fn list_definition_versions(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> Result<Json<VersionListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use bpm_engine_storage::ProcessDefinitionStore;
+    let versions = state
+        .def_store
+        .list_versions(&key)
+        .await
+        .map_err(internal_error_tuple)?;
+    Ok(Json(VersionListResponse {
+        key,
+        versions: versions
+            .into_iter()
+            .map(|v| DefinitionVersionView {
+                id: v.id,
+                key: v.key,
+                version: v.version,
+                status: v.status.to_string(),
+                created_at: v.created_at,
+            })
+            .collect(),
+    }))
+}
+
+/// GET /api/v1/process-definitions/active/:key — get the active version for a key.
+pub async fn get_active_definition(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> Result<Json<DefinitionVersionView>, (StatusCode, Json<ErrorResponse>)> {
+    use bpm_engine_storage::ProcessDefinitionStore;
+    let record = state
+        .def_store
+        .get_active(&key)
+        .await
+        .map_err(internal_error_tuple)?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!(
+                "no active version found for key: {}",
+                key
+            ))),
+        ))?;
+    Ok(Json(DefinitionVersionView {
+        id: record.id,
+        key: record.key,
+        version: record.version,
+        status: record.status.to_string(),
+        created_at: record.created_at,
+    }))
+}
+
+/// PUT /api/v1/process-definitions/:id/activate — set a version as active.
+pub async fn activate_definition(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ActivateResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use bpm_engine_storage::ProcessDefinitionStore;
+    state
+        .def_store
+        .activate(&id)
+        .await
+        .map_err(internal_error_tuple)?;
+    info!(definition_id = %id, "process definition activated");
+    Ok(Json(ActivateResponse {
+        id,
+        status: "active".to_string(),
+    }))
+}
+
+/// PUT /api/v1/process-definitions/:id/deprecate — mark a version as deprecated.
+pub async fn deprecate_definition(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ActivateResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use bpm_engine_storage::ProcessDefinitionStore;
+    state
+        .def_store
+        .deprecate(&id)
+        .await
+        .map_err(internal_error_tuple)?;
+    info!(definition_id = %id, "process definition deprecated");
+    Ok(Json(ActivateResponse {
+        id,
+        status: "deprecated".to_string(),
+    }))
+}
+
+// --- Health check endpoints ---
+
+/// GET /health - liveness probe. Always returns 200 if the process is up.
+pub async fn health() -> Json<super::state::HealthResponse> {
+    Json(super::state::HealthResponse {
+        status: "ok".to_string(),
+    })
+}
+
+/// GET /ready - readiness probe. Checks engine availability and in-memory store.
+pub async fn readiness(
+    State(state): State<Arc<AppState>>,
+) -> Json<super::state::ReadinessResponse> {
+    let mut checks = std::collections::HashMap::new();
+
+    // Check engine is accessible (always ok in current impl)
+    checks.insert("engine".to_string(), "ok".to_string());
+
+    // Check in-memory repo is accessible by attempting a lightweight operation
+    let repo_ok = state.repo.list_running(None).await.is_ok();
+    checks.insert(
+        "database".to_string(),
+        if repo_ok { "ok" } else { "unavailable" }.to_string(),
+    );
+
+    // Merge extra health checks (e.g. connection pool status)
+    if let Some(ref extra) = state.extra_health_checks {
+        checks.extend(extra());
+    }
+
+    let all_ok = checks.values().all(|v| v == "ok");
+    let status = if all_ok { "ok" } else { "degraded" }.to_string();
+
+    Json(super::state::ReadinessResponse { status, checks })
+}
+
+// ---------------------------------------------------------------------------
+// Dead Letter Queue endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/dead-letters — list dead letter entries.
+async fn list_dead_letters(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let tenant_id = tenant_from_headers(&headers);
+    let entries = state
+        .dead_letter_store
+        .list(tenant_id.as_deref(), 100)
+        .await
+        .map_err(internal_error_tuple)?;
+    Ok(Json(serde_json::json!({ "entries": entries })))
+}
+
+/// GET /api/v1/dead-letters/:id — get a single dead letter entry.
+async fn get_dead_letter(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let entry = state
+        .dead_letter_store
+        .get(&id)
+        .await
+        .map_err(internal_error_tuple)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new("dead letter not found".to_string())),
+            )
+        })?;
+    Ok(Json(serde_json::json!({ "entry": entry })))
+}
+
+/// POST /api/v1/dead-letters/:id/requeue — requeue a dead letter entry back as an external task.
+async fn requeue_dead_letter(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let task_id = state
+        .dead_letter_store
+        .requeue(&id)
+        .await
+        .map_err(internal_error_tuple)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new("dead letter not found".to_string())),
+            )
+        })?;
+    Ok(Json(
+        serde_json::json!({ "status": "requeued", "task_id": task_id }),
+    ))
+}
+
+/// DELETE /api/v1/dead-letters/:id — delete a dead letter entry.
+async fn delete_dead_letter(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    state
+        .dead_letter_store
+        .delete(&id)
+        .await
+        .map_err(internal_error_tuple)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Run invariant checks and return the results.
+///
+/// Use for health checks, debugging, or post-crash recovery verification.
+async fn invariant_check(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<bpm_engine_storage::InvariantCheckResult>, (StatusCode, Json<ErrorResponse>)> {
+    state
+        .invariant_checker
+        .check_all()
+        .await
+        .map(Json)
+        .map_err(internal_error_tuple)
+}
+
+pub fn router(state: Arc<AppState>, rate_limit_rpm: u64) -> Router {
     let rate_limiter = std::sync::Arc::new(tokio::sync::Mutex::new(
-        middleware::RateLimiterState::new(100, 60),
+        middleware::RateLimiterState::new(rate_limit_rpm, 60),
     ));
 
-    Router::new().nest(
-        "/api/v1",
-        Router::new()
-            .route("/process-instances", post(start_instance))
-            .route("/process-instances/:id", get(get_instance))
-            .route("/process-instances/:id/trace", get(get_instance_trace))
-            .route("/process-instances/:id/history", get(get_instance_history))
-            .route("/process-instances/:id/replay", post(create_replay))
-            .route("/replay/:session_id/step", post(replay_step))
-            .route("/replay/:session_id/seek", post(replay_seek))
-            .route("/replay/:session_id/snapshot", get(get_replay_snapshot))
-            .route("/replay/:session_id", delete(delete_replay_session))
-            .route("/process-definitions/:id", get(get_process_definition))
-            .route("/tasks", get(list_tasks))
-            .route("/tasks/:task_id/complete", post(complete_task_by_id))
-            .route(
-                "/external-tasks/fetch-and-lock",
-                post(external_task_fetch_and_lock),
-            )
-            .route(
-                "/external-tasks/:task_id/complete",
-                post(external_task_complete),
-            )
-            .route("/external-tasks/:task_id/fail", post(external_task_fail))
-            .route("/process-definitions/deploy", post(deploy_bpmn))
-            .with_state(state)
-            .layer(axum_mw::from_fn(middleware::api_key_auth))
-            .layer(axum_mw::from_fn_with_state(
-                rate_limiter,
-                middleware::rate_limit,
-            )),
-    )
+    let router = Router::new()
+        .route("/health", get(health))
+        .route("/ready", get(readiness));
+
+    // Add /metrics endpoint when observability feature is enabled
+    #[cfg(feature = "observability")]
+    let router = router.route("/metrics", get(super::metrics::metrics_handler));
+
+    router
+        .nest(
+            "/api/v1",
+            Router::new()
+                .route("/process-instances", post(start_instance))
+                .route("/process-instances/:id", get(get_instance))
+                .route("/process-instances/:id/trace", get(get_instance_trace))
+                .route("/process-instances/:id/history", get(get_instance_history))
+                .route("/process-instances/:id/replay", post(create_replay))
+                .route("/replay/:session_id/step", post(replay_step))
+                .route("/replay/:session_id/seek", post(replay_seek))
+                .route("/replay/:session_id/snapshot", get(get_replay_snapshot))
+                .route("/replay/:session_id", delete(delete_replay_session))
+                .route("/process-definitions/:id", get(get_process_definition))
+                .route(
+                    "/process-definitions/versions/:key",
+                    get(list_definition_versions),
+                )
+                .route(
+                    "/process-definitions/active/:key",
+                    get(get_active_definition),
+                )
+                .route(
+                    "/process-definitions/:id/activate",
+                    put(activate_definition),
+                )
+                .route(
+                    "/process-definitions/:id/deprecate",
+                    put(deprecate_definition),
+                )
+                .route("/tasks", get(list_tasks))
+                .route("/tasks/:task_id/form", get(get_task_form))
+                .route("/tasks/:task_id/complete", post(complete_task_by_id))
+                .route(
+                    "/external-tasks/fetch-and-lock",
+                    post(external_task_fetch_and_lock),
+                )
+                .route(
+                    "/external-tasks/:task_id/complete",
+                    post(external_task_complete),
+                )
+                .route("/external-tasks/:task_id/fail", post(external_task_fail))
+                .route(
+                    "/external-tasks/:task_id/extend-lock",
+                    post(external_task_extend_lock),
+                )
+                .route("/process-definitions/deploy", post(deploy_bpmn))
+                .route("/dead-letters", get(list_dead_letters))
+                .route("/dead-letters/:id", get(get_dead_letter))
+                .route("/dead-letters/:id/requeue", post(requeue_dead_letter))
+                .route("/dead-letters/:id", delete(delete_dead_letter))
+                .route("/invariants/check", get(invariant_check))
+                .layer(axum_mw::from_fn(middleware::api_key_auth))
+                .layer(axum_mw::from_fn_with_state(
+                    rate_limiter,
+                    middleware::rate_limit,
+                )),
+        )
+        .with_state(state)
+        .layer(axum_mw::from_fn(middleware::request_id_middleware))
 }

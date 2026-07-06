@@ -28,6 +28,8 @@ async fn only_one_claim_succeeds() {
         variables: std::collections::HashMap::new(),
         state: InstanceState::Running,
         version: 0,
+        parent_instance_id: None,
+        parent_token_id: None,
     };
     repo.save(&inst).await.unwrap();
 

@@ -13,34 +13,6 @@
 use super::handler::{EngineContext, EventHandler};
 use super::pump::EventPump;
 use bpm_engine_core::EngineEvent;
-use bpm_engine_storage::TokenStore;
-use std::sync::Arc;
-
-/// Engine for tick-based token scheduling (not the main event-driven engine).
-///
-/// This is a secondary scheduling loop used to advance waiting tokens.
-pub struct Engine<S> {
-    store: Arc<S>,
-}
-
-impl<S> Engine<S>
-where
-    S: TokenStore + Send + Sync + 'static,
-{
-    /// Create a new Engine with the given token store.
-    pub fn new(store: Arc<S>) -> Self {
-        Self { store }
-    }
-
-    /// Execute one scheduling tick: claim tokens, execute, persist.
-    pub async fn tick(&self) -> anyhow::Result<()> {
-        // 1. claim tokens
-        // 2. execute
-        // 3. persist
-        let _ = &self.store;
-        Ok(())
-    }
-}
 
 /// BpmEngine aggregates handlers and runs event pump (design: overview §3).
 ///
@@ -48,6 +20,7 @@ where
 /// It holds a collection of [`EventHandler`]s that process [`EngineEvent`]s
 /// deterministically and transactionally.
 pub struct BpmEngine {
+    /// Registered event handlers, applied in order for each event.
     pub handlers: Vec<Box<dyn EventHandler>>,
 }
 

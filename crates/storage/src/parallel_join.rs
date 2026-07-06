@@ -2,9 +2,11 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! let repo = Arc::new(MemoryRepo::new());
+//! ```no_run
+//! use std::sync::Arc;
+//! use bpm_engine_storage::ParallelJoinRepo;
 //!
+//! # async fn example(repo: Arc<impl ParallelJoinRepo>) -> anyhow::Result<()> {
 //! // Register a parallel group expecting 3 branches
 //! repo.ensure_group("fork-1", 3).await?;
 //!
@@ -15,6 +17,8 @@
 //! repo.try_join("fork-1").await?;
 //! let joined = repo.try_join("fork-1").await?;
 //! assert!(joined, "all 3 branches have arrived");
+//! # Ok(())
+//! # }
 //! ```
 
 use async_trait::async_trait;

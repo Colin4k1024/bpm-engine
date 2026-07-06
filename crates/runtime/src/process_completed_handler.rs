@@ -6,6 +6,7 @@ use tracing::info;
 
 use super::handler::{EngineContext, EventHandler};
 
+/// Handler that marks a process instance as completed when all tokens reach terminal states.
 pub struct ProcessCompletedHandler;
 
 #[async_trait]

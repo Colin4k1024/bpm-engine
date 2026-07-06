@@ -219,6 +219,8 @@ async fn process_store_save_and_load() {
         variables: std::collections::HashMap::new(),
         state: InstanceState::Running,
         version: 1,
+        parent_instance_id: None,
+        parent_token_id: None,
     };
 
     store.save(&instance).await.unwrap();
@@ -259,6 +261,7 @@ async fn timer_store_insert_and_list_due() {
         id: "timer-1".into(),
         token_id: "tok-1".into(),
         instance_id: "inst-timer".into(),
+        node_id: "node-1".into(),
         due_at: "1000".into(),
         status: "Scheduled".into(),
         created_at: "500".into(),
@@ -278,4 +281,168 @@ async fn timer_store_insert_and_list_due() {
         after_fire.is_empty(),
         "fired timers should not appear in due list"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn external_task_store_create_fetch_complete() {
+    use bpm_engine_adapter_postgres::PostgresExternalTaskStore;
+    use bpm_engine_storage::ExternalTaskStore;
+    use std::collections::HashMap;
+
+    let (pool, _container) = setup_pool().await;
+    insert_test_instance(&pool, "inst-et-1").await;
+    let store = PostgresExternalTaskStore::new(pool);
+
+    // Create an external task
+    let task_id = store
+        .create("tok-et-1", "inst-et-1", "payment", 3, 60, HashMap::new())
+        .await
+        .unwrap();
+    assert!(!task_id.is_empty());
+
+    // Fetch and lock
+    let tasks = store
+        .fetch_and_lock(
+            "worker-1",
+            &["payment".to_string()],
+            10,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].task_type, "payment");
+
+    // Complete
+    store
+        .complete(&tasks[0].task_id, "worker-1", HashMap::new())
+        .await
+        .unwrap();
+
+    // After completion, fetch returns empty
+    let remaining = store
+        .fetch_and_lock(
+            "worker-2",
+            &["payment".to_string()],
+            10,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    assert!(
+        remaining.is_empty(),
+        "completed task should not be fetched again"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn external_task_store_fail_and_reclaim() {
+    use bpm_engine_adapter_postgres::PostgresExternalTaskStore;
+    use bpm_engine_storage::ExternalTaskStore;
+    use std::collections::HashMap;
+
+    let (pool, _container) = setup_pool().await;
+    insert_test_instance(&pool, "inst-et-2").await;
+    let store = PostgresExternalTaskStore::new(pool);
+
+    store
+        .create("tok-et-2", "inst-et-2", "email", 3, 60, HashMap::new())
+        .await
+        .unwrap();
+
+    let tasks = store
+        .fetch_and_lock(
+            "worker-1",
+            &["email".to_string()],
+            10,
+            std::time::Duration::from_millis(1), // very short lock
+        )
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1);
+
+    // Fail the task (retries decrement)
+    store
+        .fail(
+            &tasks[0].task_id,
+            "worker-1",
+            "timeout".to_string(),
+            Some(std::time::Duration::from_millis(1)),
+        )
+        .await
+        .unwrap();
+
+    // Wait for lock to expire
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Reclaim expired locks
+    let reclaimed = store.reclaim_expired_locks().await.unwrap();
+    assert!(reclaimed >= 1, "expired lock should be reclaimed");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn history_repo_append_and_list() {
+    use bpm_engine_adapter_postgres::PostgresHistoryRepo;
+    use bpm_engine_storage::HistoryRepo;
+
+    let (pool, _container) = setup_pool().await;
+    insert_test_instance(&pool, "inst-hist-1").await;
+    let repo = PostgresHistoryRepo::new(pool);
+
+    // Append events
+    let id1 = repo
+        .append(
+            "inst-hist-1",
+            "ProcessStarted",
+            &serde_json::json!({"instance_id": "inst-hist-1"}),
+            "1000",
+        )
+        .await
+        .unwrap();
+    assert!(!id1.is_empty());
+
+    let _id2 = repo
+        .append(
+            "inst-hist-1",
+            "TokenArrived",
+            &serde_json::json!({"node_id": "task-1"}),
+            "1001",
+        )
+        .await
+        .unwrap();
+
+    let _id3 = repo
+        .append(
+            "inst-hist-1",
+            "ProcessCompleted",
+            &serde_json::json!({"node_id": "end"}),
+            "1002",
+        )
+        .await
+        .unwrap();
+
+    // List all events
+    let loaded = repo
+        .list_by_instance("inst-hist-1", None, None)
+        .await
+        .unwrap();
+    assert_eq!(loaded.len(), 3);
+    assert_eq!(loaded[0].event_type, "ProcessStarted");
+    assert_eq!(loaded[1].event_type, "TokenArrived");
+    assert_eq!(loaded[2].event_type, "ProcessCompleted");
+
+    // Filter by event_type
+    let filtered = repo
+        .list_by_instance("inst-hist-1", None, Some("TokenArrived"))
+        .await
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].event_type, "TokenArrived");
+
+    // Nonexistent instance returns empty
+    let empty = repo.list_by_instance("nonexistent", None, None).await.unwrap();
+    assert!(empty.is_empty());
 }

@@ -76,9 +76,40 @@ fn event_type_instance_payload(
             p.instance_id.clone(),
             serde_json::to_value(p).unwrap_or_default(),
         )),
+        EngineEvent::CallActivityStarted(p) => Some((
+            "CallActivityStarted",
+            p.parent_instance_id.clone(),
+            serde_json::to_value(p).unwrap_or_default(),
+        )),
+        EngineEvent::CallActivityCompleted(p) => Some((
+            "CallActivityCompleted",
+            p.parent_instance_id.clone(),
+            serde_json::to_value(p).unwrap_or_default(),
+        )),
+        EngineEvent::MessageSent(p) => Some((
+            "MessageSent",
+            p.instance_id.clone(),
+            serde_json::to_value(p).unwrap_or_default(),
+        )),
+        EngineEvent::SignalSent(p) => Some((
+            "SignalSent",
+            p.instance_id.clone(),
+            serde_json::to_value(p).unwrap_or_default(),
+        )),
+        EngineEvent::ProcessTerminated(p) => Some((
+            "ProcessTerminated",
+            p.instance_id.clone(),
+            serde_json::to_value(p).unwrap_or_default(),
+        )),
+        EngineEvent::ExternalTaskCompleted(p) => Some((
+            "ExternalTaskCompleted",
+            p.instance_id.clone(),
+            serde_json::to_value(p).unwrap_or_default(),
+        )),
     }
 }
 
+/// Handler that records every engine event to the history repository.
 pub struct HistoryHandler;
 
 #[async_trait]

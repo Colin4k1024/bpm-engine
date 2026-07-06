@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             id="Definitions_6" targetNamespace="http://example.com">
+  <process id="subprocess-flow" name="SubProcess" isExecutable="true">
+    <startEvent id="start" name="Start"/>
+    <subProcess id="payment-sub" name="Payment SubProcess">
+      <startEvent id="sub_start" name="Sub Start"/>
+      <serviceTask id="validate" name="Validate"/>
+      <serviceTask id="charge" name="Charge"/>
+      <endEvent id="sub_end" name="Sub End"/>
+      <sequenceFlow id="sf1" sourceRef="sub_start" targetRef="validate"/>
+      <sequenceFlow id="sf2" sourceRef="validate" targetRef="charge"/>
+      <sequenceFlow id="sf3" sourceRef="charge" targetRef="sub_end"/>
+    </subProcess>
+    <endEvent id="end" name="End"/>
+    <sequenceFlow id="f1" sourceRef="start" targetRef="payment-sub"/>
+    <sequenceFlow id="f2" sourceRef="payment-sub" targetRef="end"/>
+  </process>
+</definitions>

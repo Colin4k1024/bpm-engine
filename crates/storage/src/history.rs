@@ -2,9 +2,11 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! let repo = Arc::new(MemoryRepo::new());
+//! ```no_run
+//! use std::sync::Arc;
+//! use bpm_engine_storage::HistoryRepo;
 //!
+//! # async fn example(repo: Arc<impl HistoryRepo>) -> anyhow::Result<()> {
 //! // Append a token-arrived event
 //! let payload = serde_json::json!({ "token_id": "token-1", "node_id": "task-1" });
 //! let id = repo
@@ -23,17 +25,25 @@
 //! // Filter by token_id (extracted from payload)
 //! let token_events = repo.list_by_instance("instance-1", Some("token-1"), None).await?;
 //! assert_eq!(token_events.len(), 1);
+//! # Ok(())
+//! # }
 //! ```
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// A history event recording a state transition in a process instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEvent {
+    /// Unique history event identifier.
     pub id: String,
+    /// The process instance this event belongs to.
     pub instance_id: String,
+    /// Event type name (matches [`EngineEvent`] variant name).
     pub event_type: String,
+    /// Serialized event payload.
     pub payload: serde_json::Value,
+    /// ISO 8601 timestamp when the event occurred.
     pub occurred_at: String,
 }
 

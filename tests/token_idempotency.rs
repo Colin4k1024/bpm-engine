@@ -32,6 +32,8 @@ fn make_instance(id: &str, tokens: Vec<Token>) -> ProcessInstance {
         tokens,
         tenant_id: None,
         version: 0,
+        parent_instance_id: None,
+        parent_token_id: None,
     }
 }
 

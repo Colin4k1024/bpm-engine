@@ -2,9 +2,11 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! let repo = Arc::new(MemoryRepo::new());
+//! ```no_run
+//! use std::sync::Arc;
+//! use bpm_engine_storage::OutboxRepo;
 //!
+//! # async fn example(repo: Arc<impl OutboxRepo>) -> anyhow::Result<()> {
 //! // Insert a pending event
 //! let id = repo
 //!     .insert_pending(None, "ExternalTaskCompleted", r#"{"task_id":"t1"}"#)
@@ -19,17 +21,26 @@
 //! repo.mark_published(&id).await?;
 //! let updated = repo.list_pending(None).await?;
 //! assert!(updated.is_empty());
+//! # Ok(())
+//! # }
 //! ```
 
 use async_trait::async_trait;
 
+/// An event in the transactional outbox awaiting delivery.
 #[derive(Debug, Clone)]
 pub struct OutboxEvent {
+    /// Unique outbox entry identifier.
     pub id: String,
+    /// Event type name (matches [`EngineEvent`] variant name).
     pub event_type: String,
+    /// Serialized JSON payload.
     pub payload: String,
+    /// Delivery status: "Pending", "Sent", or "Failed".
     pub status: String,
+    /// Optional tenant isolation key.
     pub tenant_id: Option<String>,
+    /// ISO 8601 creation timestamp.
     pub created_at: Option<String>,
 }
 

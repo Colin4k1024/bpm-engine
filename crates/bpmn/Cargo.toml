@@ -10,3 +10,13 @@ bpm-engine-core = { path = "../core", version = "0.2.0" }
 roxmltree = "0.20"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+bpm-engine-adapter-memory = { path = "../adapters/memory", version = "0.2.0" }
+bpm-engine-storage = { path = "../storage", version = "0.2.0" }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "parse_compile_bench"
+harness = false

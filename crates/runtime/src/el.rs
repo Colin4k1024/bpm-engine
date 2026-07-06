@@ -2,9 +2,14 @@
 
 use std::collections::HashMap;
 
+/// Error from EL expression evaluation.
 #[derive(Debug, Clone)]
 pub struct ElError(pub String);
 
+/// Evaluate a condition expression against process variables.
+///
+/// Supports comparisons (`==`, `!=`, `>`, `<`, `>=`, `<=`),
+/// boolean logic (`and`, `or`, `not`), and variable references.
 pub fn eval_condition(expr: &str, variables: &HashMap<String, String>) -> Result<bool, ElError> {
     let expr = expr.trim();
     if expr.is_empty() {

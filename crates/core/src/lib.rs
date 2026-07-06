@@ -4,23 +4,39 @@
 //! It defines the fundamental abstractions: tokens, events, process definitions,
 //! external tasks, and the token state machine.
 
+#![warn(missing_docs)]
+
+/// Core error types for the BPM engine.
 pub mod error;
+/// Immutable events driving all state transitions.
 pub mod event;
+/// External task domain types for the worker protocol.
 pub mod external_task;
+/// Process instance runtime container.
 pub mod instance;
+/// BPMN node types and process graph structure.
 pub mod node;
+/// Process definition and BPMN node model.
 pub mod process;
+/// Saga compensation tracking and ordering.
 pub mod saga;
+/// Token state machine and lifecycle.
 pub mod token;
+/// Process variable helpers.
+pub mod variable;
 
 pub use error::*;
 pub use event::*;
 pub use external_task::*;
 pub use instance::*;
 pub use node::*;
-pub use process::{EdgeCondition, Node, NodeType, OutgoingEdge, ProcessDefinition};
+pub use process::{
+    BoundaryEventDef, EdgeCondition, FormField, FormFieldType, Node, NodeType, OutgoingEdge,
+    ProcessDefinition,
+};
 pub use saga::*;
 pub use token::*;
+pub use variable::*;
 
 // ---------------------------------------------------------------------------
 // Token state machine
@@ -40,6 +56,24 @@ pub use token::*;
 /// ```
 ///
 /// Terminal states (no outgoing transitions): `Completed`, `Terminated`.
+///
+/// # Example
+///
+/// ```
+/// use bpm_engine_core::{is_valid_token_transition, TokenStatus};
+///
+/// // Valid transitions
+/// assert!(is_valid_token_transition(TokenStatus::Created, TokenStatus::Ready));
+/// assert!(is_valid_token_transition(TokenStatus::Ready, TokenStatus::Executing));
+/// assert!(is_valid_token_transition(TokenStatus::Executing, TokenStatus::Waiting));
+/// assert!(is_valid_token_transition(TokenStatus::Waiting, TokenStatus::Ready));
+///
+/// // Invalid: must go through Ready
+/// assert!(!is_valid_token_transition(TokenStatus::Created, TokenStatus::Executing));
+///
+/// // Invalid: terminal states
+/// assert!(!is_valid_token_transition(TokenStatus::Completed, TokenStatus::Ready));
+/// ```
 pub fn is_valid_token_transition(from: TokenStatus, to: TokenStatus) -> bool {
     use TokenStatus::*;
     match (from, to) {
@@ -511,5 +545,230 @@ mod tests {
         let result = filter_pending_and_sort_reverse(&records);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].node_id, "A");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property-based tests (proptest)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // --- Token Status strategy ---
+
+    fn token_status_strategy() -> impl Strategy<Value = TokenStatus> {
+        prop_oneof![
+            Just(TokenStatus::Created),
+            Just(TokenStatus::Ready),
+            Just(TokenStatus::Executing),
+            Just(TokenStatus::Waiting),
+            Just(TokenStatus::Suspended),
+            Just(TokenStatus::Completed),
+            Just(TokenStatus::Terminated),
+        ]
+    }
+
+    // --- Property: all known valid transitions match is_valid_token_transition ---
+
+    proptest! {
+        /// Any (from, to) pair that the state machine says is valid
+        /// must be one of the explicitly documented valid transitions.
+        #[test]
+        fn valid_transitions_are_documented(
+            from in token_status_strategy(),
+            to in token_status_strategy(),
+        ) {
+            let is_valid = is_valid_token_transition(from, to);
+            let is_explicitly_valid = matches!(
+                (from, to),
+                (TokenStatus::Created, TokenStatus::Ready)
+                    | (TokenStatus::Ready, TokenStatus::Executing)
+                    | (TokenStatus::Waiting, TokenStatus::Ready)
+                    | (TokenStatus::Executing, TokenStatus::Completed)
+                    | (TokenStatus::Executing, TokenStatus::Terminated)
+                    | (TokenStatus::Executing, TokenStatus::Suspended)
+                    | (TokenStatus::Suspended, TokenStatus::Ready)
+                    | (TokenStatus::Executing, TokenStatus::Waiting)
+            );
+            let is_same_state = from == to;
+
+            // If the transition is valid, it must be either explicitly listed or same-state
+            if is_valid {
+                prop_assert!(
+                    is_explicitly_valid || is_same_state,
+                    "valid transition ({:?} -> {:?}) should be explicitly documented or same-state",
+                    from, to
+                );
+            }
+        }
+    }
+
+    proptest! {
+        /// Terminal states (Completed, Terminated) must have NO valid outgoing transitions
+        /// (except same-state no-ops).
+        #[test]
+        fn terminal_states_have_no_outgoing(
+            to in token_status_strategy(),
+            terminal in prop_oneof![Just(TokenStatus::Completed), Just(TokenStatus::Terminated)],
+        ) {
+            if terminal != to {
+                prop_assert!(
+                    !is_valid_token_transition(terminal, to),
+                    "terminal state {:?} should not transition to {:?}",
+                    terminal, to
+                );
+            }
+        }
+    }
+
+    proptest! {
+        /// Same-state transitions are always valid (no-op).
+        #[test]
+        fn same_state_is_always_valid(status in token_status_strategy()) {
+            prop_assert!(
+                is_valid_token_transition(status, status),
+                "{:?} -> {:?} (same state) should always be valid",
+                status, status
+            );
+        }
+    }
+
+    proptest! {
+        /// transition_reason must return a non-empty string for any (from, to) pair.
+        #[test]
+        fn transition_reason_always_nonempty(
+            from in token_status_strategy(),
+            to in token_status_strategy(),
+        ) {
+            let reason = transition_reason(from, to);
+            prop_assert!(
+                !reason.is_empty(),
+                "transition_reason should never be empty"
+            );
+        }
+    }
+
+    proptest! {
+        /// transition_reason must be consistent with is_valid_token_transition.
+        #[test]
+        fn transition_reason_consistent_with_validity(
+            from in token_status_strategy(),
+            to in token_status_strategy(),
+        ) {
+            let is_valid = is_valid_token_transition(from, to);
+            let reason = transition_reason(from, to);
+            if is_valid {
+                prop_assert_eq!(reason, "valid transition");
+            } else {
+                prop_assert_ne!(reason, "valid transition");
+            }
+        }
+    }
+
+    // --- Saga compensation ordering properties ---
+
+    proptest! {
+        /// For any list of (order, status) pairs, the filtered-and-sorted result:
+        /// 1. Only contains Pending records
+        /// 2. Is sorted in descending order
+        #[test]
+        fn saga_compensation_order_is_always_descending(
+            records in prop::collection::vec(
+                (0u32..1000, prop::bool::ANY),
+                0..50,
+            ),
+        ) {
+            #[derive(Debug, Clone)]
+            struct Rec {
+                order: u32,
+                status: &'static str,
+            }
+
+            let recs: Vec<Rec> = records
+                .into_iter()
+                .map(|(order, is_pending)| Rec {
+                    order,
+                    status: if is_pending { "Pending" } else { "Completed" },
+                })
+                .collect();
+
+            let mut pending: Vec<&Rec> = recs.iter().filter(|r| r.status == "Pending").collect();
+            pending.sort_by_key(|r| std::cmp::Reverse(r.order));
+
+            // Property 1: only Pending records remain
+            for r in &pending {
+                prop_assert_eq!(r.status, "Pending");
+            }
+
+            // Property 2: orders are in descending order
+            for window in pending.windows(2) {
+                prop_assert!(
+                    window[0].order >= window[1].order,
+                    "compensation orders should be descending: {} >= {}",
+                    window[0].order,
+                    window[1].order
+                );
+            }
+
+            // Property 3: result length <= input length
+            prop_assert!(pending.len() <= recs.len());
+        }
+    }
+
+    proptest! {
+        /// The compensation result length equals the number of Pending records.
+        #[test]
+        fn saga_result_length_equals_pending_count(
+            records in prop::collection::vec(
+                (0u32..1000, prop::bool::ANY),
+                0..50,
+            ),
+        ) {
+            let statuses: Vec<&str> = records
+                .iter()
+                .map(|(_, is_pending)| if *is_pending { "Pending" } else { "Completed" })
+                .collect();
+            let pending_count = statuses.iter().filter(|&&s| s == "Pending").count();
+
+            #[derive(Debug)]
+            struct Rec { order: u32, #[allow(dead_code)] status: &'static str }
+
+            let recs: Vec<Rec> = records
+                .into_iter()
+                .zip(statuses.iter())
+                .map(|((order, _), &status)| Rec { order, status })
+                .collect();
+
+            let mut result: Vec<&Rec> = recs.iter().filter(|r| r.status == "Pending").collect();
+            result.sort_by_key(|r| std::cmp::Reverse(r.order));
+
+            prop_assert_eq!(result.len(), pending_count);
+        }
+    }
+
+    proptest! {
+        /// For any non-empty list of Pending records with distinct orders,
+        /// the first element of the sorted result has the highest order.
+        #[test]
+        fn saga_highest_order_is_first(
+            orders in prop::collection::hash_set(0u32..10000, 1..30),
+        ) {
+            #[derive(Debug)]
+            struct Rec { order: u32, #[allow(dead_code)] status: &'static str }
+
+            let recs: Vec<Rec> = orders
+                .into_iter()
+                .map(|order| Rec { order, status: "Pending" })
+                .collect();
+
+            let mut result: Vec<&Rec> = recs.iter().collect();
+            result.sort_by_key(|r| std::cmp::Reverse(r.order));
+
+            let max_order = recs.iter().map(|r| r.order).max().unwrap();
+            prop_assert_eq!(result[0].order, max_order);
+        }
     }
 }

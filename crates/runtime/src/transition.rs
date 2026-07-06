@@ -17,6 +17,7 @@ fn new_token(node_id: String, parallel_group_id: Option<String>) -> Token {
     }
 }
 
+/// Create one new token per outgoing edge (for fork/forward transitions).
 pub fn move_token(node: &Node) -> Vec<Token> {
     node.outgoing_edges
         .iter()
@@ -33,6 +34,7 @@ pub fn move_token_preserving_group(node: &Node, parallel_group_id: Option<String
         .collect()
 }
 
+/// Create one new token per outgoing edge, all sharing the same parallel group ID.
 pub fn move_token_with_group(node: &Node, parallel_group_id: String) -> Vec<Token> {
     node.outgoing_edges
         .iter()
@@ -40,6 +42,7 @@ pub fn move_token_with_group(node: &Node, parallel_group_id: String) -> Vec<Toke
         .collect()
 }
 
+/// Evaluate an exclusive gateway: select one outgoing edge based on conditions.
 pub fn evaluate_exclusive_gateway(
     node: &Node,
     variables: &HashMap<String, String>,

@@ -126,6 +126,8 @@ impl ProcessInstanceStore for PostgresProcessStore {
                     variables,
                     state: str_to_instance_state(row.get("state")),
                     version: row.get::<_, i32>("version") as u32,
+                    parent_instance_id: row.get("parent_instance_id"),
+                    parent_token_id: row.get("parent_token_id"),
                 }))
             }
             None => Ok(None),
@@ -139,14 +141,16 @@ impl ProcessInstanceStore for PostgresProcessStore {
         // Upsert process_instance
         tx.execute(
             r#"
-            INSERT INTO process_instance (id, process_def_id, tenant_id, variables, state, version)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO process_instance (id, process_def_id, tenant_id, variables, state, version, parent_instance_id, parent_token_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (id) DO UPDATE SET
                 process_def_id = EXCLUDED.process_def_id,
                 tenant_id = EXCLUDED.tenant_id,
                 variables = EXCLUDED.variables,
                 state = EXCLUDED.state,
-                version = EXCLUDED.version
+                version = EXCLUDED.version,
+                parent_instance_id = EXCLUDED.parent_instance_id,
+                parent_token_id = EXCLUDED.parent_token_id
             "#,
             &[
                 &instance.id,
@@ -155,6 +159,8 @@ impl ProcessInstanceStore for PostgresProcessStore {
                 &serde_json::to_string(&instance.variables)?,
                 &instance_state_to_str(instance.state),
                 &(instance.version as i32),
+                &instance.parent_instance_id,
+                &instance.parent_token_id,
             ],
         )
         .await?;

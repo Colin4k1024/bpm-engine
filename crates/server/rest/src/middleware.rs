@@ -1,8 +1,9 @@
-//! Middleware: API key authentication and basic rate limiting.
+//! Middleware: API key authentication, basic rate limiting,
+//! and request-id injection.
 
 use axum::{
     extract::Request,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -103,3 +104,41 @@ pub async fn rate_limit(
             .into_response()
     }
 }
+
+/// Request-id middleware.
+///
+/// Generates a UUID for every incoming request, stores it in request extensions,
+/// and returns it as `X-Request-Id` in the response headers.
+pub async fn request_id_middleware(mut request: Request, next: Next) -> Response {
+    let request_id = uuid::Uuid::new_v4().to_string();
+
+    // Insert into request extensions so handlers can access it
+    request
+        .extensions_mut()
+        .insert(RequestId(request_id.clone()));
+
+    let method = request.method().to_string();
+    let uri = request.uri().to_string();
+
+    // Log request start. Do NOT hold a span guard across .await (non-Send).
+    tracing::info!(
+        request_id = %request_id,
+        method = %method,
+        uri = %uri,
+        "incoming request"
+    );
+
+    let mut response = next.run(request).await;
+
+    // Set X-Request-Id in response
+    if let Ok(hv) = HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert("X-Request-Id", hv);
+    }
+
+    response
+}
+
+/// Typed extractor for the request id, stored in request extensions.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct RequestId(pub String);

@@ -90,11 +90,16 @@ async fn poll_and_fire(
             for timer in timers {
                 if let Err(e) = timer_store.mark_fired(&timer.id).await {
                     error!(timer_id = %timer.id, error = %e, "failed to mark timer fired");
+                    #[cfg(feature = "observability")]
+                    metrics::counter!("bpm_engine_errors_total").increment(1);
                     continue;
                 }
+                #[cfg(feature = "observability")]
+                metrics::counter!("bpm_engine_timers_fired_total").increment(1);
                 let event = EngineEvent::TimerFired(payloads::TimerFired {
                     timer_id: timer.id,
                     token_id: timer.token_id,
+                    node_id: timer.node_id,
                 });
                 if event_tx.send(event).is_err() {
                     error!("timer event channel closed");

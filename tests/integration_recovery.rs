@@ -18,6 +18,7 @@ fn minimal_def() -> ProcessDefinition {
     ProcessDefinition {
         id: "minimal",
         start: "start",
+        boundary_events: HashMap::new(),
         nodes: HashMap::from([
             (
                 "start",
@@ -67,6 +68,8 @@ async fn engine_continues_after_state_persisted() {
         variables: HashMap::new(),
         state: InstanceState::Running,
         version: 0,
+        parent_instance_id: None,
+        parent_token_id: None,
     };
     repo.save(&inst).await.unwrap();
 

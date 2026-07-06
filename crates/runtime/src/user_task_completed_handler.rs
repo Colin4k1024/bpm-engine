@@ -7,6 +7,7 @@ use tracing::info;
 use super::handler::{EngineContext, EventHandler};
 use super::transition::move_token;
 
+/// Handler that advances tokens when a user task is completed.
 pub struct UserTaskCompletedHandler;
 
 #[async_trait]

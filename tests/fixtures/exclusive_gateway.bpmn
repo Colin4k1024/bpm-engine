@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             id="Definitions_3" targetNamespace="http://example.com">
+  <process id="xor-gateway" name="Exclusive Gateway" isExecutable="true">
+    <startEvent id="start" name="Start"/>
+    <exclusiveGateway id="decide" name="Decision" default="f3"/>
+    <serviceTask id="approved" name="Approve"/>
+    <serviceTask id="rejected" name="Reject"/>
+    <endEvent id="end-approved" name="Approved End"/>
+    <endEvent id="end-rejected" name="Rejected End"/>
+    <sequenceFlow id="f1" sourceRef="start" targetRef="decide"/>
+    <sequenceFlow id="f2" sourceRef="decide" targetRef="approved">
+      <conditionExpression>${approved == true}</conditionExpression>
+    </sequenceFlow>
+    <sequenceFlow id="f3" sourceRef="decide" targetRef="rejected"/>
+    <sequenceFlow id="f4" sourceRef="approved" targetRef="end-approved"/>
+    <sequenceFlow id="f5" sourceRef="rejected" targetRef="end-rejected"/>
+  </process>
+</definitions>

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             id="Definitions_5" targetNamespace="http://example.com">
+  <process id="timer-flow" name="Timer Events" isExecutable="true">
+    <startEvent id="start" name="Start"/>
+    <userTask id="approval" name="Approval Task"/>
+    <intermediateCatchEvent id="wait-duration" name="Wait 1 Hour">
+      <timerEventDefinition>
+        <timeDuration>PT1H</timeDuration>
+      </timerEventDefinition>
+    </intermediateCatchEvent>
+    <intermediateCatchEvent id="wait-date" name="Wait Until Date">
+      <timerEventDefinition>
+        <timeDate>2025-06-01T00:00:00Z</timeDate>
+      </timerEventDefinition>
+    </intermediateCatchEvent>
+    <boundaryEvent id="timeout" attachedToRef="approval" cancelActivity="true">
+      <timerEventDefinition>
+        <timeDuration>PT30M</timeDuration>
+      </timerEventDefinition>
+    </boundaryEvent>
+    <endEvent id="end-normal" name="Normal End"/>
+    <endEvent id="end-timeout" name="Timeout End"/>
+    <sequenceFlow id="f1" sourceRef="start" targetRef="approval"/>
+    <sequenceFlow id="f2" sourceRef="approval" targetRef="wait-duration"/>
+    <sequenceFlow id="f3" sourceRef="wait-duration" targetRef="wait-date"/>
+    <sequenceFlow id="f4" sourceRef="wait-date" targetRef="end-normal"/>
+    <sequenceFlow id="f5" sourceRef="timeout" targetRef="end-timeout"/>
+  </process>
+</definitions>

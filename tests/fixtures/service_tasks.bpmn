@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             id="Definitions_2" targetNamespace="http://example.com">
+  <process id="service-task-flow" name="Service Task Flow" isExecutable="true">
+    <startEvent id="start" name="Start"/>
+    <serviceTask id="task1" name="Validate Order"/>
+    <serviceTask id="task2" name="Process Payment"/>
+    <serviceTask id="task3" name="Send Confirmation"/>
+    <endEvent id="end" name="End"/>
+    <sequenceFlow id="f1" sourceRef="start" targetRef="task1"/>
+    <sequenceFlow id="f2" sourceRef="task1" targetRef="task2"/>
+    <sequenceFlow id="f3" sourceRef="task2" targetRef="task3"/>
+    <sequenceFlow id="f4" sourceRef="task3" targetRef="end"/>
+  </process>
+</definitions>

@@ -2,9 +2,14 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! let repo = Arc::new(MemoryRepo::new());
+//! ```no_run
+//! use std::sync::Arc;
+//! use std::collections::HashMap;
+//! use std::time::Duration;
+//! use bpm_engine_core::ExternalTaskState;
+//! use bpm_engine_storage::ExternalTaskStore;
 //!
+//! # async fn example(repo: Arc<impl ExternalTaskStore>) -> anyhow::Result<()> {
 //! // Create an external task
 //! let task_id = repo
 //!     .create("token-1", "instance-1", "payment", 3, 60, HashMap::new())
@@ -21,12 +26,45 @@
 //! repo.complete(&task_id, "worker-1", HashMap::new()).await?;
 //! let task = repo.get(&task_id).await?.unwrap();
 //! assert_eq!(task.state, ExternalTaskState::Completed);
+//! # Ok(())
+//! # }
 //! ```
 
 use async_trait::async_trait;
 use bpm_engine_core::ExternalTask;
 use std::collections::HashMap;
 use std::time::Duration;
+
+/// Typed errors for external task operations.
+///
+/// These errors are safe to expose to API clients without leaking internal details.
+#[derive(Debug, thiserror::Error)]
+pub enum ExternalTaskError {
+    /// The specified task was not found.
+    #[error("task not found: {task_id}")]
+    TaskNotFound {
+        /// The task ID that was not found.
+        task_id: String,
+    },
+    /// The task is not in the required state for the operation.
+    #[error("task not in locked state: {task_id}")]
+    TaskNotLocked {
+        /// The task ID with invalid state.
+        task_id: String,
+    },
+    /// The lock on the task has expired.
+    #[error("lock expired for task: {task_id}")]
+    LockExpired {
+        /// The task ID whose lock expired.
+        task_id: String,
+    },
+    /// An invariant violation occurred (e.g., lease conflict).
+    #[error("invariant violation: {0}")]
+    InvariantViolation(#[from] crate::InvariantViolation),
+    /// An unexpected internal error occurred.
+    #[error("internal error: {0}")]
+    Internal(String),
+}
 
 /// External task store: manages the lifecycle of long-running work delegated to external workers.
 ///
@@ -80,7 +118,7 @@ pub trait ExternalTaskStore: Send + Sync {
         task_id: &str,
         worker_id: &str,
         variables: HashMap<String, String>,
-    ) -> anyhow::Result<()>;
+    ) -> Result<(), ExternalTaskError>;
 
     /// Fail: retries -= 1; if retries > 0 -> READY else -> FAILED.
     async fn fail(
@@ -89,10 +127,19 @@ pub trait ExternalTaskStore: Send + Sync {
         worker_id: &str,
         error: String,
         retry_after: Option<Duration>,
-    ) -> anyhow::Result<()>;
+    ) -> Result<(), ExternalTaskError>;
 
     /// Reclaim LOCKED tasks whose lock_expire_at < now to READY (plan §9).
     async fn reclaim_expired_locks(&self) -> anyhow::Result<usize>;
+
+    /// Extend the lock on a LOCKED task. Returns false if task not found, not locked,
+    /// or owned by a different worker.
+    async fn extend_lock(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        extension: Duration,
+    ) -> anyhow::Result<bool>;
 
     /// Load task by id (for REST layer after complete to get token_id/instance_id for transition).
     async fn get(&self, task_id: &str) -> anyhow::Result<Option<ExternalTask>>;

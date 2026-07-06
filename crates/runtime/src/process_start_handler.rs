@@ -8,6 +8,7 @@ use tracing::info;
 
 use super::handler::{EngineContext, EventHandler};
 
+/// Handler that creates a process instance and initial token on ProcessStarted.
 pub struct ProcessStartHandler;
 
 #[async_trait]
@@ -41,6 +42,8 @@ impl EventHandler for ProcessStartHandler {
             variables,
             state: InstanceState::Running,
             version: 0,
+            parent_instance_id: None,
+            parent_token_id: None,
         };
         let _ = process_store.save(&instance).await;
         vec![EngineEvent::TokenArrived(payloads::TokenArrived {

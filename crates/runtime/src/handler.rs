@@ -14,6 +14,7 @@ use std::sync::Arc;
 /// They receive an event and return zero or more follow-up events for the pump to process.
 #[async_trait]
 pub trait EventHandler: Send + Sync {
+    /// Handle an event and return zero or more follow-up events for the pump to process.
     async fn handle(&self, event: &EngineEvent, ctx: &mut EngineContext) -> Vec<EngineEvent>;
 }
 
@@ -23,15 +24,25 @@ pub trait EventHandler: Send + Sync {
 /// tokens, process definitions); all others are optional and enable specific BPMN features
 /// (timers, external tasks, compensation, history, parallel joins, outbox).
 pub struct EngineContext {
+    /// Process instance persistence.
     pub process_store: Arc<dyn ProcessInstanceStore>,
+    /// Token persistence with optimistic concurrency.
     pub token_store: Arc<dyn TokenStore>,
+    /// Process definition storage (BPMN XML + compiled graph).
     pub process_def_store: Arc<dyn ProcessDefinitionStore>,
+    /// Parallel join coordination (optional — enables fork/join).
     pub parallel_join_repo: Option<Arc<dyn ParallelJoinRepo>>,
+    /// Persistent timer storage (optional — enables timer events).
     pub timer_store: Option<Arc<dyn TimerStore>>,
+    /// Saga compensation record storage (optional — enables compensation).
     pub compensation_repo: Option<Arc<dyn CompensationRecordRepo>>,
+    /// Transactional outbox (optional — enables reliable event publishing).
     pub outbox_repo: Option<Arc<dyn OutboxRepo>>,
+    /// External task storage (optional — enables worker protocol).
     pub external_task_store: Option<Arc<dyn ExternalTaskStore>>,
+    /// Execution history recording (optional — enables audit/replay).
     pub history_repo: Option<Arc<dyn HistoryRepo>>,
+    /// Tenant isolation key for multi-tenant deployments.
     pub tenant_id: Option<String>,
 }
 
@@ -72,41 +83,49 @@ pub struct EngineContextBuilder {
 }
 
 impl EngineContextBuilder {
+    /// Wire the parallel join repository (enables fork/join).
     pub fn parallel_join_repo(mut self, repo: Arc<dyn ParallelJoinRepo>) -> Self {
         self.parallel_join_repo = Some(repo);
         self
     }
 
+    /// Wire the timer store (enables timer events).
     pub fn timer_store(mut self, store: Arc<dyn TimerStore>) -> Self {
         self.timer_store = Some(store);
         self
     }
 
+    /// Wire the compensation repository (enables saga compensation).
     pub fn compensation_repo(mut self, repo: Arc<dyn CompensationRecordRepo>) -> Self {
         self.compensation_repo = Some(repo);
         self
     }
 
+    /// Wire the outbox repository (enables reliable event publishing).
     pub fn outbox_repo(mut self, repo: Arc<dyn OutboxRepo>) -> Self {
         self.outbox_repo = Some(repo);
         self
     }
 
+    /// Wire the external task store (enables worker protocol).
     pub fn external_task_store(mut self, store: Arc<dyn ExternalTaskStore>) -> Self {
         self.external_task_store = Some(store);
         self
     }
 
+    /// Wire the history repository (enables audit/replay).
     pub fn history_repo(mut self, repo: Arc<dyn HistoryRepo>) -> Self {
         self.history_repo = Some(repo);
         self
     }
 
+    /// Set the tenant isolation key.
     pub fn tenant_id(mut self, id: String) -> Self {
         self.tenant_id = Some(id);
         self
     }
 
+    /// Build the [`EngineContext`]. Consumes the builder.
     pub fn build(self) -> EngineContext {
         EngineContext {
             process_store: self.process_store,

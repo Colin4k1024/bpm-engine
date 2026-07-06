@@ -2,10 +2,12 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! // TokenStore is implemented by MemoryRepo in tests
-//! let repo = Arc::new(MemoryRepo::new());
+//! ```no_run
+//! use std::sync::Arc;
+//! use bpm_engine_core::{Token, TokenStatus, TokenMode};
+//! use bpm_engine_storage::TokenStore;
 //!
+//! # async fn example(repo: Arc<impl TokenStore>) -> anyhow::Result<()> {
 //! // Save tokens for a process instance
 //! let tokens = vec![Token {
 //!     id: "token-1".into(),
@@ -26,6 +28,8 @@
 //! // Claim token (transitions Ready -> Executing)
 //! let claimed = repo.claim_token("instance-1", "token-1", 1).await?;
 //! assert!(claimed);
+//! # Ok(())
+//! # }
 //! ```
 
 use async_trait::async_trait;

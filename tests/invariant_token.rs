@@ -28,6 +28,8 @@ async fn token_completes_at_most_once() {
         variables: std::collections::HashMap::new(),
         state: InstanceState::Running,
         version: 0,
+        parent_instance_id: None,
+        parent_token_id: None,
     };
     repo.save(&inst).await.unwrap();
     let claimed = repo
@@ -62,6 +64,8 @@ async fn only_one_claim_succeeds_per_token() {
         variables: std::collections::HashMap::new(),
         state: InstanceState::Running,
         version: 0,
+        parent_instance_id: None,
+        parent_token_id: None,
     };
     repo.save(&inst).await.unwrap();
 

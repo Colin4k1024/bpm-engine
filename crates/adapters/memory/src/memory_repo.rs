@@ -458,14 +458,18 @@ impl ExternalTaskStore for MemoryRepo {
         task_id: &str,
         worker_id: &str,
         variables: HashMap<String, String>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), bpm_engine_storage::ExternalTaskError> {
         let now_secs = unix_secs();
         let mut guard = self.external_tasks.write().unwrap();
-        let r = guard
-            .get_mut(task_id)
-            .ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        let r = guard.get_mut(task_id).ok_or_else(|| {
+            bpm_engine_storage::ExternalTaskError::TaskNotFound {
+                task_id: task_id.to_string(),
+            }
+        })?;
         if r.state != ExternalTaskState::Locked {
-            anyhow::bail!("task not locked");
+            return Err(bpm_engine_storage::ExternalTaskError::TaskNotLocked {
+                task_id: task_id.to_string(),
+            });
         }
         if r.lock_owner.as_deref() != Some(worker_id) {
             return Err(bpm_engine_storage::InvariantViolation::new(
@@ -481,7 +485,9 @@ impl ExternalTaskStore for MemoryRepo {
         }
         if let Some(exp) = r.lock_expire_at {
             if exp <= now_secs {
-                anyhow::bail!("lock expired");
+                return Err(bpm_engine_storage::ExternalTaskError::LockExpired {
+                    task_id: task_id.to_string(),
+                });
             }
         }
         r.state = ExternalTaskState::Completed;
@@ -500,13 +506,17 @@ impl ExternalTaskStore for MemoryRepo {
         worker_id: &str,
         error: String,
         _retry_after: Option<Duration>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), bpm_engine_storage::ExternalTaskError> {
         let mut guard = self.external_tasks.write().unwrap();
-        let r = guard
-            .get_mut(task_id)
-            .ok_or_else(|| anyhow::anyhow!("task not found"))?;
+        let r = guard.get_mut(task_id).ok_or_else(|| {
+            bpm_engine_storage::ExternalTaskError::TaskNotFound {
+                task_id: task_id.to_string(),
+            }
+        })?;
         if r.state != ExternalTaskState::Locked {
-            anyhow::bail!("task not locked");
+            return Err(bpm_engine_storage::ExternalTaskError::TaskNotLocked {
+                task_id: task_id.to_string(),
+            });
         }
         if r.lock_owner.as_deref() != Some(worker_id) {
             return Err(bpm_engine_storage::InvariantViolation::new(
@@ -551,6 +561,29 @@ impl ExternalTaskStore for MemoryRepo {
             }
         }
         Ok(n)
+    }
+
+    async fn extend_lock(
+        &self,
+        task_id: &str,
+        worker_id: &str,
+        extension: Duration,
+    ) -> anyhow::Result<bool> {
+        let mut guard = self.external_tasks.write().unwrap();
+        let r = match guard.get_mut(task_id) {
+            Some(r) => r,
+            None => return Ok(false),
+        };
+        if r.state != ExternalTaskState::Locked {
+            return Ok(false);
+        }
+        if r.lock_owner.as_deref() != Some(worker_id) {
+            return Ok(false);
+        }
+        let new_expire = unix_secs() + extension.as_secs();
+        r.lock_expire_at = Some(new_expire);
+        r.updated_at = utc_now();
+        Ok(true)
     }
 
     async fn get(&self, task_id: &str) -> anyhow::Result<Option<ExternalTask>> {

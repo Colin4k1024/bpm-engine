@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             id="Definitions_4" targetNamespace="http://example.com">
+  <process id="parallel-flow" name="Parallel Gateway" isExecutable="true">
+    <startEvent id="start" name="Start"/>
+    <parallelGateway id="fork" name="Fork"/>
+    <serviceTask id="branch-a" name="Branch A"/>
+    <serviceTask id="branch-b" name="Branch B"/>
+    <serviceTask id="branch-c" name="Branch C"/>
+    <parallelGateway id="join" name="Join"/>
+    <endEvent id="end" name="End"/>
+    <sequenceFlow id="f1" sourceRef="start" targetRef="fork"/>
+    <sequenceFlow id="f2" sourceRef="fork" targetRef="branch-a"/>
+    <sequenceFlow id="f3" sourceRef="fork" targetRef="branch-b"/>
+    <sequenceFlow id="f4" sourceRef="fork" targetRef="branch-c"/>
+    <sequenceFlow id="f5" sourceRef="branch-a" targetRef="join"/>
+    <sequenceFlow id="f6" sourceRef="branch-b" targetRef="join"/>
+    <sequenceFlow id="f7" sourceRef="branch-c" targetRef="join"/>
+    <sequenceFlow id="f8" sourceRef="join" targetRef="end"/>
+  </process>
+</definitions>

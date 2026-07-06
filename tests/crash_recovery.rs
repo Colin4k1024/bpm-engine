@@ -26,6 +26,7 @@ fn minimal_def() -> ProcessDefinition {
     ProcessDefinition {
         id: "minimal",
         start: "start",
+        boundary_events: HashMap::new(),
         nodes: HashMap::from([
             (
                 "start",
@@ -55,6 +56,7 @@ fn timer_def() -> ProcessDefinition {
     ProcessDefinition {
         id: "timer_process",
         start: "start",
+        boundary_events: HashMap::new(),
         nodes: HashMap::from([
             (
                 "start",
@@ -120,6 +122,8 @@ async fn token_executing_recovered_on_restart() {
         variables: HashMap::new(),
         state: InstanceState::Running,
         version: 0,
+        parent_instance_id: None,
+        parent_token_id: None,
     };
     repo.save(&inst).await.unwrap();
 
@@ -280,6 +284,8 @@ async fn timer_due_before_crash_fired_after_restart() {
         variables: HashMap::new(),
         state: InstanceState::Running,
         version: 0,
+        parent_instance_id: None,
+        parent_token_id: None,
     };
     repo.save(&inst).await.unwrap();
 
@@ -290,6 +296,7 @@ async fn timer_due_before_crash_fired_after_restart() {
         id: timer_id.clone(),
         token_id: token_id.clone(),
         instance_id: instance_id.clone(),
+        node_id: "delay".to_string(),
         due_at: past_time,
         status: "Scheduled".to_string(),
         created_at: "0".to_string(),

@@ -20,7 +20,7 @@ impl TimerStore for PostgresTimerStore {
         let row = client
             .query_opt(
                 r#"
-                SELECT id, token_id, instance_id, due_at, status, created_at
+                SELECT id, token_id, instance_id, node_id, due_at, status, created_at
                 FROM timer
                 WHERE id = $1
                 "#,
@@ -32,6 +32,7 @@ impl TimerStore for PostgresTimerStore {
             id: r.get("id"),
             token_id: r.get("token_id"),
             instance_id: r.get("instance_id"),
+            node_id: r.get("node_id"),
             due_at: r.get("due_at"),
             status: r.get("status"),
             created_at: r.get("created_at"),
@@ -56,8 +57,8 @@ impl TimerStore for PostgresTimerStore {
         client
             .execute(
                 r#"
-                INSERT INTO timer (id, token_id, instance_id, due_at, status, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                INSERT INTO timer (id, token_id, instance_id, node_id, due_at, status, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 ON CONFLICT (id) DO UPDATE SET
                     due_at = EXCLUDED.due_at,
                     status = EXCLUDED.status
@@ -66,6 +67,7 @@ impl TimerStore for PostgresTimerStore {
                     &record.id,
                     &record.token_id,
                     &record.instance_id,
+                    &record.node_id,
                     &record.due_at,
                     &record.status,
                     &record.created_at,
@@ -80,7 +82,7 @@ impl TimerStore for PostgresTimerStore {
         let rows = client
             .query(
                 r#"
-                SELECT id, token_id, instance_id, due_at, status, created_at
+                SELECT id, token_id, instance_id, node_id, due_at, status, created_at
                 FROM timer
                 WHERE status = 'Scheduled' AND due_at <= $1
                 ORDER BY due_at ASC
@@ -96,6 +98,7 @@ impl TimerStore for PostgresTimerStore {
                 id: r.get("id"),
                 token_id: r.get("token_id"),
                 instance_id: r.get("instance_id"),
+                node_id: r.get("node_id"),
                 due_at: r.get("due_at"),
                 status: r.get("status"),
                 created_at: r.get("created_at"),

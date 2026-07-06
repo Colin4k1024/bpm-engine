@@ -10,3 +10,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
+aes-gcm = "0.10"
+base64 = "0.22"
+rand = "0.8"
+
+[dev-dependencies]
+proptest = "1"

@@ -189,7 +189,7 @@ impl Worker {
         let client = self.client.clone();
         let worker_id = self.config.worker_id.clone();
         let task_id = task.task_id.clone();
-        let ctx = TaskContext::new(worker_id.clone(), task.task_id.clone());
+        let ctx = TaskContext::new(worker_id.clone(), task.task_id.clone(), client.clone());
 
         let task_type = task.task_type.clone();
         tokio::spawn(async move {
