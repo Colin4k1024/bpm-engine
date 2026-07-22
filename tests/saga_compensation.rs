@@ -71,7 +71,7 @@ async fn run_compensation(
     // Filter to Pending only, sort by order descending (reverse chronological)
     let mut pending: Vec<&CompensationRecordRow> =
         records.iter().filter(|r| r.status == "Pending").collect();
-    pending.sort_by(|a, b| b.order.cmp(&a.order));
+    pending.sort_by_key(|b| std::cmp::Reverse(b.order));
 
     let mut outcomes = Vec::new();
     for record in pending {
