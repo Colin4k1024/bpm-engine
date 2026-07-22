@@ -88,7 +88,7 @@ impl ProcessDefinitionStore for ProcessDefStore {
         let records = self.records.read().unwrap();
         let mut versions: Vec<ProcessDefinitionRecord> =
             records.values().filter(|r| r.key == key).cloned().collect();
-        versions.sort_by(|a, b| b.version.cmp(&a.version));
+        versions.sort_by_key(|b| std::cmp::Reverse(b.version));
         Ok(versions)
     }
 
