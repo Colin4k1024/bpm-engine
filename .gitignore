@@ -48,6 +48,15 @@ tmp/
 temp/
 *.tmp
 *.temp
+*.tsbuildinfo
+
+# Frontend build artifacts
+ui/node_modules/
+ui/dist/
+ui/vite.config.js
+ui/vite.config.d.ts
+ui/playwright-report/
+ui/test-results/
 
 # Coverage
 lcov.info

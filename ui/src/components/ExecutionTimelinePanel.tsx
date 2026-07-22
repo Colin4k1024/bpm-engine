@@ -1,5 +1,6 @@
 import type { HistoryEventResponse } from '../api/types'
 import { useTraceStore } from '../store/traceStore'
+import { useI18n } from '../i18n'
 
 const EVENT_ICON: Record<string, string> = {
   ProcessStarted: '⚪',
@@ -49,6 +50,7 @@ export function ExecutionTimelinePanel({
   onEventTypeFilterChange,
 }: ExecutionTimelinePanelProps) {
   const { setSelectedEvent } = useTraceStore()
+  const { t, formatDate } = useI18n()
 
   const tokenIds = tokenOptions.length > 0 ? tokenOptions.map((t) => t.id) : [...new Set(events.map((e) => e.payload?.token_id).filter(Boolean))] as string[]
   const eventTypes = [...new Set(events.map((e) => e.event_type))]
@@ -56,8 +58,7 @@ export function ExecutionTimelinePanel({
   const formatTime = (occurred_at: string) => {
     const n = parseInt(occurred_at, 10)
     if (!Number.isNaN(n)) {
-      const d = new Date(n * 1000)
-      return d.toLocaleTimeString()
+      return formatDate(n * 1000)
     }
     return occurred_at
   }
@@ -65,7 +66,7 @@ export function ExecutionTimelinePanel({
   if (loading) {
     return (
       <div className="execution-timeline-panel">
-        <div className="panel-placeholder">Loading timeline...</div>
+        <div className="panel-placeholder">{t('component.loadingTimeline')}</div>
       </div>
     )
   }
@@ -76,9 +77,9 @@ export function ExecutionTimelinePanel({
         <select
           value={tokenFilter ?? ''}
           onChange={(e) => onTokenFilterChange(e.target.value || null)}
-          aria-label="Filter by token"
+          aria-label={t('component.filterToken')}
         >
-          <option value="">All tokens</option>
+          <option value="">{t('component.allTokens')}</option>
           {tokenIds.map((id) => (
             <option key={id} value={id}>
               {id}
@@ -88,9 +89,9 @@ export function ExecutionTimelinePanel({
         <select
           value={eventTypeFilter}
           onChange={(e) => onEventTypeFilterChange(e.target.value)}
-          aria-label="Filter by event type"
+          aria-label={t('component.filterType')}
         >
-          <option value="">All types</option>
+          <option value="">{t('component.allTypes')}</option>
           {eventTypes.map((t) => (
             <option key={t} value={t}>
               {t}
@@ -100,7 +101,7 @@ export function ExecutionTimelinePanel({
       </div>
       <div className="timeline-list">
         {events.length === 0 ? (
-          <div className="timeline-empty">No events</div>
+          <div className="timeline-empty">{t('component.noEvents')}</div>
         ) : (
           events.map((ev) => (
             <button

@@ -1,27 +1,38 @@
-# Execution Trace UI
+# BPM Operations Console
 
-Single-instance, read-only Execution Trace UI for the BPM engine: Instance header, process diagram (nodes + token highlight), execution timeline, and event detail panel.
+The React console exposes the engine's operational surface instead of only a read-only trace. It includes:
 
-## Run
+- runtime overview, liveness, readiness, and invariant checks;
+- BPMN deployment, definition versions, activation, and deprecation;
+- process instance launch, inventory, variables, topology, history, and replay;
+- human-task forms and completion;
+- external-task fetch-and-lock, completion, failure, and lease extension;
+- dead-letter inspection, requeue, and deletion;
+- optional tenant and API-key headers stored in the browser.
 
-1. Start the REST API (from repo root):
-   ```bash
-   cargo run -p bpm-server-rest
-   ```
-   Server listens on `http://localhost:3000`.
+## Run locally
 
-2. Start the UI (from this directory):
-   ```bash
-   npm install
-   npm run dev
-   ```
-   UI runs at `http://localhost:5173` and proxies `/api` to the backend.
-
-3. Open `http://localhost:5173`, enter a process instance ID (e.g. from `POST /api/v1/process-instances`), then **View Trace**.
-
-## Build
+Start the REST server from the repository root:
 
 ```bash
+cargo run -p bpm-engine-server-rest
+```
+
+Then start the console:
+
+```bash
+cd ui
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. Vite proxies `/api` to `http://localhost:3000`.
+
+## Verify
+
+```bash
+npm run lint
 npm run build
 ```
-Output is in `dist/`. Serve it from the same host as the API or configure CORS and API base URL.
+
+The production output is written to `ui/dist/`.

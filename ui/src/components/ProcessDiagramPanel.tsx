@@ -1,6 +1,7 @@
 import type { ProcessDefinitionView } from '../api/types'
 import type { Token } from '../api/types'
 import { useTraceStore } from '../store/traceStore'
+import { useI18n } from '../i18n'
 
 interface ProcessDiagramPanelProps {
   definition: ProcessDefinitionView | null
@@ -16,22 +17,30 @@ const TOKEN_STATUS_COLOR: Record<string, string> = {
   Terminated: 'var(--token-terminated)',
   Created: 'var(--token-created)',
   Suspended: 'var(--token-suspended)',
+  READY: 'var(--token-ready)',
+  EXECUTING: 'var(--token-executing)',
+  WAITING: 'var(--token-waiting)',
+  COMPLETED: 'var(--token-completed)',
+  TERMINATED: 'var(--token-terminated)',
+  CREATED: 'var(--token-created)',
+  SUSPENDED: 'var(--token-suspended)',
 }
 
 export function ProcessDiagramPanel({ definition, tokens, loading }: ProcessDiagramPanelProps) {
   const { setTokenFilter } = useTraceStore()
+  const { locale, t: translate } = useI18n()
 
   if (loading) {
     return (
       <div className="process-diagram-panel">
-        <div className="panel-placeholder">Loading diagram...</div>
+        <div className="panel-placeholder">{translate('component.loadingDiagram')}</div>
       </div>
     )
   }
   if (!definition) {
     return (
       <div className="process-diagram-panel">
-        <div className="panel-placeholder">No process definition</div>
+        <div className="panel-placeholder">{translate('component.noDefinition')}</div>
       </div>
     )
   }
@@ -71,9 +80,9 @@ export function ProcessDiagramPanel({ definition, tokens, loading }: ProcessDiag
                           borderColor: TOKEN_STATUS_COLOR[t.status] ?? '#888',
                         }}
                         onClick={() => setTokenFilter(t.id)}
-                        title={`${t.id} (${t.status})`}
+                        title={`${t.id} (${locale === 'zh' ? translate(`status.${t.status.toLowerCase()}`) : t.status})`}
                       >
-                        {t.id.slice(0, 8)} {t.status}
+                        {t.id.slice(0, 8)} {locale === 'zh' ? translate(`status.${t.status.toLowerCase()}`) : t.status}
                       </button>
                     ))}
                   </div>

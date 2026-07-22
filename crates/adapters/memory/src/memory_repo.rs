@@ -93,6 +93,25 @@ impl MemoryRepo {
             history_events: RwLock::new(Vec::new()),
         }
     }
+
+    /// Return all instances visible to a tenant for the embedded REST console.
+    pub fn list_all_instances(&self, tenant_id: Option<&str>) -> Vec<ProcessInstance> {
+        let mut instances: Vec<ProcessInstance> = self
+            .instances
+            .read()
+            .unwrap()
+            .values()
+            .filter(|instance| match (tenant_id, &instance.tenant_id) {
+                (None, _) => true,
+                (Some(t), Some(instance_tenant)) => t == instance_tenant,
+                (Some(""), None) => true,
+                (Some(_), None) => false,
+            })
+            .cloned()
+            .collect();
+        instances.sort_by(|a, b| a.id.cmp(&b.id));
+        instances
+    }
 }
 
 impl Default for MemoryRepo {

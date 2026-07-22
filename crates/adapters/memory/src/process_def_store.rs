@@ -51,6 +51,14 @@ impl ProcessDefStore {
             records.insert(id, record);
         }
     }
+
+    /// Return metadata for every registered definition version.
+    pub fn list_all_records(&self) -> Vec<ProcessDefinitionRecord> {
+        let mut records: Vec<ProcessDefinitionRecord> =
+            self.records.read().unwrap().values().cloned().collect();
+        records.sort_by(|a, b| a.key.cmp(&b.key).then_with(|| b.version.cmp(&a.version)));
+        records
+    }
 }
 
 impl Default for ProcessDefStore {

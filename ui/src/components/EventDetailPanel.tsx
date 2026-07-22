@@ -1,12 +1,14 @@
 import { useTraceStore } from '../store/traceStore'
+import { useI18n } from '../i18n'
 
 export function EventDetailPanel() {
   const { selectedEvent } = useTraceStore()
+  const { t } = useI18n()
 
   if (!selectedEvent) {
     return (
       <div className="event-detail-panel">
-        <div className="panel-placeholder">Click a timeline item to see details</div>
+        <div className="panel-placeholder">{t('component.clickEvent')}</div>
       </div>
     )
   }
@@ -19,7 +21,7 @@ export function EventDetailPanel() {
 
   return (
     <div className="event-detail-panel">
-      <h3 className="event-detail-title">Event Details</h3>
+      <h3 className="event-detail-title">{t('component.eventDetails')}</h3>
       <pre className="event-detail-json">{JSON.stringify(detail, null, 2)}</pre>
     </div>
   )

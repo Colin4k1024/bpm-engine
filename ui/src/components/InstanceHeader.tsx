@@ -1,4 +1,5 @@
 import type { ProcessInstance } from '../api/types'
+import { useI18n } from '../i18n'
 
 interface InstanceHeaderProps {
   instance: ProcessInstance | null
@@ -7,17 +8,18 @@ interface InstanceHeaderProps {
 }
 
 export function InstanceHeader({ instance, loading, onRefresh }: InstanceHeaderProps) {
+  const { locale, t } = useI18n()
   if (loading) {
     return (
       <header className="instance-header">
-        <span>Loading...</span>
+        <span>{t('component.loading')}</span>
       </header>
     )
   }
   if (!instance) {
     return (
       <header className="instance-header">
-        <span>Instance not found</span>
+        <span>{t('component.instanceNotFound')}</span>
       </header>
     )
   }
@@ -32,12 +34,12 @@ export function InstanceHeader({ instance, loading, onRefresh }: InstanceHeaderP
           #{instance.instance_id.slice(0, 8)}...
         </span>
         <span className={`status-badge status-${instance.status.toLowerCase()}`}>
-          {instance.status}
+          {locale === 'zh' ? t(`status.${instance.status.toLowerCase()}`) : instance.status}
         </span>
       </div>
       <div className="instance-header-actions">
         <button type="button" onClick={onRefresh} disabled={loading}>
-          Refresh
+          {t('common.refresh')}
         </button>
       </div>
     </header>

@@ -108,9 +108,11 @@ fn external_task_error_response(e: bpm_engine_storage::ExternalTaskError) -> Res
         }
         ExternalTaskError::TaskNotFound { .. }
         | ExternalTaskError::TaskNotLocked { .. }
-        | ExternalTaskError::LockExpired { .. } => {
-            (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(e.to_string()))).into_response()
-        }
+        | ExternalTaskError::LockExpired { .. } => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(e.to_string())),
+        )
+            .into_response(),
         ExternalTaskError::Internal(msg) => {
             tracing::error!(error = %msg, "external task internal error");
             (
@@ -248,6 +250,11 @@ pub struct InstanceStateResponse {
     pub tokens: Vec<bpm_engine_core::Token>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variables: Option<HashMap<String, String>>,
+}
+
+#[derive(Serialize)]
+pub struct InstanceListResponse {
+    pub instances: Vec<InstanceStateResponse>,
 }
 
 #[derive(Deserialize)]
@@ -474,6 +481,32 @@ pub async fn start_instance(
             status: "RUNNING".to_string(),
         }),
     ))
+}
+
+/// GET /api/v1/process-instances — list process instances visible to the tenant.
+pub async fn list_process_instances(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<InstanceListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let tenant_id = tenant_from_headers(&headers);
+    let instances = state.repo.list_all_instances(tenant_id.as_deref());
+    let mut responses = Vec::with_capacity(instances.len());
+    for instance in instances {
+        let mut variables = instance.variables.clone();
+        let _ = decrypt_instance_variables(&mut variables);
+        let current_nodes = current_nodes(&instance);
+        responses.push(InstanceStateResponse {
+            instance_id: instance.id,
+            process_def_id: instance.process_def_id,
+            status: status_str(instance.state).to_string(),
+            current_nodes,
+            tokens: instance.tokens,
+            variables: Some(variables),
+        });
+    }
+    Ok(Json(InstanceListResponse {
+        instances: responses,
+    }))
 }
 
 /// GET /api/v1/process-instances/:id
@@ -1593,6 +1626,30 @@ pub struct ActivateResponse {
     pub status: String,
 }
 
+#[derive(Serialize)]
+pub struct DefinitionListResponse {
+    pub definitions: Vec<DefinitionVersionView>,
+}
+
+/// GET /api/v1/process-definitions — list every deployed process definition version.
+pub async fn list_process_definitions(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<DefinitionListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let records = state.def_store.list_all_records();
+    Ok(Json(DefinitionListResponse {
+        definitions: records
+            .into_iter()
+            .map(|record| DefinitionVersionView {
+                id: record.id,
+                key: record.key,
+                version: record.version,
+                status: record.status.to_string(),
+                created_at: record.created_at,
+            })
+            .collect(),
+    }))
+}
+
 /// GET /api/v1/process-definitions/versions/:key — list all versions for a key.
 pub async fn list_definition_versions(
     State(state): State<Arc<AppState>>,
@@ -1820,7 +1877,10 @@ pub fn router(state: Arc<AppState>, rate_limit_rpm: u64) -> Router {
         .nest(
             "/api/v1",
             Router::new()
-                .route("/process-instances", post(start_instance))
+                .route(
+                    "/process-instances",
+                    get(list_process_instances).post(start_instance),
+                )
                 .route("/process-instances/:id", get(get_instance))
                 .route("/process-instances/:id/trace", get(get_instance_trace))
                 .route("/process-instances/:id/history", get(get_instance_history))
@@ -1830,6 +1890,7 @@ pub fn router(state: Arc<AppState>, rate_limit_rpm: u64) -> Router {
                 .route("/replay/:session_id/snapshot", get(get_replay_snapshot))
                 .route("/replay/:session_id", delete(delete_replay_session))
                 .route("/process-definitions/:id", get(get_process_definition))
+                .route("/process-definitions", get(list_process_definitions))
                 .route(
                     "/process-definitions/versions/:key",
                     get(list_definition_versions),
