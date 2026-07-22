@@ -143,7 +143,11 @@ async fn e2e_service_task_flow_with_external_tasks() {
     assert!(instance.tokens.iter().any(|t| t.node_id == "task1"));
 
     // Create external task for task1
-    let token = instance.tokens.iter().find(|t| t.node_id == "task1").unwrap();
+    let token = instance
+        .tokens
+        .iter()
+        .find(|t| t.node_id == "task1")
+        .unwrap();
     let task_id = repo
         .create(&token.id, "inst-3", "service", 3, 30, HashMap::new())
         .await
@@ -151,7 +155,12 @@ async fn e2e_service_task_flow_with_external_tasks() {
 
     // Fetch and lock
     let tasks = repo
-        .fetch_and_lock("worker-1", &["service".to_string()], 10, Duration::from_secs(30))
+        .fetch_and_lock(
+            "worker-1",
+            &["service".to_string()],
+            10,
+            Duration::from_secs(30),
+        )
         .await
         .unwrap();
     assert_eq!(tasks.len(), 1);
@@ -203,20 +212,34 @@ async fn e2e_external_task_fail_and_retry() {
 
     // Create and lock external task
     let instance = repo.load("inst-4").await.unwrap().unwrap();
-    let token = instance.tokens.iter().find(|t| t.node_id == "task1").unwrap();
+    let token = instance
+        .tokens
+        .iter()
+        .find(|t| t.node_id == "task1")
+        .unwrap();
     let task_id = repo
         .create(&token.id, "inst-4", "service", 3, 30, HashMap::new())
         .await
         .unwrap();
 
-    repo.fetch_and_lock("worker-1", &["service".to_string()], 10, Duration::from_secs(30))
-        .await
-        .unwrap();
+    repo.fetch_and_lock(
+        "worker-1",
+        &["service".to_string()],
+        10,
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
 
     // Fail the task (should retry)
-    repo.fail(&task_id, "worker-1", "timeout".to_string(), Some(Duration::from_secs(1)))
-        .await
-        .unwrap();
+    repo.fail(
+        &task_id,
+        "worker-1",
+        "timeout".to_string(),
+        Some(Duration::from_secs(1)),
+    )
+    .await
+    .unwrap();
 
     // Task should be ready again
     let task = repo.get(&task_id).await.unwrap().unwrap();
@@ -284,7 +307,10 @@ async fn e2e_parallel_gateway_creates_multiple_tokens() {
     // Should have multiple tokens (parallel branches)
     let instance = repo.load("inst-6").await.unwrap().unwrap();
     assert_eq!(instance.state, InstanceState::Running);
-    assert!(instance.tokens.len() > 1, "parallel gateway should create multiple tokens");
+    assert!(
+        instance.tokens.len() > 1,
+        "parallel gateway should create multiple tokens"
+    );
 }
 
 #[tokio::test]
@@ -351,16 +377,25 @@ async fn e2e_external_task_complete_merges_variables() {
     run_engine(event, &mut ctx).await;
 
     let instance = repo.load("inst-8").await.unwrap().unwrap();
-    let token = instance.tokens.iter().find(|t| t.node_id == "task1").unwrap();
+    let token = instance
+        .tokens
+        .iter()
+        .find(|t| t.node_id == "task1")
+        .unwrap();
 
     // Create and lock external task
     repo.create(&token.id, "inst-8", "service", 3, 30, HashMap::new())
         .await
         .unwrap();
 
-    repo.fetch_and_lock("worker-1", &["service".to_string()], 10, Duration::from_secs(30))
-        .await
-        .unwrap();
+    repo.fetch_and_lock(
+        "worker-1",
+        &["service".to_string()],
+        10,
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
 
     // Complete with new variables
     let mut worker_vars = HashMap::new();

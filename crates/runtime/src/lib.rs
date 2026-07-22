@@ -15,6 +15,8 @@ pub mod engine;
 pub mod error;
 /// Node executor trait and execution context.
 pub mod executor;
+/// External task completion handler.
+pub mod external_task_completed_handler;
 /// Gateway evaluation (exclusive, parallel).
 pub mod gateway;
 /// EventHandler trait and EngineContext.
@@ -43,14 +45,13 @@ pub mod token_arrived_handler;
 pub mod transition;
 /// User task completion handler.
 pub mod user_task_completed_handler;
-/// External task completion handler.
-pub mod external_task_completed_handler;
 
 pub use call_activity_handler::*;
 pub use el::*;
 pub use engine::*;
 pub use error::*;
 pub use executor::*;
+pub use external_task_completed_handler::*;
 pub use gateway::*;
 pub use handler::*;
 pub use history_handler::*;
@@ -65,4 +66,3 @@ pub use timer_scheduler::*;
 pub use token_arrived_handler::*;
 pub use transition::*;
 pub use user_task_completed_handler::*;
-pub use external_task_completed_handler::*;

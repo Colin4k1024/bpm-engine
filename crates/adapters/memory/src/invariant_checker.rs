@@ -135,8 +135,9 @@ impl InvariantChecker for MemoryInvariantChecker {
             if let Some(instance) = self.repo.load(instance_id).await? {
                 for token in &instance.tokens {
                     // Check: ExternalTask tokens should have a corresponding external task
-                    if let Some(bpm_engine_core::NodeType::ExternalTask { .. }) =
-                        self.get_node_type(&instance.process_def_id, &token.node_id).await
+                    if let Some(bpm_engine_core::NodeType::ExternalTask { .. }) = self
+                        .get_node_type(&instance.process_def_id, &token.node_id)
+                        .await
                     {
                         // This is a basic check - in a real implementation we'd verify
                         // the external task exists and is in the correct state
@@ -208,10 +209,7 @@ impl InvariantChecker for MemoryInvariantChecker {
                 if instance.version == 0 {
                     violations.push(InvariantViolationReport {
                         invariant: "instance_version_positive".to_string(),
-                        description: format!(
-                            "Instance {} has version 0",
-                            instance_id
-                        ),
+                        description: format!("Instance {} has version 0", instance_id),
                         entity_id: instance_id.clone(),
                         severity: Severity::Info,
                     });

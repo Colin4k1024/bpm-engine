@@ -492,13 +492,23 @@ async fn parallel_saga_compensation_reverses_all_branches() {
     let outcomes = run_compensation(repo.as_ref(), &handler, "inst-parallel").await;
 
     // All 3 branches compensated
-    assert_eq!(outcomes.len(), 3, "all parallel branches should be compensated");
+    assert_eq!(
+        outcomes.len(),
+        3,
+        "all parallel branches should be compensated"
+    );
 
     // Reverse order: branch-c (order=3) → branch-a (order=2) → branch-b (order=1)
     let log = handler.execution_log();
-    assert_eq!(log[0], "branch-c-task", "branch-c (highest order) compensated first");
+    assert_eq!(
+        log[0], "branch-c-task",
+        "branch-c (highest order) compensated first"
+    );
     assert_eq!(log[1], "branch-a-task", "branch-a compensated second");
-    assert_eq!(log[2], "branch-b-task", "branch-b (lowest order) compensated last");
+    assert_eq!(
+        log[2], "branch-b-task",
+        "branch-b (lowest order) compensated last"
+    );
 
     // All successful
     assert!(outcomes.iter().all(|o| *o == CompensationOutcome::Success));
@@ -546,7 +556,10 @@ async fn parallel_saga_compensation_halts_on_branch_failure() {
 
     // branch-y fails compensation
     let mut fail_on = std::collections::HashMap::new();
-    fail_on.insert("branch-y-task".to_string(), "compensation error".to_string());
+    fail_on.insert(
+        "branch-y-task".to_string(),
+        "compensation error".to_string(),
+    );
     let handler = MockCompensationHandler::new(fail_on);
     let outcomes = run_compensation(repo.as_ref(), &handler, "inst-parallel-fail").await;
 

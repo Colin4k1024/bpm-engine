@@ -1,9 +1,9 @@
 //! BPM Engine REST server. Run: cargo run -p bpm-server-rest
 
 mod bpm_config;
-mod middleware;
 #[cfg(feature = "observability")]
 mod metrics;
+mod middleware;
 mod otel;
 mod replay;
 mod routes;
@@ -12,7 +12,9 @@ mod state;
 use crate::bpm_config::BpmConfig;
 use crate::routes::router;
 use crate::state::AppState;
-use bpm_engine_adapter_memory::{DeadLetterRepo, MemoryInvariantChecker, MemoryRepo, ProcessDefStore};
+use bpm_engine_adapter_memory::{
+    DeadLetterRepo, MemoryInvariantChecker, MemoryRepo, ProcessDefStore,
+};
 use bpm_engine_core::{Node, NodeType, OutgoingEdge, ProcessDefinition};
 use bpm_engine_runtime::{
     BpmEngine, CallActivityCompletionHandler, CallActivityStartedHandler,

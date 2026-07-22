@@ -443,6 +443,9 @@ async fn history_repo_append_and_list() {
     assert_eq!(filtered[0].event_type, "TokenArrived");
 
     // Nonexistent instance returns empty
-    let empty = repo.list_by_instance("nonexistent", None, None).await.unwrap();
+    let empty = repo
+        .list_by_instance("nonexistent", None, None)
+        .await
+        .unwrap();
     assert!(empty.is_empty());
 }

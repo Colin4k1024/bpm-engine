@@ -162,9 +162,11 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
         worker_id: &str,
         variables: HashMap<String, String>,
     ) -> Result<(), bpm_engine_storage::ExternalTaskError> {
-        let client = self.pool.get().await.map_err(|e| {
-            bpm_engine_storage::ExternalTaskError::Internal(e.to_string())
-        })?;
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?;
 
         // Merge variables
         let row = client
@@ -197,9 +199,13 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                     version = version + 1
                 WHERE id = $1 AND worker_id = $2 AND state = 'Locked'
                 "#,
-                &[&task_id, &worker_id, &serde_json::to_string(&merged).map_err(|e| {
-                    bpm_engine_storage::ExternalTaskError::Internal(e.to_string())
-                })?],
+                &[
+                    &task_id,
+                    &worker_id,
+                    &serde_json::to_string(&merged).map_err(|e| {
+                        bpm_engine_storage::ExternalTaskError::Internal(e.to_string())
+                    })?,
+                ],
             )
             .await
             .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?;
@@ -220,9 +226,11 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
         error: String,
         retry_after: Option<Duration>,
     ) -> Result<(), bpm_engine_storage::ExternalTaskError> {
-        let client = self.pool.get().await.map_err(|e| {
-            bpm_engine_storage::ExternalTaskError::Internal(e.to_string())
-        })?;
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?;
 
         // Get current retries
         let row = client
@@ -264,9 +272,7 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                         &[&task_id, &worker_id, &error, &(epoch as f64)],
                     )
                     .await
-                    .map_err(|e| {
-                        bpm_engine_storage::ExternalTaskError::Internal(e.to_string())
-                    })?
+                    .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?
             } else {
                 client
                     .execute(
@@ -284,9 +290,7 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                         &[&task_id, &worker_id, &error],
                     )
                     .await
-                    .map_err(|e| {
-                        bpm_engine_storage::ExternalTaskError::Internal(e.to_string())
-                    })?
+                    .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?
             };
 
             if result == 0 {
