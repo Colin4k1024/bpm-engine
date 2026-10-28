@@ -118,7 +118,9 @@ else                               -> plain string
 ```
 
 When completing a task, submit envelope strings under the same rules
-(valid envelope, valid artifact URI, within the size cap).
+(valid envelope, valid artifact URI, within the size cap). AI workers
+additionally carry a typed execution-metadata envelope in the reserved
+`__task_envelope` variable — see `docs/ai-task-envelope.md`.
 
 ## 8. Error codes (stable, REST 4xx)
 
