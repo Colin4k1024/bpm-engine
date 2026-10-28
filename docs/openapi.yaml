@@ -266,6 +266,47 @@ paths:
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /api/v1/process-instances/{id}/steps:
+    get:
+      operationId: getInstanceSteps
+      summary: Unified step timeline (E6-1)
+      description: |
+        One step per `(node_id, token_id)` in causal order (steps are
+        numbered from 1 in first-event order), joining token transitions,
+        worker lease attempts (`ExternalTaskLocked` →
+        `ExternalTaskCompleted`/`ExternalTaskFailed`; a re-lock of a task
+        with an unresolved attempt closes that attempt as `expired` —
+        E1-3 redelivery after lease expiry) and the E3-1 AI task
+        envelope metadata (model/tool versions, cost) keyed by the trace
+        id. Read-only aggregation over the instance, definition and
+        history stores — no new stores, no new event types. `trace_id` IS
+        the instance id in v1 (a dedicated OTel-style trace id is future
+        observability scope); per-HTTP correlation stays on the
+        `X-Request-Id` header. The pre-existing `/trace` graph endpoint is
+        unchanged.
+
+        Sensitive-by-default: the response carries NO variable values —
+        only event types/timestamps, worker ids, retry counters, variable
+        NAME lists (`variables_touched`), and envelope METADATA summaries;
+        redacted or unparsable envelopes degrade to `{"opaque": true}`.
+        A definition that is ABSENT only degrades step-kind
+        classification (event-type fallback); a definition that fails to
+        LOAD is a storage error and answers 500 `internal`.
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+      responses:
+        "200":
+          description: The step timeline of the instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StepsResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /api/v1/process-instances/{id}/replay:
     post:
       operationId: createReplaySession
@@ -1303,6 +1344,158 @@ components:
           items:
             $ref: "#/components/schemas/HistoryEventView"
 
+    StepsResponse:
+      type: object
+      required: [trace_id, instance_id, process_def_id, state, steps]
+      description: |
+        Unified step timeline (E6-1): steps grouped by `(node_id,
+        token_id)` in causal order. Contains no variable values
+        (sensitive-by-default — see docs/trace.md).
+      properties:
+        trace_id:
+          type: string
+          description: |
+            Stable trace id — **the instance id in v1** (documented
+            identity; a dedicated OTel-style trace id is future scope).
+        instance_id:
+          type: string
+        process_def_id:
+          type: string
+        state:
+          type: string
+          enum: [RUNNING, COMPLETED, TERMINATED]
+        steps:
+          type: array
+          description: Steps in causal order (by first event).
+          items:
+            $ref: "#/components/schemas/StepView"
+
+    StepView:
+      type: object
+      required: [step_no, node_id, token_id, kind, events]
+      properties:
+        step_no:
+          type: integer
+          description: 1-based position in the causal step order.
+        node_id:
+          type: string
+          description: Node executed by this step (empty when unknown).
+        token_id:
+          type: string
+          description: |
+            Token that executed the node (empty when a node-scoped event
+            could not be correlated to a token).
+        kind:
+          type: string
+          enum: [node, external_task, timer]
+          description: |
+            From the definition's node type; when the definition is
+            unavailable, from the observed event types (degraded mode).
+        events:
+          type: array
+          description: The step's history events in causal order (types and timestamps only).
+          items:
+            $ref: "#/components/schemas/StepEventView"
+        attempts:
+          type: array
+          description: Worker lease attempts in lock order (external-task steps only).
+          items:
+            $ref: "#/components/schemas/StepAttemptView"
+        envelope_summary:
+          $ref: "#/components/schemas/StepEnvelopeSummary"
+        variables_touched:
+          type: array
+          items: { type: string }
+          description: Variable NAMES touched by this step's events (values never included).
+
+    StepEventView:
+      type: object
+      required: [event_type, occurred_at]
+      properties:
+        event_type:
+          type: string
+          description: e.g. `TokenArrived`, `ExternalTaskLocked`, `TimerScheduled`.
+        occurred_at:
+          type: string
+          description: Unix epoch seconds.
+
+    StepAttemptView:
+      type: object
+      required: [worker_id, outcome, locked_at]
+      description: |
+        One worker lease attempt on an external task, assembled from the
+        lock/fail/complete history events of the task (E1-3 lease, E3-1
+        envelope metadata).
+      properties:
+        worker_id:
+          type: string
+        outcome:
+          type: string
+          enum: [in_flight, completed, failed, expired]
+          description: |
+            How the attempt ended: `in_flight` — locked, no outcome event
+            yet; `completed` / `failed` — closed by
+            `ExternalTaskCompleted` / `ExternalTaskFailed`; `expired` —
+            the lease elapsed without any outcome and another worker
+            re-locked the same task (E1-3 redelivery), so no terminating
+            event exists for this attempt.
+        locked_at:
+          type: string
+          description: Unix epoch seconds — the `ExternalTaskLocked` timestamp.
+        completed_or_failed:
+          type: [string, "null"]
+          description: |
+            Unix epoch seconds — the outcome event timestamp (`null`
+            while the attempt is in flight, and for an `expired`
+            attempt: no terminating event carries one).
+        error:
+          type: [string, "null"]
+          description: |
+            `null` on a completed attempt; the recorded error message on
+            a failed one (with the E3-1 retry-category prefix when
+            present).
+        retries_remaining:
+          type: [integer, "null"]
+          description: |
+            Retry counter as recorded by the attempt's events (`null`
+            when the event carried no counter).
+        envelope:
+          $ref: "#/components/schemas/StepEnvelopeSummary"
+
+    StepEnvelopeSummary:
+      type: object
+      description: |
+        AI-task envelope METADATA summary (E6-1): model/tool versions,
+        cost, artifacts, execution id, retry category — no schemas, no
+        idempotency key, and never any variable value. Mutually
+        exclusive by construction: exactly one of `opaque: true` OR the
+        metadata fields (all optional) appears — the opaque marker when
+        the recorded envelope was redacted by the E2-3 history policy
+        (oversized) or is unparsable, the metadata fields otherwise.
+        (The schema subset used by this spec has no `oneOf`; the
+        exclusivity is enforced by the assembler, documented here.)
+      properties:
+        execution_id:
+          type: string
+        retry_category:
+          type: string
+          enum: [transient, permanent]
+        model:
+          $ref: "#/components/schemas/ModelRef"
+        tools:
+          type: array
+          items:
+            $ref: "#/components/schemas/ToolRef"
+        cost:
+          $ref: "#/components/schemas/TaskCost"
+        artifacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ArtifactRef"
+        opaque:
+          type: boolean
+          description: true when the recorded envelope was redacted or unparsable.
+
     TaskListItem:
       type: object
       required: [task_id, node_id, instance_id, task_type]
@@ -1482,6 +1675,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ToolRef"
+        cost:
+          $ref: "#/components/schemas/TaskCost"
         artifacts:
           type: array
           items:
@@ -1490,6 +1685,32 @@ components:
           description: JSON Schema fragment describing expected input variables.
         output_schema:
           description: JSON Schema fragment describing promised output variables.
+
+    TaskCost:
+      type: object
+      description: |
+        Cost of one AI task execution (E6-1, additive OPTIONAL field of
+        envelope v1 — old envelopes without it parse unchanged). All
+        fields optional; numeric fields are non-negative integers (a
+        negative JSON number is rejected at parse time). `currency` is
+        non-empty and at most 8 bytes when present (else 4xx
+        `task_envelope_invalid`, sub-code `ai_task_envelope_invalid_cost`).
+      properties:
+        currency:
+          type: string
+          description: Currency of `amount_micros` (e.g. "USD").
+        amount_micros:
+          type: integer
+          description: Billed amount in micro units of `currency` (1_000_000 = 1 unit).
+        tokens_in:
+          type: integer
+          description: Input tokens consumed by the model.
+        tokens_out:
+          type: integer
+          description: Output tokens produced by the model.
+        duration_ms:
+          type: integer
+          description: Wall-clock duration of the attempt in milliseconds.
 
     ModelRef:
       type: object

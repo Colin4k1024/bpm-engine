@@ -154,6 +154,9 @@ curl http://127.0.0.1:3000/api/v1/process-instances/:id/history
 
 # Get aggregated trace
 curl http://127.0.0.1:3000/api/v1/process-instances/:id/trace
+
+# Get unified step timeline (E6-1)
+curl http://127.0.0.1:3000/api/v1/process-instances/:id/steps
 {% endhighlight %}
     </div>
 
@@ -326,6 +329,11 @@ worker.start().await;
           <td><span class="method get">GET</span></td>
           <td><code>/process-instances/:id/trace</code></td>
           <td>Get aggregated trace (token timelines and external-task history)</td>
+        </tr>
+        <tr>
+          <td><span class="method get">GET</span></td>
+          <td><code>/process-instances/:id/steps</code></td>
+          <td>Get unified step timeline (E6-1: token steps + worker attempts + AI envelope metadata; no variable values)</td>
         </tr>
         <tr>
           <td><span class="method post">POST</span></td>

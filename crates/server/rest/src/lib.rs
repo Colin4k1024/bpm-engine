@@ -20,6 +20,7 @@ pub mod otel;
 pub mod replay;
 pub mod routes;
 pub mod state;
+pub mod step_trace;
 pub mod storage;
 
 use crate::bpm_config::BpmConfig;

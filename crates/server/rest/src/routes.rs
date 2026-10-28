@@ -1623,6 +1623,72 @@ pub async fn get_instance_history(
     }))
 }
 
+// --- Step trace API (E6-1, issue #26) -----------------------------------------
+
+/// GET /api/v1/process-instances/:id/steps — the unified step timeline
+/// (E6-1): one step per `(node, token)` in causal order, joining token
+/// transitions, worker lease attempts, and the E3-1 AI task envelope
+/// metadata (model/tool versions, cost) keyed by the trace id.
+///
+/// Read-only aggregation over existing stores (instance, definition,
+/// history) — see [`super::step_trace`]. Sensitive-by-default: the
+/// response contains NO variable values, only names/metadata; the trace
+/// id IS the instance id in v1 (`docs/trace.md`). Errors: 404
+/// `not_found` for an unknown instance, 500 `internal` on storage
+/// failures — a definition that merely FAILS TO LOAD is one of those
+/// storage failures (consistent with the E2-4 contract); only a
+/// definition that is genuinely ABSENT (`Ok(None)`) degrades step-kind
+/// classification to the event-type fallback.
+pub async fn get_instance_steps(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::step_trace::StepsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let process_store = Arc::clone(&state.storage.process_store);
+    let inst = process_store
+        .load(&id)
+        .await
+        .map_err(internal_error_tuple)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "process instance not found: {}",
+                    id
+                ))),
+            )
+        })?;
+    // Err (storage failure) ⇒ 500 `internal` like every other store error
+    // here; Ok(None) (definition genuinely absent) ⇒ degrade node-kind
+    // classification to the event-type fallback (see
+    // step_trace::step_kind). By inspection: no faulting-store test —
+    // injecting a failing ProcessDefinitionStore is not cheap with the
+    // current memory/Postgres AppState wiring; the memory driver's
+    // load() is infallible in practice.
+    let definition = state
+        .storage
+        .def_store
+        .load(&inst.process_def_id)
+        .await
+        .map_err(internal_error_tuple)?;
+    let mut events =
+        HistoryRepo::list_by_instance(state.storage.history_repo.as_ref(), &id, None, None)
+            .await
+            .map_err(internal_error_tuple)?;
+    // Causal order: (occurred_at, phase_rank, insertion_index) via the
+    // pure, unit-tested `sort_history_causally`. A plain stable
+    // occurred_at sort would rely on the store preserving insertion
+    // order on same-second ties (the memory adapter does; a SQL history
+    // listing does not guarantee it), and an id tie-break would
+    // RANDOMIZE same-second lock→outcome pairs (history ids are random
+    // UUIDs). See step_trace::phase_rank and docs/trace.md.
+    crate::step_trace::sort_history_causally(&mut events);
+    Ok(Json(crate::step_trace::assemble_steps(
+        &inst,
+        definition.as_ref(),
+        &events,
+    )))
+}
+
 /// GET /api/v1/tasks?type=user|external
 ///
 /// Optional route-level pagination (E2-4): `limit`/`offset` query
@@ -3292,6 +3358,12 @@ fn api_v1_router(
         GET,
         "/process-instances/:id/history",
         get_instance_history
+    );
+    let router = api_route!(
+        router,
+        GET,
+        "/process-instances/:id/steps",
+        get_instance_steps
     );
     let router = api_route!(router, POST, "/process-instances/:id/replay", create_replay);
     let router = api_route!(router, POST, "/replay/:session_id/step", replay_step);
