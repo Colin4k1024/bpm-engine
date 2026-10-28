@@ -42,6 +42,14 @@
 //!    silently ignore is a broken contract, so the whole spec is walked
 //!    and unsupported keywords (oneOf/anyOf/format/minimum/...) are
 //!    rejected with the offending path and keyword.
+//! 6. **Agent tool catalog lockstep (E4-1, issue #19)**: the committed
+//!    catalog served by `GET /capabilities`
+//!    (`crates/server/rest/capabilities/agent-tools.json`) must equal
+//!    what `docs/openapi.yaml` generates, byte for byte; the catalog
+//!    must cover every operation and every canonical error code; and
+//!    the endpoint must serve the committed artifact with the JSON
+//!    content type, validating against the spec's AgentToolsCatalog
+//!    schema.
 //!
 //! Memory driver — no Docker needed.
 
@@ -58,6 +66,9 @@ use std::collections::BTreeSet;
 const OPENAPI_YAML: &str = include_str!("../../../../docs/openapi.yaml");
 /// The routes source, used to scan for code literals near their use sites.
 const ROUTES_SRC: &str = include_str!("../src/routes.rs");
+/// The committed agent tool catalog (E4-1), embedded from the repo —
+/// the same bytes `GET /capabilities` serves.
+const AGENT_TOOLS_JSON: &str = include_str!("../capabilities/agent-tools.json");
 
 struct TestServer {
     base_url: String,
@@ -999,6 +1010,195 @@ async fn deploy_and_validate_error_bodies_validate_against_the_spec_schemas() {
             &format!("validate-compile-errors[{idx}]"),
         );
     }
+
+    server.stop().await;
+}
+
+// --- 7: agent tool catalog (E4-1, issue #19) ----------------------------------
+
+/// Lockstep: regenerating the catalog from the spec must reproduce the
+/// committed artifact byte for byte (the DSL `schema_lockstep` pattern)
+/// — the catalog can never drift from the contract it describes.
+#[test]
+fn capabilities_catalog_matches_generated_output() {
+    let spec = Spec::parse();
+    let generated = bpm_engine_server_rest::capabilities::generate_catalog(&spec.doc);
+    assert_eq!(
+        generated, AGENT_TOOLS_JSON,
+        "crates/server/rest/capabilities/agent-tools.json drifted from what \
+         docs/openapi.yaml generates; regenerate with `cargo run -p \
+         bpm-engine-server-rest --example dump_capabilities`"
+    );
+}
+
+/// Structural catalog contract: header fields, one example per DISTINCT
+/// canonical error code (set equality), one tool per spec operation,
+/// every tool's operation exists in the spec, the classification and
+/// auth rules hold, and every error code a tool lists is canonical.
+#[test]
+fn capabilities_catalog_covers_the_whole_contract() {
+    let catalog: Value =
+        serde_json::from_str(AGENT_TOOLS_JSON).expect("the committed catalog must be valid JSON");
+    let spec = Spec::parse();
+
+    assert_eq!(catalog["catalog_version"], "1");
+    assert_eq!(catalog["api_version"], spec.doc["info"]["version"]);
+    assert_eq!(catalog["generated_from"], "docs/openapi.yaml");
+    assert!(
+        catalog["regenerate"]
+            .as_str()
+            .is_some_and(|cmd| cmd.contains("dump_capabilities")),
+        "the catalog header must document the regeneration command"
+    );
+
+    // One example per DISTINCT canonical code — set equality with the
+    // single source of truth, routes::error_codes::ERROR_CODES.
+    let canonical: BTreeSet<String> = error_codes::ERROR_CODES
+        .iter()
+        .map(|c| c.to_string())
+        .collect();
+    let examples: BTreeSet<String> = catalog["error_examples"]
+        .as_object()
+        .expect("error_examples must be an object")
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(
+        examples, canonical,
+        "the catalog must carry one example per DISTINCT canonical error code"
+    );
+    for (code, example) in catalog["error_examples"]
+        .as_object()
+        .expect("error_examples")
+    {
+        // The example body is a self-consistent ErrorResponse: the code
+        // field names the map key, the status is a 4xx/5xx.
+        assert_eq!(
+            example["body"]["code"],
+            code.as_str(),
+            "example body code must match the map key"
+        );
+        let status = example["status"].as_u64().expect("example status");
+        assert!(
+            (400..600).contains(&status),
+            "example status for {code:?} must be an error status, got {status}"
+        );
+    }
+
+    // One tool per spec operation; every tool documents a REAL spec
+    // operation (in the spec's {param} form).
+    let spec_ops: BTreeSet<(String, String)> = spec
+        .operations()
+        .into_iter()
+        .map(|(path, method)| (method, path))
+        .collect();
+    let tools = catalog["tools"].as_array().expect("tools must be an array");
+    assert_eq!(
+        tools.len(),
+        spec_ops.len(),
+        "the catalog must carry exactly one tool per spec operation"
+    );
+    for tool in tools {
+        let operation = tool["operation"].as_str().expect("operation string");
+        let (method, path) = operation
+            .split_once(' ')
+            .unwrap_or_else(|| panic!("operation must be \"<METHOD> <path>\": {operation:?}"));
+        // The catalog keeps the spec's {param} form; the operations
+        // helper normalizes to the axum :param form — convert alike.
+        let axum_path = path.replace('{', ":").replace('}', "");
+        assert!(
+            spec_ops.contains(&(method.to_string(), axum_path)),
+            "tool {} documents an operation that is not in the spec: {operation}",
+            tool["name"].as_str().unwrap_or("<unnamed>")
+        );
+
+        // Classification: GET → read_only; the two side-effect-free
+        // POSTs → read_only; every other POST/PUT/DELETE → mutating.
+        let name = tool["name"].as_str().expect("tool name");
+        let expected_classification = if method == "GET"
+            || matches!(
+                name,
+                "validate_process_definition" | "dry_run_process_definition"
+            ) {
+            "read_only"
+        } else {
+            "mutating"
+        };
+        assert_eq!(
+            tool["classification"], expected_classification,
+            "wrong classification for {operation}"
+        );
+        assert!(
+            tool["side_effects"].is_string(),
+            "every tool must document side_effects: {operation}"
+        );
+
+        // Auth: the /api/v1 operations sit behind the X-API-Key layer
+        // (when the server has one configured); the root routes do not.
+        assert_eq!(
+            tool["auth_required"].as_bool().expect("auth_required bool"),
+            path.starts_with("/api/v1"),
+            "auth_required must be true exactly for /api/v1 operations: {operation}"
+        );
+
+        // Every error code a tool lists is a canonical code.
+        for err in tool["responses"]["errors"]
+            .as_array()
+            .expect("errors must be an array")
+        {
+            if let Some(code) = err["code"].as_str() {
+                assert!(
+                    canonical.contains(code),
+                    "tool {name} lists non-canonical error code {code:?}"
+                );
+            }
+        }
+    }
+}
+
+/// GET /capabilities serves the committed catalog: 200, JSON content
+/// type, the exact committed bytes, and a body that validates against
+/// the spec's AgentToolsCatalog schema (one tool per operation).
+#[tokio::test]
+async fn capabilities_endpoint_serves_the_committed_catalog() {
+    let server = spawn_server().await;
+    let spec = Spec::parse();
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{}/capabilities", server.base_url))
+        .send()
+        .await
+        .expect("request must succeed");
+    assert_eq!(resp.status(), 200, "the catalog endpoint must answer 200");
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .expect("content-type header");
+    assert!(
+        content_type.starts_with("application/json"),
+        "the catalog must be served as JSON, got {content_type:?}"
+    );
+    let body = resp.text().await.expect("body must be readable");
+    assert_eq!(
+        body, AGENT_TOOLS_JSON,
+        "GET /capabilities must serve the committed catalog verbatim"
+    );
+
+    let catalog: Value = serde_json::from_str(&body).expect("the served catalog must be JSON");
+    assert_eq!(catalog["catalog_version"], "1");
+    assert_eq!(
+        catalog["tools"].as_array().map(Vec::len),
+        Some(spec.operations().len()),
+        "the served catalog must carry one tool per spec operation"
+    );
+    validate(
+        &spec,
+        &spec.schema("/components/schemas/AgentToolsCatalog"),
+        &catalog,
+        "capabilities",
+    );
 
     server.stop().await;
 }

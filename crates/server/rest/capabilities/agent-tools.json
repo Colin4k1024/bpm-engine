@@ -1,0 +1,3120 @@
+{
+  "catalog_version": "1",
+  "api_version": "0.2.0",
+  "generated_from": "docs/openapi.yaml",
+  "regenerate": "cargo run -p bpm-engine-server-rest --example dump_capabilities",
+  "auth": {
+    "type": "apiKey",
+    "in": "header",
+    "name": "X-API-Key",
+    "required": false,
+    "notes": "Optional at the protocol level: the server enforces the key only when one is configured (auth.api_key / BPM_API_KEY); without a configured key it accepts every request (PoC mode). When enforced, a missing or invalid key is rejected with 401 \"unauthorized\". Tools with auth_required=false (health, readiness, capabilities) sit outside the API-key layer entirely. An optional, untrusted X-Tenant-Id header scopes listings and instance starts to a tenant; there is no per-operation authorization in v1 (RBAC is future scope)."
+  },
+  "conventions": {
+    "classification": "read_only — GET operations, plus the two POST endpoints validate and dry-run: they compile/simulate in memory and persist nothing (no definition, instance, task, timer, or history record; E2-2), so an agent may call them freely while exploring. mutating — every other POST/PUT/DELETE; consult the tool's side_effects note before calling. Replay-session operations are mutating but ephemeral: sessions live in memory and expire on inactivity, and no engine state changes.",
+    "error_shape": "Every 4xx/5xx response body is {\"error\": <human-readable message>, \"code\": <stable snake_case identifier>, \"invariant_violation\": <invariant kind>} — the last field appears only on invariant-violation rejections and is mirrored in the X-Invariant-Violation response header. Codes are stable identifiers: adding one is backward compatible, renaming or removing one is breaking. One exception: a 400 from deploy carries the DeployError shape ({\"error\": ...} on a parse failure, {\"errors\": [...]} on compile failures) without a code field. Each tool's errors array lists the codes the operation's referenced response components document (a superset of what a specific call can trigger — the 400 component lists every boundary code); error_examples maps every code to a realistic example body.",
+    "pagination": "GET /api/v1/process-instances pushes limit (1..=500, default 50) and offset (>= 0, default 0) into the store (SQL LIMIT/OFFSET in postgres mode) and returns a pagination object {limit, offset, returned}; out-of-range values are rejected with 400 \"invalid_request\". GET /api/v1/tasks and GET /api/v1/dead-letters accept the same optional parameters but slice in memory (dead-letter pages cap at the 100 entries the store returns per request); GET /api/v1/process-instances/{id}/history accepts an optional limit (1..=500) applied after sorting.",
+    "idempotency": "POST /api/v1/process-instances accepts an optional Idempotency-Key header (1-128 printable ASCII bytes), scoped by X-Tenant-Id (bounded to 128 printable ASCII bytes when a key is supplied): a key already recorded for the tenant replays the recorded instance with 200 instead of creating a second one (201). The check-then-create sequence is single-service, not cross-process atomic — a key-recording failure after creation returns 500 \"internal\" with an explicit message, and retrying may create a second instance. No other operation consumes idempotency keys."
+  },
+  "error_examples": {
+    "deploy_failed": {
+      "status": 500,
+      "body": {
+        "error": "failed to persist process definition",
+        "code": "deploy_failed"
+      }
+    },
+    "empty_source": {
+      "status": 400,
+      "body": {
+        "error": "source must be a non-empty document string",
+        "code": "empty_source"
+      }
+    },
+    "encryption_key_not_configured": {
+      "status": 400,
+      "body": {
+        "error": "BPM_VARIABLE_ENCRYPTION_KEY not configured; cannot encrypt variables",
+        "code": "encryption_key_not_configured"
+      }
+    },
+    "internal": {
+      "status": 500,
+      "body": {
+        "error": "internal server error",
+        "code": "internal"
+      }
+    },
+    "invalid_format": {
+      "status": 400,
+      "body": {
+        "error": "format must be \"bpmn\" or \"dsl\", got \"yaml\"",
+        "code": "invalid_format"
+      }
+    },
+    "invalid_json": {
+      "status": 422,
+      "body": {
+        "error": "invalid type: integer `42`, expected struct StartInstanceRequest",
+        "code": "invalid_json"
+      }
+    },
+    "invalid_request": {
+      "status": 400,
+      "body": {
+        "error": "limit must be between 1 and 500, got 0",
+        "code": "invalid_request"
+      }
+    },
+    "invalid_request_body": {
+      "status": 400,
+      "body": {
+        "error": "invalid request body: EOF while parsing a value at line 1 column 0",
+        "code": "invalid_request_body"
+      }
+    },
+    "invalid_retry_category": {
+      "status": 400,
+      "body": {
+        "error": "category must be \"transient\" or \"permanent\", got \"sometimes\"",
+        "code": "invalid_retry_category"
+      }
+    },
+    "invariant_violation": {
+      "status": 400,
+      "body": {
+        "error": "invariant violation: ExternalTaskLeaseConflict (task_id=00000000-0000-4000-8000-000000000000 expected_owner=Some(\"worker-a\") actual_worker=\"worker-b\")",
+        "code": "invariant_violation",
+        "invariant_violation": "ExternalTaskLeaseConflict"
+      }
+    },
+    "lock_conflict": {
+      "status": 409,
+      "body": {
+        "error": "task not found, not locked, or owned by different worker",
+        "code": "lock_conflict"
+      }
+    },
+    "lock_expired": {
+      "status": 400,
+      "body": {
+        "error": "lock expired for task: 00000000-0000-4000-8000-000000000000",
+        "code": "lock_expired"
+      }
+    },
+    "missing_required_fields": {
+      "status": 400,
+      "body": {
+        "error": "missing required fields: amount, currency",
+        "code": "missing_required_fields"
+      }
+    },
+    "not_found": {
+      "status": 404,
+      "body": {
+        "error": "process instance not found: 00000000-0000-4000-8000-000000000000",
+        "code": "not_found"
+      }
+    },
+    "rate_limited": {
+      "status": 429,
+      "body": {
+        "error": "rate limit exceeded",
+        "code": "rate_limited"
+      }
+    },
+    "reserved_variable_key": {
+      "status": 400,
+      "body": {
+        "error": "variable '__task_envelope' is reserved by the engine; submit the AI task envelope via the 'envelope' request field instead",
+        "code": "reserved_variable_key"
+      }
+    },
+    "sensitive_requires_encryption": {
+      "status": 400,
+      "body": {
+        "error": "variable 'card' is marked sensitive but not listed in 'encrypted'; sensitive variables must be encrypted (BPM_VARIABLE_ENCRYPTION_KEY must be configured)",
+        "code": "sensitive_requires_encryption"
+      }
+    },
+    "task_envelope_invalid": {
+      "status": 400,
+      "body": {
+        "error": "ai_task_envelope_invalid_execution_id: execution_id must not be empty",
+        "code": "task_envelope_invalid"
+      }
+    },
+    "task_not_found": {
+      "status": 400,
+      "body": {
+        "error": "task not found: 00000000-0000-4000-8000-000000000000",
+        "code": "task_not_found"
+      }
+    },
+    "task_not_locked": {
+      "status": 400,
+      "body": {
+        "error": "task not in locked state: 00000000-0000-4000-8000-000000000000",
+        "code": "task_not_locked"
+      }
+    },
+    "unauthorized": {
+      "status": 401,
+      "body": {
+        "error": "missing or invalid API key",
+        "code": "unauthorized"
+      }
+    },
+    "variable_invalid_artifact_uri": {
+      "status": 400,
+      "body": {
+        "error": "variable 'doc': invalid artifact URI: artifact URI must be absolute (non-empty scheme followed by ':')",
+        "code": "variable_invalid_artifact_uri"
+      }
+    },
+    "variable_invalid_envelope": {
+      "status": 400,
+      "body": {
+        "error": "variable 'doc': malformed envelope: envelope body is not valid JSON",
+        "code": "variable_invalid_envelope"
+      }
+    },
+    "variable_too_large": {
+      "status": 400,
+      "body": {
+        "error": "variable 'payload' is 262145 bytes, exceeding the 262144 byte limit; store large payloads externally and reference them via an artifact envelope",
+        "code": "variable_too_large"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "list_dead_letters",
+      "operation": "GET /api/v1/dead-letters",
+      "summary": "List dead letter entries",
+      "description": "Failed external tasks after retry exhaustion. Optional E2-4\nroute-level pagination (`limit` 1..=500, `offset` >= 0, else 400\n`invalid_request`) slices the fetched entries in memory; absent\nparameters keep the previous behavior. The fetch itself is\nbounded: the store returns AT MOST 100 entries per request (both\nthe memory and Postgres adapters), so a page can never expose\nmore than the first 100 dead letters; deeper listing requires\nstore-level pagination (not part of v1).",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          },
+          "description": "Page size (1..=500; default 50 on the instances list). Validated as 400 `invalid_request` when out of range. On `/dead-letters` the page is a window over at most the 100 entries the store returns per request (see that endpoint's description)."
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          },
+          "description": "Zero-based index of the first returned entry (non-negative; validated as 400 `invalid_request` when negative)."
+        },
+        {
+          "name": "X-Tenant-Id",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Tenant scope for the request (optional)."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Dead letter entries (may be empty).",
+          "schema": "DeadLetterListResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "get_dead_letter",
+      "operation": "GET /api/v1/dead-letters/{id}",
+      "summary": "Get a single dead letter entry",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Dead letter entry id."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "The dead letter entry.",
+          "schema": "DeadLetterEntryResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "delete_dead_letter",
+      "operation": "DELETE /api/v1/dead-letters/{id}",
+      "summary": "Delete a dead letter entry",
+      "classification": "mutating",
+      "side_effects": "Deletes the dead-letter entry permanently.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Dead letter entry id."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 204,
+          "description": "Entry deleted."
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "requeue_dead_letter",
+      "operation": "POST /api/v1/dead-letters/{id}/requeue",
+      "summary": "Requeue a dead letter entry as a new external task",
+      "classification": "mutating",
+      "side_effects": "Creates a new external task from the dead-letter entry and removes the dead-letter entry.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Dead letter entry id."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Entry requeued; the new task id is returned.",
+          "schema": "RequeueResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "fetch_and_lock_external_tasks",
+      "operation": "POST /api/v1/external-tasks/fetch-and-lock",
+      "summary": "Fetch and lock external tasks for a worker",
+      "description": "Lease-based delivery: one owner at a time, expired leases are\nreclaimed first, tasks are ordered by creation time. Emits an\n`ExternalTaskLocked` history event per delivered task.",
+      "classification": "mutating",
+      "side_effects": "Persists a lease per delivered task (one owner until the lock expires) and records ExternalTaskLocked history.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "schema": {
+            "properties": {
+              "lock_duration_ms": {
+                "type": "integer"
+              },
+              "max_tasks": {
+                "type": "integer"
+              },
+              "task_types": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "worker_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "worker_id",
+              "task_types",
+              "lock_duration_ms"
+            ],
+            "type": "object"
+          },
+          "content_type": "application/json"
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Locked tasks (may be empty)."
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 422,
+            "code": "invalid_json"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "complete_external_task",
+      "operation": "POST /api/v1/external-tasks/{task_id}/complete",
+      "summary": "Complete a locked external task",
+      "description": "The worker returns result variables; the engine merges them and\nadvances the token via `ExternalTaskCompleted`. The E2-3\nvariable contract runs BEFORE the store mutates the task, so a\nrejected request leaves the task locked and completable.\n\nE3-1: an optional typed `envelope` field is validated\n(4xx `task_envelope_invalid` with the sub-code in the message)\nand merged into the reserved `__task_envelope` variable of the\nmerged map. The worker-sdk wire format (a serialized envelope at\nthat reserved key) is accepted; junk there, or supplying both\nchannels, is rejected with 4xx `reserved_variable_key`.",
+      "classification": "mutating",
+      "side_effects": "Emits ExternalTaskCompleted: merges the worker variables, closes the task, and advances the token; persisted with history.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Task id; user tasks use `<instance_id>:<node_id>`."
+        },
+        {
+          "name": "X-Tenant-Id",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Tenant scope for the request (optional)."
+        },
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "schema": {
+            "properties": {
+              "envelope": {
+                "properties": {
+                  "artifacts": {
+                    "items": {
+                      "properties": {
+                        "media_type": {
+                          "type": "string"
+                        },
+                        "sha256": {
+                          "type": "string"
+                        },
+                        "size": {
+                          "type": "integer"
+                        },
+                        "uri": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "uri"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "cost": {
+                    "properties": {
+                      "amount_micros": {
+                        "type": "integer"
+                      },
+                      "currency": {
+                        "type": "string"
+                      },
+                      "duration_ms": {
+                        "type": "integer"
+                      },
+                      "tokens_in": {
+                        "type": "integer"
+                      },
+                      "tokens_out": {
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "execution_id": {
+                    "type": "string"
+                  },
+                  "idempotency_key": {
+                    "type": "string"
+                  },
+                  "input_schema": {},
+                  "model": {
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "provider": {
+                        "type": "string"
+                      },
+                      "version": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "provider",
+                      "name"
+                    ],
+                    "type": "object"
+                  },
+                  "output_schema": {},
+                  "retry_category": {
+                    "enum": [
+                      "transient",
+                      "permanent"
+                    ],
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "enum": [
+                      1
+                    ],
+                    "type": "integer"
+                  },
+                  "timeout_secs": {
+                    "type": "integer"
+                  },
+                  "tools": {
+                    "items": {
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "version": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "schema_version",
+                  "execution_id"
+                ],
+                "type": "object"
+              },
+              "variables": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "worker_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "worker_id"
+            ],
+            "type": "object"
+          },
+          "content_type": "application/json"
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Task completed.",
+          "schema": "CompleteTaskResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 422,
+            "code": "invalid_json"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "extend_external_task_lock",
+      "operation": "POST /api/v1/external-tasks/{task_id}/extend-lock",
+      "summary": "Extend the lock duration of a locked task",
+      "description": "Refused with 409 `lock_conflict` when the task is unknown, not\nlocked, or owned by a different worker.",
+      "classification": "mutating",
+      "side_effects": "Extends the persisted lease deadline of the locked task.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Task id; user tasks use `<instance_id>:<node_id>`."
+        },
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "schema": {
+            "properties": {
+              "extension_ms": {
+                "type": "integer"
+              },
+              "worker_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "worker_id",
+              "extension_ms"
+            ],
+            "type": "object"
+          },
+          "content_type": "application/json"
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Lock extended.",
+          "schema": "LockExtensionResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 409,
+            "code": "lock_conflict"
+          },
+          {
+            "status": 422,
+            "code": "invalid_json"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "fail_external_task",
+      "operation": "POST /api/v1/external-tasks/{task_id}/fail",
+      "summary": "Fail a locked external task",
+      "description": "Decrements retries; at zero retries the task moves to Failed and\nis enqueued to the dead letter queue, with a `TokenFailed` event.\nE3-2 structured failure: optional `category`\n(`transient`|`permanent`, else 400 `invalid_retry_category`):\n`permanent` is BEHAVIORAL — the task skips the retry loop and goes\nstraight to Failed (DLQ + `TokenFailed`, exactly like retry\nexhaustion; no redelivery). `transient` (or absent) keeps the\nlegacy decrement-and-requeue behavior. The category is also\nrecorded for observability (structured `error_message` prefix,\n`envelope`, history, DLQ).",
+      "classification": "mutating",
+      "side_effects": "Decrements retries and requeues the task (transient), or at zero retries / permanent category moves it to Failed with a dead-letter entry and TokenFailed.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Task id; user tasks use `<instance_id>:<node_id>`."
+        },
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "schema": {
+            "properties": {
+              "category": {
+                "enum": [
+                  "transient",
+                  "permanent"
+                ],
+                "type": "string"
+              },
+              "envelope": {
+                "properties": {
+                  "artifacts": {
+                    "items": {
+                      "properties": {
+                        "media_type": {
+                          "type": "string"
+                        },
+                        "sha256": {
+                          "type": "string"
+                        },
+                        "size": {
+                          "type": "integer"
+                        },
+                        "uri": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "uri"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "cost": {
+                    "properties": {
+                      "amount_micros": {
+                        "type": "integer"
+                      },
+                      "currency": {
+                        "type": "string"
+                      },
+                      "duration_ms": {
+                        "type": "integer"
+                      },
+                      "tokens_in": {
+                        "type": "integer"
+                      },
+                      "tokens_out": {
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "execution_id": {
+                    "type": "string"
+                  },
+                  "idempotency_key": {
+                    "type": "string"
+                  },
+                  "input_schema": {},
+                  "model": {
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "provider": {
+                        "type": "string"
+                      },
+                      "version": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "provider",
+                      "name"
+                    ],
+                    "type": "object"
+                  },
+                  "output_schema": {},
+                  "retry_category": {
+                    "enum": [
+                      "transient",
+                      "permanent"
+                    ],
+                    "type": "string"
+                  },
+                  "schema_version": {
+                    "enum": [
+                      1
+                    ],
+                    "type": "integer"
+                  },
+                  "timeout_secs": {
+                    "type": "integer"
+                  },
+                  "tools": {
+                    "items": {
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "version": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "schema_version",
+                  "execution_id"
+                ],
+                "type": "object"
+              },
+              "error": {
+                "type": "string"
+              },
+              "retry_after_ms": {
+                "type": "integer"
+              },
+              "worker_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "worker_id",
+              "error"
+            ],
+            "type": "object"
+          },
+          "content_type": "application/json"
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Task failed (status `FAILED`).",
+          "schema": "CompleteTaskResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 422,
+            "code": "invalid_json"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "check_invariants",
+      "operation": "GET /api/v1/invariants/check",
+      "summary": "Run storage-layer invariant checks",
+      "description": "Verifies the formal invariants (docs/invariants.md) over stored\ninstances/tokens/tasks/timers. Use for health checks, debugging,\nor post-crash recovery verification.",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Invariant check results.",
+          "schema": "InvariantCheckResult"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "list_process_definitions",
+      "operation": "GET /api/v1/process-definitions",
+      "summary": "List every deployed definition version",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "All versions of all keys.",
+          "schema": "DefinitionListResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "get_active_definition",
+      "operation": "GET /api/v1/process-definitions/active/{key}",
+      "summary": "Get the active version of a definition key",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "key",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process definition key (e.g. `order-flow`)."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "The active version record.",
+          "schema": "DefinitionVersionView"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "deploy_process_definition",
+      "operation": "POST /api/v1/process-definitions/deploy",
+      "summary": "Deploy a process definition from BPMN 2.0 XML",
+      "description": "Request body is the raw BPMN 2.0 XML document (content type\n`application/xml`). Parse failures return 400 with the\n`DeployError` shape carrying `error`; semantic compile failures\nreturn 400 with the `DeployError` shape carrying `errors`;\npersistence failures return 500 with the standard ErrorResponse\nshape and code `deploy_failed` (E2-4 — previously persistence\nfailures reused the parse shape).",
+      "classification": "mutating",
+      "side_effects": "Persists a new immutable definition version (deploy never overwrites an existing version).",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "BPMN 2.0 XML document.",
+          "content_type": "application/xml"
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 201,
+          "description": "Definition deployed.",
+          "schema": "DeployResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "description": "Parse error (single message) or compile errors (list)."
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "deploy_failed"
+          }
+        ]
+      }
+    },
+    {
+      "name": "dry_run_process_definition",
+      "operation": "POST /api/v1/process-definitions/dry-run",
+      "summary": "Side-effect-free simulation (no persistence, E2-2)",
+      "description": "Validate plus a dry-run walk with hypothetical start variables.\nMUST NOT deploy and MUST NOT create any instance, task, timer or\nhistory record. Same response contract as validate plus the\n`dry_run` walk report.",
+      "classification": "read_only",
+      "side_effects": "None: compiles and simulates the walk in memory; no definition, instance, task, timer, or history record is created (classified read_only — see conventions.classification).",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "schema": {
+            "properties": {
+              "format": {
+                "enum": [
+                  "bpmn",
+                  "dsl"
+                ],
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "variables": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "format",
+              "source"
+            ],
+            "type": "object"
+          },
+          "content_type": "application/json"
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Validation outcome plus the walk report.",
+          "schema": "DryRunResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 422,
+            "code": "invalid_json"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          }
+        ]
+      }
+    },
+    {
+      "name": "validate_process_definition",
+      "operation": "POST /api/v1/process-definitions/validate",
+      "summary": "Pre-deploy static validation (no persistence, E2-2)",
+      "description": "Compiles the source and runs `validate_definition` WITHOUT\ndeploying. Compile errors are returned as HTTP 200 data\n(`valid: false` + `compile_errors`); a successful compile reports\nfindings and `valid` is true when no finding is Critical.\n4xx is reserved for malformed envelopes (`invalid_format`,\n`empty_source`, `invalid_request_body`).",
+      "classification": "read_only",
+      "side_effects": "None: compiles the source in memory; nothing is persisted (classified read_only — see conventions.classification).",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "schema": {
+            "properties": {
+              "format": {
+                "enum": [
+                  "bpmn",
+                  "dsl"
+                ],
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "variables": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "format",
+              "source"
+            ],
+            "type": "object"
+          },
+          "content_type": "application/json"
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Validation outcome (compile errors and/or findings as data).",
+          "schema": "ValidateResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 422,
+            "code": "invalid_json"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          }
+        ]
+      }
+    },
+    {
+      "name": "list_definition_versions",
+      "operation": "GET /api/v1/process-definitions/versions/{key}",
+      "summary": "List all versions of a definition key (newest first)",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "key",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process definition key (e.g. `order-flow`)."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Versions for the key (empty when unknown).",
+          "schema": "VersionListResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "get_process_definition_view",
+      "operation": "GET /api/v1/process-definitions/{id}",
+      "summary": "Definition view (nodes and edges) for the Trace UI diagram",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process definition version id (e.g. `order-flow:3`)."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Node/edge graph of the definition.",
+          "schema": "ProcessDefinitionView"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "activate_definition",
+      "operation": "PUT /api/v1/process-definitions/{id}/activate",
+      "summary": "Set a version as the active one",
+      "classification": "mutating",
+      "side_effects": "Persists the active-version pointer of the definition key.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process definition version id (e.g. `order-flow:3`)."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Version activated.",
+          "schema": "ActivateResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "deprecate_definition",
+      "operation": "PUT /api/v1/process-definitions/{id}/deprecate",
+      "summary": "Mark a version as deprecated",
+      "classification": "mutating",
+      "side_effects": "Persists the deprecated status on the definition version.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process definition version id (e.g. `order-flow:3`)."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Version deprecated.",
+          "schema": "ActivateResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "list_process_instances",
+      "operation": "GET /api/v1/process-instances",
+      "summary": "List process instances (paginated)",
+      "description": "One page of process instances visible to the tenant, ordered by\ninstance id. The window is pushed into the store (SQL\nLIMIT/OFFSET in postgres mode) — this is the hot path.\n\n`limit` defaults to 50 and must be in 1..=500; `offset` defaults\nto 0 and must be a non-negative integer; malformed or\nout-of-range values are rejected with 400 `invalid_request`. An\noffset beyond the end returns an empty page with\n`pagination.returned = 0`.",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          },
+          "description": "Page size (1..=500; default 50 on the instances list). Validated as 400 `invalid_request` when out of range. On `/dead-letters` the page is a window over at most the 100 entries the store returns per request (see that endpoint's description)."
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          },
+          "description": "Zero-based index of the first returned entry (non-negative; validated as 400 `invalid_request` when negative)."
+        },
+        {
+          "name": "X-Tenant-Id",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Tenant scope for the request (optional)."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Page of instances (the `pagination` field is additive, E2-4).",
+          "schema": "InstanceListResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "start_process_instance",
+      "operation": "POST /api/v1/process-instances",
+      "summary": "Start a process instance",
+      "description": "Creates a process instance for the given definition and emits\n`ProcessStarted` through the engine event loop.\n\nWith an `Idempotency-Key` header (1-128 printable ASCII bytes):\na key already recorded for the same tenant returns **200** with\nthe same `{instance_id, status}` shape for the originally created\ninstance (idempotent replay, no second instance); an unknown key\ncreates the instance (201) and records the mapping. Atomicity is\nsingle-service: concurrent identical requests can still race, and\na key-recording failure after creation returns 500 `internal`\nnaming the situation.",
+      "classification": "mutating",
+      "side_effects": "Creates and persists a new process instance with its tokens and variables, and records ProcessStarted history; an Idempotency-Key replays the recorded instance instead of creating a second one.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "Idempotency-Key",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Start-instance idempotency key (E2-4): 1-128 printable ASCII\nbytes. A known key replays the recorded instance with 200;\nunknown keys are recorded on creation. Malformed keys are\nrejected with 400 `invalid_request`."
+        },
+        {
+          "name": "X-Tenant-Id",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Tenant scope for the request (optional)."
+        },
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "schema": {
+            "properties": {
+              "encrypted": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "process_def_id": {
+                "type": "string"
+              },
+              "sensitive": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "variables": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "process_def_id"
+            ],
+            "type": "object"
+          },
+          "content_type": "application/json"
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 201,
+          "description": "Instance created.",
+          "schema": "StartInstanceResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 422,
+            "code": "invalid_json"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "get_process_instance",
+      "operation": "GET /api/v1/process-instances/{id}",
+      "summary": "Get instance state",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        },
+        {
+          "name": "X-Tenant-Id",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Tenant scope for the request (optional)."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Instance state (tokens, current nodes, variables).",
+          "schema": "InstanceStateResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "get_instance_history",
+      "operation": "GET /api/v1/process-instances/{id}/history",
+      "summary": "Execution history (auditable timeline)",
+      "description": "Events in causal order (by `occurred_at`, then `id`) with\nzero-based `sequence` and `category` (`instance` | `token` |\n`external`). Optional filters `token_id` and `event_type`; the\noptional `limit` (1..=500, E2-4) truncates the returned list\nafter sorting. Absent parameters keep the pre-existing\nfull-history behavior.",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        },
+        {
+          "name": "event_type",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Filter by event type (e.g. `ProcessStarted`)."
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          },
+          "description": "Optional cap on the number of returned events (1..=500, validated as 400 `invalid_request` beyond)."
+        },
+        {
+          "name": "token_id",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Filter events for a single token."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Event timeline for the instance.",
+          "schema": "HistoryResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "create_replay_session",
+      "operation": "POST /api/v1/process-instances/{id}/replay",
+      "summary": "Create a replay session",
+      "description": "Snapshots the instance's history into an ephemeral replay\nsession. Sessions are in-memory only and expire after inactivity\n(docs/replay-rest-api.md; the Replay API may evolve —\ndocs/api-spec.md §8).",
+      "classification": "mutating",
+      "side_effects": "Ephemeral only: snapshots the instance history into an in-memory session that expires on inactivity; nothing is persisted and no engine state changes.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 201,
+          "description": "Replay session created.",
+          "schema": "ReplayCreateResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "get_instance_steps",
+      "operation": "GET /api/v1/process-instances/{id}/steps",
+      "summary": "Unified step timeline (E6-1)",
+      "description": "One step per `(node_id, token_id)` in causal order (steps are\nnumbered from 1 in first-event order), joining token transitions,\nworker lease attempts (`ExternalTaskLocked` →\n`ExternalTaskCompleted`/`ExternalTaskFailed`; a re-lock of a task\nwith an unresolved attempt closes that attempt as `expired` —\nE1-3 redelivery after lease expiry) and the E3-1 AI task\nenvelope metadata (model/tool versions, cost) keyed by the trace\nid. Read-only aggregation over the instance, definition and\nhistory stores — no new stores, no new event types. `trace_id` IS\nthe instance id in v1 (a dedicated OTel-style trace id is future\nobservability scope); per-HTTP correlation stays on the\n`X-Request-Id` header. The pre-existing `/trace` graph endpoint is\nunchanged.\n\nSensitive-by-default: the response carries NO variable values —\nonly event types/timestamps, worker ids, retry counters, variable\nNAME lists (`variables_touched`), and envelope METADATA summaries;\nredacted or unparsable envelopes degrade to `{\"opaque\": true}`.\nA definition that is ABSENT only degrades step-kind\nclassification (event-type fallback); a definition that fails to\nLOAD is a storage error and answers 500 `internal`.",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "The step timeline of the instance.",
+          "schema": "StepsResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "get_instance_trace",
+      "operation": "GET /api/v1/process-instances/{id}/trace",
+      "summary": "Aggregated execution trace",
+      "description": "Instance state plus token timelines and external-task history\naggregated by token/task, computed from history events. Shares\nthe History API semantics (docs/api-spec.md §9).",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Aggregated trace view.",
+          "schema": "TraceResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "delete_replay_session",
+      "operation": "DELETE /api/v1/replay/{session_id}",
+      "summary": "Destroy a replay session",
+      "classification": "mutating",
+      "side_effects": "Ephemeral only: drops the in-memory replay session; no persisted state changes.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "session_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Replay session id."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 204,
+          "description": "Session destroyed (unknown ids are a no-op 204)."
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "replay_seek",
+      "operation": "POST /api/v1/replay/{session_id}/seek",
+      "summary": "Jump to a cursor",
+      "description": "Re-applies events `[0..cursor]` and stores the snapshot.",
+      "classification": "mutating",
+      "side_effects": "Ephemeral only: moves the in-memory replay cursor; no persisted state changes.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "session_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Replay session id."
+        },
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "schema": {
+            "properties": {
+              "cursor": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "cursor"
+            ],
+            "type": "object"
+          },
+          "content_type": "application/json"
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Seek completed; snapshot at the new cursor.",
+          "schema": "ReplaySeekResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 422,
+            "code": "invalid_json"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "get_replay_snapshot",
+      "operation": "GET /api/v1/replay/{session_id}/snapshot",
+      "summary": "Read-only replay snapshot",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "session_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Replay session id."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Current snapshot (cursor, tokens, completed flag).",
+          "schema": "ReplaySnapshotResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "replay_step",
+      "operation": "POST /api/v1/replay/{session_id}/step",
+      "summary": "Step forward one event",
+      "classification": "mutating",
+      "side_effects": "Ephemeral only: advances the in-memory replay cursor; no persisted state changes.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "session_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Replay session id."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "One event applied; new snapshot returned.",
+          "schema": "ReplayStepResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "list_tasks",
+      "operation": "GET /api/v1/tasks",
+      "summary": "List pending tasks (user / external)",
+      "description": "Waiting user/service/external tasks of running instances.\nOptional `type` filter (`user` or `external`) and the E2-4\nroute-level pagination parameters `limit`/`offset` (validated\nlike the instances endpoint: `limit` 1..=500, `offset` >= 0, else\n400 `invalid_request`), applied in memory over the full scan;\nabsent parameters keep the previous full-list behavior.",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          },
+          "description": "Page size (1..=500; default 50 on the instances list). Validated as 400 `invalid_request` when out of range. On `/dead-letters` the page is a window over at most the 100 entries the store returns per request (see that endpoint's description)."
+        },
+        {
+          "name": "offset",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          },
+          "description": "Zero-based index of the first returned entry (non-negative; validated as 400 `invalid_request` when negative)."
+        },
+        {
+          "name": "type",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "enum": [
+              "user",
+              "external"
+            ],
+            "type": "string"
+          },
+          "description": "Filter by task type."
+        },
+        {
+          "name": "X-Tenant-Id",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Tenant scope for the request (optional)."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Task list (may be empty)."
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "complete_user_task",
+      "operation": "POST /api/v1/tasks/{task_id}/complete",
+      "summary": "Complete a user task",
+      "description": "Emits `UserTaskCompleted` through the engine event loop. The\nE2-3 variable value contract and required form fields are\nenforced at this boundary; the reserved `__task_envelope` key is\nrejected (E3-1, `reserved_variable_key`).",
+      "classification": "mutating",
+      "side_effects": "Emits UserTaskCompleted: merges the submitted variables into the instance and advances the token to the next node; both the state change and the history record are persisted.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Task id; user tasks use `<instance_id>:<node_id>`."
+        },
+        {
+          "name": "X-Tenant-Id",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Tenant scope for the request (optional)."
+        },
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "schema": {
+            "properties": {
+              "variables": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "content_type": "application/json"
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Task completed.",
+          "schema": "CompleteTaskResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 422,
+            "code": "invalid_json"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "get_task_form",
+      "operation": "GET /api/v1/tasks/{task_id}/form",
+      "summary": "Form schema of a user task",
+      "description": "`task_id` has the form `<instance_id>:<node_id>`.",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "task_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Task id; user tasks use `<instance_id>:<node_id>`."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Form schema (form key and/or fields).",
+          "schema": "FormSchemaResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "get_capabilities",
+      "operation": "GET /capabilities",
+      "summary": "Machine-readable agent tool catalog (E4-1)",
+      "description": "Serves the committed agent tool catalog\n(`crates/server/rest/capabilities/agent-tools.json`, embedded at\ncompile time — no runtime YAML parsing): one tool per operation\nof this spec, with parameter schemas (flattened minimal JSON\nSchemas), read_only/mutating classification, side-effect notes,\nauth requirements, and per-code error examples. See\ndocs/agent-tools.md.\n\nUNAUTHENTICATED by design, like `/health` and `/ready`: it is\ndiscovery metadata for agents BEFORE they hold an API key, and\nit carries no secrets — only route shapes and stable error\ncodes derived from this public spec. The engine operations\nunder `/api/v1` keep the API-key + rate-limit layers.\n\nThe consistency suite regenerates the catalog from this spec\nand fails when the committed artifact drifts; regenerate with\n`cargo run -p bpm-engine-server-rest --example dump_capabilities`.",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": false,
+      "parameters": [],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "The agent tool catalog (catalog_version 1).",
+          "schema": "AgentToolsCatalog"
+        },
+        "errors": []
+      }
+    },
+    {
+      "name": "get_health",
+      "operation": "GET /health",
+      "summary": "Liveness probe",
+      "description": "Always returns 200 while the process is up.",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": false,
+      "parameters": [],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "The process is alive.",
+          "schema": "HealthResponse"
+        },
+        "errors": []
+      }
+    },
+    {
+      "name": "get_readiness",
+      "operation": "GET /ready",
+      "summary": "Readiness probe",
+      "description": "Checks the engine and the storage backend (plus the Postgres pool\nand migration state in postgres mode). `status` is `ok` or\n`degraded`; numeric check values are informational.",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": false,
+      "parameters": [],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Readiness of every component.",
+          "schema": "ReadinessResponse"
+        },
+        "errors": []
+      }
+    }
+  ]
+}

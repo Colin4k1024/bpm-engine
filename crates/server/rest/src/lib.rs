@@ -13,6 +13,7 @@
 //! REST API; state survives restarts).
 
 pub mod bpm_config;
+pub mod capabilities;
 #[cfg(feature = "observability")]
 pub mod metrics;
 pub mod middleware;

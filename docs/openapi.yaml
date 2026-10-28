@@ -11,7 +11,11 @@
 #   - the schemas use only the JSON-Schema subset the suite's validator
 #     understands (whitelist: $ref, type, nullable, required, properties,
 #     items, additionalProperties, enum; unsupported keywords like
-#     oneOf/anyOf/format/minimum are rejected loudly by the suite).
+#     oneOf/anyOf/format/minimum are rejected loudly by the suite),
+#   - the committed agent tool catalog served by `GET /capabilities`
+#     (crates/server/rest/capabilities/agent-tools.json) matches what
+#     this spec generates, byte for byte (E4-1; regenerate with
+#     `cargo run -p bpm-engine-server-rest --example dump_capabilities`).
 #
 # Versioning rules (v1):
 #   - /api/v1 is FROZEN for additive changes only: new optional request
@@ -61,6 +65,10 @@ info:
       creation failure returns 500 `internal` with an explicit message.
     - Versioning: `/api/v1` is additive-only; error codes are stable
       identifiers; renames are breaking. See docs/api-spec.md.
+    - Agent tool discovery: `GET /capabilities` serves a
+      machine-readable tool catalog derived from this spec (one tool
+      per operation, parameter schemas, read-only/mutating
+      classification, error examples) — see docs/agent-tools.md.
 servers:
   - url: http://127.0.0.1:3000
     description: "Local development server (config: server.host / server.port)"
@@ -68,6 +76,7 @@ security:
   - ApiKeyAuth: []
 tags:
   - name: Health
+  - name: Capabilities
   - name: ProcessInstances
   - name: ProcessDefinitions
   - name: Tasks
@@ -109,6 +118,38 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ReadinessResponse"
+
+  /capabilities:
+    get:
+      operationId: getCapabilities
+      summary: Machine-readable agent tool catalog (E4-1)
+      description: |
+        Serves the committed agent tool catalog
+        (`crates/server/rest/capabilities/agent-tools.json`, embedded at
+        compile time — no runtime YAML parsing): one tool per operation
+        of this spec, with parameter schemas (flattened minimal JSON
+        Schemas), read_only/mutating classification, side-effect notes,
+        auth requirements, and per-code error examples. See
+        docs/agent-tools.md.
+
+        UNAUTHENTICATED by design, like `/health` and `/ready`: it is
+        discovery metadata for agents BEFORE they hold an API key, and
+        it carries no secrets — only route shapes and stable error
+        codes derived from this public spec. The engine operations
+        under `/api/v1` keep the API-key + rate-limit layers.
+
+        The consistency suite regenerates the catalog from this spec
+        and fails when the committed artifact drifts; regenerate with
+        `cargo run -p bpm-engine-server-rest --example dump_capabilities`.
+      security: []
+      tags: [Capabilities]
+      responses:
+        "200":
+          description: The agent tool catalog (catalog_version 1).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentToolsCatalog"
 
   /api/v1/process-instances:
     get:
@@ -2260,3 +2301,235 @@ components:
             $ref: "#/components/schemas/InvariantViolationReport"
         stats:
           $ref: "#/components/schemas/CheckStats"
+
+    # --- Agent tool catalog (E4-1) -----------------------------------------
+    #
+    # Schemas of the catalog served by GET /capabilities and committed
+    # at crates/server/rest/capabilities/agent-tools.json. The artifact
+    # is GENERATED from this spec (see the /capabilities path), so these
+    # schemas describe derived shapes; the consistency suite validates
+    # the served catalog against them.
+
+    AgentToolsCatalog:
+      type: object
+      description: |
+        Machine-readable tool catalog for AI agents (E4-1): every
+        operation of this spec as a tool, plus conventions and error
+        examples. docs/agent-tools.md documents the semantics.
+      required:
+        - catalog_version
+        - api_version
+        - generated_from
+        - regenerate
+        - auth
+        - conventions
+        - error_examples
+        - tools
+      properties:
+        catalog_version:
+          type: string
+          enum: ["1"]
+          description: Catalog format version (bump on breaking catalog shape changes).
+        api_version:
+          type: string
+          description: The info.version of the spec the catalog was generated from.
+        generated_from:
+          type: string
+          description: Path of the normative spec (single source of the catalog).
+        regenerate:
+          type: string
+          description: One-command regeneration of the committed artifact.
+        auth:
+          $ref: "#/components/schemas/AgentToolsAuth"
+        conventions:
+          $ref: "#/components/schemas/AgentToolsConventions"
+        error_examples:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/AgentToolsErrorExample"
+          description: One realistic example body per DISTINCT error code.
+        tools:
+          type: array
+          description: One tool per (path, method) of this spec.
+          items:
+            $ref: "#/components/schemas/AgentTool"
+
+    AgentToolsAuth:
+      type: object
+      required: [type, in, name, required, notes]
+      properties:
+        type:
+          type: string
+          enum: [apiKey]
+        in:
+          type: string
+          enum: [header]
+        name:
+          type: string
+          description: "X-API-Key."
+        required:
+          type: boolean
+          description: |
+            false — the server enforces the key only when one is
+            configured (PoC mode accepts all requests); see notes.
+        notes:
+          type: string
+          description: Current auth semantics (incl. the optional X-Tenant-Id header).
+
+    AgentToolsConventions:
+      type: object
+      required: [classification, error_shape, pagination, idempotency]
+      properties:
+        classification:
+          type: string
+          description: read_only vs mutating semantics (incl. the side-effect-free POSTs).
+        error_shape:
+          type: string
+          description: The ErrorResponse contract and the deploy 400 exception.
+        pagination:
+          type: string
+          description: Which endpoints paginate and how.
+        idempotency:
+          type: string
+          description: Idempotency-Key semantics on start-instance.
+
+    AgentToolsErrorExample:
+      type: object
+      required: [status, body]
+      properties:
+        status:
+          type: integer
+          description: Canonical HTTP status of the example.
+        body:
+          $ref: "#/components/schemas/ErrorResponse"
+
+    AgentTool:
+      type: object
+      required:
+        - name
+        - operation
+        - summary
+        - classification
+        - side_effects
+        - auth_required
+        - parameters
+        - responses
+      properties:
+        name:
+          type: string
+          description: snake_case tool name derived from the operationId.
+        operation:
+          type: string
+          description: '"<METHOD> <path>" wire form, e.g. "POST /api/v1/process-instances".'
+        summary:
+          type: string
+        description:
+          type: string
+          description: Spec description of the operation (absent when the spec has none).
+        classification:
+          type: string
+          enum: [read_only, mutating]
+        side_effects:
+          type: string
+          description: '"none" for pure reads; what the call changes otherwise.'
+        auth_required:
+          type: boolean
+          description: |
+            Whether the request passes the X-API-Key layer when the
+            server has one configured (root routes do not).
+        parameters:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentToolParameter"
+        responses:
+          $ref: "#/components/schemas/AgentToolResponses"
+
+    AgentToolParameter:
+      type: object
+      required: [name, in, required, schema]
+      properties:
+        name:
+          type: string
+        in:
+          type: string
+          enum: [path, query, header, body]
+        required:
+          type: boolean
+        schema:
+          $ref: "#/components/schemas/AgentToolSchema"
+        description:
+          type: string
+        content_type:
+          type: string
+          description: Media type of the request body (body parameters only).
+
+    AgentToolSchema:
+      type: object
+      description: |
+        Minimal flattened JSON-Schema subset of a parameter or request
+        body: local $refs are resolved inline and only type / enum /
+        required / properties / items / additionalProperties survive
+        (the same subset this spec uses). Bounds, defaults, and prose
+        stay in the parameter descriptions of this spec.
+      properties:
+        type:
+          type: string
+          enum: [object, array, string, integer, number, boolean]
+        enum:
+          type: array
+          description: Allowed values (strings or integers), when the spec constrains them.
+        required:
+          type: array
+          items: { type: string }
+          description: Required field names (object schemas).
+        properties:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/AgentToolSchema"
+        items:
+          $ref: "#/components/schemas/AgentToolSchema"
+        additionalProperties:
+          $ref: "#/components/schemas/AgentToolSchema"
+
+    AgentToolResponses:
+      type: object
+      required: [success, errors]
+      properties:
+        success:
+          $ref: "#/components/schemas/AgentToolSuccess"
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentToolError"
+
+    AgentToolSuccess:
+      type: object
+      required: [status, description]
+      properties:
+        status:
+          type: integer
+          description: Primary 2xx status (201 creation beats 200 replay/read).
+        description:
+          type: string
+        schema:
+          type: string
+          description: |
+            Name of the referenced response schema in this spec (a
+            pointer for the full shape); absent for inline or bodyless
+            (204) responses.
+
+    AgentToolError:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: integer
+        code:
+          type: string
+          description: |
+            Stable error code of the referenced error response
+            component. Absent ONLY for deploy's 400, whose DeployError
+            body carries no code field.
+        description:
+          type: string
+          description: For code-less (inline) error responses.

@@ -16,6 +16,12 @@ layout: default
 > set equality, sample-response validation). This document remains the
 > prose specification; where the two disagree, `openapi.yaml` wins and a
 > PR must fix the divergence.
+>
+> **Machine capability discovery (E4-1)**: `GET /capabilities` serves a
+> derived, committed tool catalog (one tool per operation, parameter
+> schemas, read-only/mutating classification, error examples) for AI
+> agents — unauthenticated, like `/health` and `/ready`. See
+> [`docs/agent-tools.md`](agent-tools.md).
 
 ---
 
