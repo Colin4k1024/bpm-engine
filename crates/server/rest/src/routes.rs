@@ -3081,6 +3081,38 @@ pub async fn health() -> Json<super::state::HealthResponse> {
     })
 }
 
+/// GET /capabilities — machine-readable agent tool catalog (E4-1,
+/// issue #19).
+///
+/// Serves the COMMITTED catalog artifact
+/// (`crates/server/rest/capabilities/agent-tools.json`, embedded with
+/// `include_str!` at compile time): one tool per operation of
+/// `docs/openapi.yaml` with parameter schemas, read-only/mutating
+/// classification, side-effect notes, and error-code examples — see
+/// `docs/agent-tools.md`.
+///
+/// Served UNAUTHENTICATED, like `/health` and `/ready`, and by the same
+/// top-level registration: the catalog is DISCOVERY metadata for agents
+/// BEFORE they hold an API key, and it carries no secrets — only route
+/// shapes and stable error codes derived from the public spec. The
+/// `/api/v1` routes (the actual engine operations) keep the
+/// api-key + rate-limit middleware; this route stays outside it. The
+/// consistency suite's lockstep test fails when the artifact drifts
+/// from the spec, so what this serves is always the current contract.
+///
+/// The body is the exact committed JSON bytes (no runtime YAML
+/// parsing, no new runtime dependencies); the content type is
+/// `application/json`.
+pub async fn capabilities() -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        )],
+        crate::capabilities::AGENT_TOOLS_JSON,
+    )
+}
+
 /// GET /ready - readiness probe. Checks engine availability and the storage backend.
 pub async fn readiness(
     State(state): State<Arc<AppState>>,
@@ -3330,6 +3362,9 @@ fn base_router() -> Router<Arc<AppState>> {
     let router = Router::new();
     let router = root_route!(router, GET, "/health", health);
     let router = root_route!(router, GET, "/ready", readiness);
+    // Agent tool discovery (E4-1): unauthenticated like /health and
+    // /ready — see the `capabilities` handler docs for the rationale.
+    let router = root_route!(router, GET, "/capabilities", capabilities);
 
     // Add /metrics endpoint when observability feature is enabled
     #[cfg(feature = "observability")]

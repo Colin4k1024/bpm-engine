@@ -142,3 +142,49 @@ async fn rate_limited_rejections_carry_the_stable_code() {
 
     server.stop().await;
 }
+
+#[tokio::test]
+async fn capabilities_endpoint_is_unauthenticated() {
+    // E4-1 (issue #19): the agent tool catalog is discovery metadata
+    // served BEFORE an agent holds an API key (like /health and /ready)
+    // — with auth enforced and NO key supplied it must stay reachable,
+    // while the engine operations keep rejecting key-less requests.
+    let server = spawn_server(&config("secret-key", 100_000)).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{}/capabilities", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "the catalog is key-less discovery metadata"
+    );
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .expect("content-type header");
+    assert!(
+        content_type.starts_with("application/json"),
+        "the catalog must be served as JSON, got {content_type:?}"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["catalog_version"], "1");
+    assert!(
+        body["tools"].as_array().is_some_and(|t| !t.is_empty()),
+        "the served catalog must list tools"
+    );
+
+    // The engine operations stay behind the API-key layer.
+    let resp = client
+        .get(format!("{}/api/v1/process-instances", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    server.stop().await;
+}
