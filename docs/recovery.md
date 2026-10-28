@@ -156,7 +156,7 @@ External tasks delegate work to external workers under a lease. The engine guara
 
 > The engine guarantees token transitions happen exactly once. Side effects in workers may execute more than once.
 
-Verified at the REST level by `crates/server/rest/tests/scheduler_workers.rs` (memory driver, runs in CI) and `crates/server/rest/tests/scheduler_workers_postgres.rs` (PostgreSQL, Docker).
+Verified at the REST level by `crates/server/rest/tests/scheduler_workers.rs` (memory driver, runs in CI) and `crates/server/rest/tests/scheduler_workers_postgres.rs` (PostgreSQL, Docker). Lease survival across a hard server kill and redelivery after restart are additionally proven by `crates/server/rest/tests/recovery_postgres.rs` (see §15).
 
 Cross-references: `adr/ADR-001-fetch-and-lock-race.md` (fetch-and-lock race), `invariants.md` (external task invariants).
 
@@ -227,6 +227,58 @@ This model guarantees:
 - Saga & compensation: `saga.md`
 - External task invariants: `invariants.md` §3
 - Fetch-and-lock race fix: `adr/ADR-001-fetch-and-lock-race.md`
+
+---
+
+## 15. CI 恢复验证 (CI Recovery Verification)
+
+The `postgres-recovery` CI job starts a real PostgreSQL service and runs every
+Docker/PostgreSQL-gated suite, including the crash-recovery suite
+`crates/server/rest/tests/recovery_postgres.rs`, which kills the **real
+`api_server` binary with SIGKILL** mid-flight and restarts a fresh process
+against the same database. It proves:
+
+1. **Kill/restart mid-flight** — an instance waiting on an external task
+   survives a hard kill (still queryable, still `Running`, token still
+   `Waiting`); the persisted lease survives too (no redelivery while valid);
+   after the lease expires the SAME task is redelivered to a new worker
+   (at-least-once), and completing it after the restart finishes the instance
+   with exactly one completion in history.
+2. **Timer continuation** — a PT2S timer catch scheduled before the kill is
+   persisted (`timer` row, `Scheduled`); the restarted scheduler re-arms it
+   and the instance completes through the timer (row becomes `Fired`).
+3. **Completion durability** — an instance completed before the kill stays
+   `Completed` after the restart: token set and full history are unchanged,
+   and the completed task is never redelivered (no resurrection).
+
+**Failure artifacts (失败时保留事件轨迹):** on any assertion failure the suite
+dumps the instance state, token set, and full event history to stdout and to
+`recovery-<test>-trail.log` under `CARGO_TARGET_TMPDIR`; each killed server
+generation keeps its logs in `recovery-<test>-server<N>.{out,err}.log` next to
+it. A one-shot panic hook is installed as a safety net for failure paths that
+do not flow through the check/wait helpers (bare `.expect()`/assert panics):
+it writes the trail header synchronously and fetches the instance + history
+on a detached thread with a short deadline. The CI job uploads every
+`recovery-*.log` on failure and the captured test log on every run.
+
+**Run locally** (requires Docker):
+
+```text
+cargo test -p bpm-engine-server-rest --test recovery_postgres -- --ignored
+```
+
+CI mode against an existing PostgreSQL (no Docker needed):
+
+```text
+BPM_TEST_DATABASE_URL=postgres://bpm:bpm@localhost:5432/postgres \
+    cargo test -p bpm-engine-server-rest --test recovery_postgres -- --ignored
+```
+
+Each test uses an isolated database (`bpm_rec_test_<name>`) so suites can run
+in parallel against one server. The rest of the job runs the PostgreSQL
+adapter integration/migration suites and the REST-level restart, scheduler
+and lease suites (`storage_postgres_mode`, `scheduler_workers_postgres`) to
+guard against interference.
 
 ---
 

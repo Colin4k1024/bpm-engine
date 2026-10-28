@@ -64,6 +64,70 @@ jobs:
       - name: Run migration tests
         run: cargo test -p bpm-engine-adapter-postgres --test migrations -- --ignored
 
+  postgres-recovery:
+    name: PostgreSQL Recovery
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: bpm
+          POSTGRES_PASSWORD: bpm
+          POSTGRES_DB: bpm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bpm"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Maintenance DB of the service container; the tests create an isolated
+      # database per test from this URL (no Docker-in-Docker needed).
+      BPM_TEST_DATABASE_URL: postgres://bpm:bpm@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # All PostgreSQL-gated suites in one job: the adapter integration and
+      # migration tests, plus the REST-level restart/kill suites. The
+      # recovery suite kills the real api_server binary (SIGKILL) mid-flight
+      # and restarts it against the same database (issue E1-4).
+      # `bash -eo pipefail` (the GH Actions default shell) makes the tee'd
+      # steps fail when the underlying cargo test fails.
+      - name: Run PostgreSQL adapter suites
+        run: |
+          cargo test -p bpm-engine-adapter-postgres --test integration --test migrations -- --ignored 2>&1 | tee adapter-postgres-test.log
+
+      - name: Run REST recovery suites
+        run: |
+          cargo test -p bpm-engine-server-rest --test storage_postgres_mode --test scheduler_workers_postgres --test recovery_postgres -- --ignored 2>&1 | tee recovery-test.log
+
+      # On failure, preserve the event trail: the recovery suite writes
+      # recovery-<test>-trail.log (instance state, tokens, full history) and
+      # recovery-<test>-server<N>.{out,err}.log (killed server generations)
+      # under CARGO_TARGET_TMPDIR.
+      - name: Upload recovery event trails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-event-trails
+          path: |
+            **/recovery-*.log
+          if-no-files-found: ignore
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-test-logs
+          path: |
+            recovery-test.log
+            adapter-postgres-test.log
+          if-no-files-found: ignore
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
