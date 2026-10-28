@@ -278,6 +278,7 @@ dependencies = [
  "bpm-engine-dsl",
  "bpm-engine-runtime",
  "bpm-engine-storage",
+ "bpm-engine-worker-sdk",
  "criterion",
  "metrics",
  "metrics-exporter-prometheus",

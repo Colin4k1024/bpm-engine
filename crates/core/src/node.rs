@@ -4,7 +4,7 @@ use std::collections::HashMap;
 pub type NodeId = &'static str;
 
 /// Data type of a user task form field.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FormFieldType {
     /// Free-text string field.

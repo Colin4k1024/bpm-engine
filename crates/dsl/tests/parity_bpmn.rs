@@ -11,8 +11,10 @@ use bpm_engine_bpmn::parse_and_compile;
 use bpm_engine_core::ProcessDefinition;
 use bpm_engine_dsl::compile;
 
-/// A rich document covering every v1 node type, both condition kinds, the
-/// default flag, form-field defaults, and gateway fork/join shapes.
+/// A rich document covering every v1 node type, both condition kinds
+/// (`variableEq` and `expression`), the default flag, form-field defaults,
+/// and gateway fork/join shapes (same document as the three-way
+/// `tests/builder_parity.rs`).
 const DSL_DOC: &str = r#"{
   "schema_version": 1,
   "process": { "id": "parity-flow", "name": "Parity Flow" },
@@ -41,6 +43,7 @@ const DSL_DOC: &str = r#"{
     { "id": "join", "type": "parallelGateway" },
     { "id": "xor", "type": "exclusiveGateway" },
     { "id": "end-yes", "type": "end" },
+    { "id": "end-big", "type": "end" },
     { "id": "end-no", "type": "end" }
   ],
   "edges": [
@@ -56,14 +59,21 @@ const DSL_DOC: &str = r#"{
       "target": "end-yes",
       "condition": { "kind": "variableEq", "variable": "amount", "value": "100" }
     },
+    {
+      "source": "xor",
+      "target": "end-big",
+      "condition": { "kind": "expression", "expression": "amount > 100" }
+    },
     { "source": "xor", "target": "end-no", "default": true }
   ]
 }"#;
 
 /// The BPMN equivalent, field by field: same ids, same order, camunda
 /// extension attributes for task type / retries / form, timer duration,
-/// gateway `default` attribute, and `${amount == "100"}` condition text
-/// (what the DSL's variableEq lowers to).
+/// gateway `default` attribute, `${amount == "100"}` condition text
+/// (what the DSL's variableEq lowers to), and `${amount > 100}` (the
+/// free-form expression kind — the DSL's `expression` condition carried
+/// verbatim; the shared compiler strips the `${...}` wrapper either way).
 const BPMN_EQUIVALENT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
              xmlns:camunda="http://camunda.org/schema/1.0/bpmn">
@@ -97,8 +107,9 @@ const BPMN_EQUIVALENT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
       </timerEventDefinition>
     </intermediateCatchEvent>
     <parallelGateway id="join"/>
-    <exclusiveGateway id="xor" default="flow8"/>
+    <exclusiveGateway id="xor" default="flow9"/>
     <endEvent id="end-yes"/>
+    <endEvent id="end-big"/>
     <endEvent id="end-no"/>
     <sequenceFlow id="flow0" sourceRef="start" targetRef="payment"/>
     <sequenceFlow id="flow1" sourceRef="payment" targetRef="fork"/>
@@ -110,7 +121,10 @@ const BPMN_EQUIVALENT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <sequenceFlow id="flow7" sourceRef="xor" targetRef="end-yes">
       <conditionExpression>${amount == "100"}</conditionExpression>
     </sequenceFlow>
-    <sequenceFlow id="flow8" sourceRef="xor" targetRef="end-no"/>
+    <sequenceFlow id="flow8" sourceRef="xor" targetRef="end-big">
+      <conditionExpression>${amount > 100}</conditionExpression>
+    </sequenceFlow>
+    <sequenceFlow id="flow9" sourceRef="xor" targetRef="end-no"/>
   </process>
 </definitions>"#;
 
