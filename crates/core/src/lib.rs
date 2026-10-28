@@ -6,6 +6,8 @@
 
 #![warn(missing_docs)]
 
+/// AI task envelope (E3-1): typed execution metadata for AI external tasks.
+pub mod ai_task;
 /// Core error types for the BPM engine.
 pub mod error;
 /// Immutable events driving all state transitions.
@@ -27,6 +29,7 @@ pub mod variable;
 /// Structured variable value contract: envelopes, artifact URIs, history redaction.
 pub mod variable_contract;
 
+pub use ai_task::*;
 pub use error::*;
 pub use event::*;
 pub use external_task::*;

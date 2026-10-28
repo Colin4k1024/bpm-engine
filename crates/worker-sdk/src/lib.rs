@@ -3,6 +3,7 @@
 //! Use [EngineClient] to talk to the Engine REST API, or [Worker] to run a poll loop
 //! with [TaskHandler] implementations.
 
+pub mod ai_task;
 pub mod client;
 pub mod config;
 pub mod handler;

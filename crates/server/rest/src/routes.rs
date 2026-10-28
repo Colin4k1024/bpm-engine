@@ -9,9 +9,10 @@ use axum::{
     Json, Router,
 };
 use bpm_engine_core::{
-    parse_envelope, payloads, validate_artifact_uri, AesGcmEncryptor, EngineEvent,
-    ExternalTaskState, HistoryRedactionPolicy, InstanceState, NodeType, ProcessDefinition,
-    ProcessInstance, TokenStatus, VariableEncryptor, VariableEnvelope, ENCRYPTED_PREFIX,
+    parse_envelope, payloads, redact_history_variable_value, validate_artifact_uri,
+    AesGcmEncryptor, AiTaskEnvelope, EngineEvent, ExternalTaskState, HistoryRedactionPolicy,
+    InstanceState, NodeType, ProcessDefinition, ProcessInstance, RetryCategory, TokenStatus,
+    VariableEncryptor, VariableEnvelope, AI_TASK_ENVELOPE_KEY, ENCRYPTED_PREFIX,
 };
 use bpm_engine_runtime::EngineContext;
 use bpm_engine_storage::{
@@ -69,6 +70,12 @@ pub struct ExternalTaskCompleteRequest {
     pub worker_id: String,
     #[serde(default)]
     pub variables: HashMap<String, String>,
+    /// Optional AI task envelope (E3-1): validated, then serialized into
+    /// the reserved `__task_envelope` variable of the merged map — the
+    /// variables channel itself is unchanged. Absent ⇒ byte-identical
+    /// legacy behavior.
+    #[serde(default)]
+    pub envelope: Option<AiTaskEnvelope>,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +83,18 @@ pub struct ExternalTaskFailRequest {
     pub worker_id: String,
     pub error: String,
     pub retry_after_ms: Option<u64>,
+    /// Optional retry category (E3-1): `"transient"` or `"permanent"`.
+    /// Recorded for observability (error message prefix, envelope,
+    /// history, DLQ) — retry BEHAVIOR is unchanged in v1 (E3-2 scope).
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Optional AI task envelope (E3-1), validated like on complete. On
+    /// fail the engine has no variables channel (the store's `fail` does
+    /// not take variables), so the envelope survives in the
+    /// `ExternalTaskFailed` history payload only — see
+    /// `docs/ai-task-envelope.md`.
+    #[serde(default)]
+    pub envelope: Option<AiTaskEnvelope>,
 }
 
 #[derive(Deserialize)]
@@ -488,6 +507,68 @@ fn decrypt_instance_variables(
     Ok(())
 }
 
+// --- AI task envelope boundary enforcement (E3-1) ---------------------------
+
+/// Reject a user-supplied variable under the reserved [`AI_TASK_ENVELOPE_KEY`]
+/// (4xx `reserved_variable_key`): the engine owns the envelope slot, so
+/// envelopes may only arrive via the typed `envelope` request field.
+///
+/// Enforced STRICTLY at the boundaries that have no envelope semantics of
+/// their own — start-instance and user-task complete. External-task
+/// complete additionally accepts the worker-sdk wire format (a serialized
+/// envelope value at the reserved key) and rejects junk/collisions with
+/// the same code; see [`external_task_complete`].
+fn enforce_reserved_variable_keys(
+    variables: &HashMap<String, String>,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if variables.contains_key(AI_TASK_ENVELOPE_KEY) {
+        warn!(
+            variable = AI_TASK_ENVELOPE_KEY,
+            "rejecting user-supplied reserved variable key"
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_code(
+                format!(
+                    "variable '{}' is reserved by the engine; submit the AI task envelope \
+                     via the 'envelope' request field instead",
+                    AI_TASK_ENVELOPE_KEY
+                ),
+                "reserved_variable_key",
+            )),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate an AI task envelope and merge its serialized form into the
+/// reserved [`AI_TASK_ENVELOPE_KEY`] of the variable map (E3-1).
+///
+/// 4xx `task_envelope_invalid` (with the envelope error's stable sub-code in
+/// the message) on validation failure. The caller subsequently runs the
+/// ordinary E2-3 boundary contract on the MERGED map, so the size cap and
+/// envelope/artifact checks cover the envelope value too.
+fn merge_task_envelope(
+    envelope: &AiTaskEnvelope,
+    variables: &mut HashMap<String, String>,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if let Err(e) = envelope.validate() {
+        warn!(code = e.code(), "rejecting invalid AI task envelope");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_code(
+                format!("{}: {}", e.code(), e),
+                "task_envelope_invalid",
+            )),
+        ));
+    }
+    variables.insert(
+        AI_TASK_ENVELOPE_KEY.to_string(),
+        envelope.to_envelope_value(),
+    );
+    Ok(())
+}
+
 // --- Variable value contract enforcement (E2-3) -----------------------------
 
 /// Hint returned with `variable_too_large` errors.
@@ -660,11 +741,13 @@ pub async fn start_instance(
     let mut variables = body.variables;
     // E2-3 boundary enforcement, in order:
     // 1. sensitive ⇒ must be encrypted (checked against the submitted map)
-    // 2. variable value contract: valid envelopes, valid artifact URIs,
+    // 2. reserved variable keys: `__task_envelope` is engine-owned (E3-1)
+    // 3. variable value contract: valid envelopes, valid artifact URIs,
     //    size cap on the submitted value
-    // 3. encryption, then a final size check on the stored string (the
+    // 4. encryption, then a final size check on the stored string (the
     //    ciphertext may exceed the cap even when the plaintext did not)
     validate_sensitive_names(&body.sensitive, &variables, &body.encrypted)?;
+    enforce_reserved_variable_keys(&variables)?;
     enforce_variable_contract(&variables, &state.variable_limits)?;
     encrypt_variables(&mut variables, &body.encrypted)?;
     enforce_variable_size_limit(&variables, &state.variable_limits)?;
@@ -1189,7 +1272,9 @@ pub async fn complete_task_by_id(
 
     // E2-3: enforce the variable value contract at this write boundary
     // (valid envelopes, valid artifact URIs, size cap) before the event
-    // enters the engine.
+    // enters the engine. E3-1: `__task_envelope` is engine-owned —
+    // user tasks have no envelope field, so the key is simply reserved.
+    enforce_reserved_variable_keys(&body.variables)?;
     enforce_variable_contract(&body.variables, &state.variable_limits)?;
 
     // Validate required form fields if the user task has a form definition
@@ -1302,14 +1387,77 @@ pub async fn external_task_complete(
     Path(task_id): Path<String>,
     Json(body): Json<ExternalTaskCompleteRequest>,
 ) -> Result<Json<CompleteTaskResponse>, Response> {
+    // E3-1: the envelope may arrive through EITHER channel:
+    // - the typed `envelope` field (validated and merged by the server), or
+    // - already serialized at the reserved `__task_envelope` key of the
+    //   variables map — the worker-sdk wire format (`TaskOutput::build` /
+    //   `EngineClient::complete_with_envelope` put it there; byte-identical
+    //   to a worker that completed "exactly as today").
+    // The key is engine-owned either way: supplying BOTH channels, or a
+    // value there that is not a well-formed serialized envelope, is
+    // rejected with 4xx reserved_variable_key; a well-formed but invalid
+    // envelope (any channel) is rejected with 4xx task_envelope_invalid.
+    let mut variables = body.variables;
+    let supplied_envelope_value = variables.remove(AI_TASK_ENVELOPE_KEY);
+    let envelope = match (body.envelope, supplied_envelope_value) {
+        (Some(_), Some(_)) => {
+            warn!(
+                variable = AI_TASK_ENVELOPE_KEY,
+                "rejecting envelope supplied through both channels"
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_code(
+                    format!(
+                        "variable '{}' collides with the typed 'envelope' field; \
+                         supply the envelope through exactly one channel",
+                        AI_TASK_ENVELOPE_KEY
+                    ),
+                    "reserved_variable_key",
+                )),
+            )
+                .into_response());
+        }
+        (Some(envelope), None) => Some(envelope),
+        (None, Some(value)) => match AiTaskEnvelope::from_envelope_value(&value) {
+            Ok(envelope) => Some(envelope),
+            Err(e) => {
+                warn!(
+                    variable = AI_TASK_ENVELOPE_KEY,
+                    reason = %e,
+                    "rejecting non-envelope value at the reserved key"
+                );
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::with_code(
+                        format!(
+                            "variable '{}' is reserved; it must carry the engine's serialized \
+                             AI task envelope (the worker-sdk wire format) — use the 'envelope' \
+                             field instead ({})",
+                            AI_TASK_ENVELOPE_KEY, e
+                        ),
+                        "reserved_variable_key",
+                    )),
+                )
+                    .into_response());
+            }
+        },
+        (None, None) => None,
+    };
+    if let Some(envelope) = &envelope {
+        merge_task_envelope(envelope, &mut variables)
+            .map_err(|(status, json)| (status, json).into_response())?;
+    }
     // E2-3: enforce the variable value contract at this write boundary
     // BEFORE the store mutates the task, so a rejected request leaves the
-    // task locked and completable with valid variables.
-    enforce_variable_contract(&body.variables, &state.variable_limits)
+    // task locked and completable with valid variables. The checks run on
+    // the MERGED map, so the envelope value is size-capped like any other
+    // variable.
+    enforce_variable_contract(&variables, &state.variable_limits)
         .map_err(|(status, json)| (status, json).into_response())?;
     let external_task_store = Arc::clone(&state.storage.external_task_store);
     external_task_store
-        .complete(&task_id, &body.worker_id, body.variables.clone())
+        .complete(&task_id, &body.worker_id, variables.clone())
         .await
         .map_err(external_task_error_response)?;
     let task = external_task_store
@@ -1376,7 +1524,7 @@ pub async fn external_task_complete(
         instance_id: task.process_instance_id.clone(),
         token_id: task.token_id.clone(),
         node_id,
-        variables: body.variables,
+        variables,
     });
     state.engine.run_async(ev, &mut ctx).await;
     Ok(Json(CompleteTaskResponse {
@@ -1413,14 +1561,81 @@ pub async fn external_task_fail(
     Path(task_id): Path<String>,
     Json(body): Json<ExternalTaskFailRequest>,
 ) -> Result<Json<CompleteTaskResponse>, Response> {
+    // E3-1: optional retry category, validated up front. v1 semantics: the
+    // category is RECORDED for observability (error message prefix,
+    // envelope, history, DLQ) — retry behavior is unchanged; acting on it
+    // is E3-2's structured-failure scope.
+    let retry_category = match body.category.as_deref() {
+        None => None,
+        Some("transient") => Some(RetryCategory::Transient),
+        Some("permanent") => Some(RetryCategory::Permanent),
+        Some(other) => {
+            warn!(category = %other, "rejecting invalid retry category");
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_code(
+                    format!(
+                        "category must be \"transient\" or \"permanent\", got {:?}",
+                        other
+                    ),
+                    "invalid_retry_category",
+                )),
+            )
+                .into_response());
+        }
+    };
+    // E3-1: optional AI task envelope, validated exactly like on complete
+    // (4xx task_envelope_invalid) BEFORE the store mutates the task. A
+    // given category is recorded into the envelope's retry_category.
+    let mut envelope = body.envelope;
+    if let (Some(envelope), Some(category)) = (&mut envelope, retry_category) {
+        envelope.retry_category = Some(category);
+    }
+    if let Some(envelope) = &envelope {
+        if let Err(e) = envelope.validate() {
+            warn!(
+                code = e.code(),
+                "rejecting invalid AI task envelope on fail"
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_code(
+                    format!("{}: {}", e.code(), e),
+                    "task_envelope_invalid",
+                )),
+            )
+                .into_response());
+        }
+    }
+    // v1 fail-path decision (documented in docs/ai-task-envelope.md): the
+    // store's fail() has no variables channel, and the store trait is not
+    // extended for E3-1 — so the category is persisted as a structured
+    // JSON prefix on the error message (`{"retry_category":...}: <error>`,
+    // surviving task.error_message, ExternalTaskFailed history and the
+    // DLQ), and the envelope is recorded in the ExternalTaskFailed history
+    // payload only. The envelope is deliberately NOT embedded in the error
+    // message: schemas can be multi-KB and that path bypasses history
+    // redaction.
+    let error_message = match retry_category {
+        Some(category) => format!(
+            "{}: {}",
+            serde_json::json!({ "retry_category": category }),
+            body.error
+        ),
+        None => body.error.clone(),
+    };
     let external_task_store = Arc::clone(&state.storage.external_task_store);
     let retry_after = body.retry_after_ms.map(Duration::from_millis);
     external_task_store
-        .fail(&task_id, &body.worker_id, body.error.clone(), retry_after)
+        .fail(
+            &task_id,
+            &body.worker_id,
+            error_message.clone(),
+            retry_after,
+        )
         .await
         .map_err(external_task_error_response)?;
     let worker_id_for_log = body.worker_id.clone();
-    let error_for_log = body.error.clone();
     let task = external_task_store
         .get(&task_id)
         .await
@@ -1436,14 +1651,33 @@ pub async fn external_task_fail(
                 .into_response()
         })?;
     let occurred_at = occurred_at_now();
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "task_id": task.task_id,
         "token_id": task.token_id,
         "process_instance_id": task.process_instance_id,
         "worker_id": worker_id_for_log,
         "retries": task.retries,
-        "error_message": error_for_log,
+        "error_message": error_message,
     });
+    // The envelope rides in the standard variable-carrying payload key and
+    // is redacted with the same policy the engine's history handler
+    // applies (oversized → __truncated:), so the fail path gains none of
+    // the redaction bypasses a raw error_message embedding would have.
+    if let Some(envelope) = &envelope {
+        let stored = envelope.to_envelope_value();
+        let redacted = redact_history_variable_value(&stored, &state.history_redaction_policy);
+        let mut envelope_vars = serde_json::Map::new();
+        envelope_vars.insert(
+            AI_TASK_ENVELOPE_KEY.to_string(),
+            serde_json::Value::String(redacted),
+        );
+        if let serde_json::Value::Object(map) = &mut payload {
+            map.insert(
+                "variables".to_string(),
+                serde_json::Value::Object(envelope_vars),
+            );
+        }
+    }
     let _ = HistoryRepo::append(
         state.storage.history_repo.as_ref(),
         &task.process_instance_id,
@@ -1461,14 +1695,15 @@ pub async fn external_task_fail(
         "external task failed"
     );
     if task.state == ExternalTaskState::Failed {
-        // Insert into dead letter queue
+        // Insert into dead letter queue (input variables only — the
+        // fail-path envelope is in the ExternalTaskFailed history event).
         let dl_entry = bpm_engine_storage::DeadLetterEntry {
             id: uuid::Uuid::new_v4().to_string(),
             task_id: task.task_id.clone(),
             token_id: task.token_id.clone(),
             process_instance_id: task.process_instance_id.clone(),
             task_type: task.task_type.clone(),
-            error_message: error_for_log.clone(),
+            error_message: error_message.clone(),
             variables: serde_json::to_string(&task.variables).unwrap_or_default(),
             tenant_id: None,
             created_at: occurred_at.clone(),
