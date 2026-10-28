@@ -10,6 +10,7 @@ members = [
     "crates/server/rest",
     "crates/worker-sdk",
     "crates/ai-reference",
+    "crates/mcp-server",
 ]
 resolver = "2"
 

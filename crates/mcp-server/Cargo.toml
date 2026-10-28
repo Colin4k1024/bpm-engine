@@ -1,0 +1,42 @@
+[package]
+name = "bpm-engine-mcp-server"
+version = "0.2.0"
+edition = "2021"
+description = "Model Context Protocol (MCP) server exposing the BPM engine REST API as agent tools (stdio JSON-RPC)"
+license = "MIT"
+# Workspace-internal tool, never published: the agent tool catalog is
+# embedded from ../server/rest/capabilities/agent-tools.json via a
+# workspace-relative include_str! (single source, no copy), and a path
+# escaping the crate directory cannot be packaged by `cargo package`.
+# Standalone packaging would need a build-time copy of the catalog —
+# deliberately out of scope (see docs/mcp-server.md).
+publish = false
+
+[lib]
+name = "bpm_engine_mcp_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bpm-engine-mcp-server"
+path = "src/main.rs"
+
+[dependencies]
+# Runtime surface stays minimal by design (issue #20): the MCP server is a
+# loopback REST client + a stdio JSON-RPC loop. The engine itself is reached
+# over HTTP only; bpm-engine-server-rest is a DEV-dependency (in-process test
+# server), never a runtime dependency.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+reqwest = { version = "0.12", features = ["json"] }
+
+[dev-dependencies]
+# In-process engine for the end-to-end suite: build_app (memory mode) served
+# on an ephemeral loopback port, driven through the real MCP handler. The
+# subprocess suite additionally spawns the real binary, so tokio needs the
+# `process` feature here.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "process"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+axum = "0.7"
+bpm-engine-server-rest = { path = "../server/rest", version = "0.2.0" }
