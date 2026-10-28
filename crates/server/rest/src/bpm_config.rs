@@ -58,6 +58,13 @@ pub struct AuthConfig {
 pub struct EngineConfig {
     pub timer_poll_interval_ms: u64,
     pub timer_batch_size: u32,
+    /// Maximum byte length of a stored variable value (the final stored
+    /// string, envelope included). Enforced at the REST write boundaries:
+    /// start-instance, user-task complete, external-task complete (E2-3).
+    pub variable_max_bytes: usize,
+    /// Maximum byte length of a variable value recorded verbatim in event
+    /// history; longer values are replaced with a `__truncated:` marker.
+    pub history_variable_max_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +107,8 @@ impl Default for EngineConfig {
         Self {
             timer_poll_interval_ms: 1000,
             timer_batch_size: 100,
+            variable_max_bytes: 65_536,
+            history_variable_max_bytes: 1024,
         }
     }
 }
@@ -186,6 +195,8 @@ impl BpmConfig {
             auth.api_key = %mask_secret(&self.auth.api_key),
             engine.timer_poll_interval_ms = self.engine.timer_poll_interval_ms,
             engine.timer_batch_size = self.engine.timer_batch_size,
+            engine.variable_max_bytes = self.engine.variable_max_bytes,
+            engine.history_variable_max_bytes = self.engine.history_variable_max_bytes,
             log.level = %self.log.level,
             log.format = %self.log.format,
             rate_limit.requests_per_minute = self.rate_limit.requests_per_minute,
@@ -219,11 +230,44 @@ mod tests {
         assert!(cfg.database.migrate_on_start, "auto-migration defaults on");
         assert_eq!(cfg.engine.timer_poll_interval_ms, 1000);
         assert_eq!(cfg.engine.timer_batch_size, 100);
+        assert_eq!(cfg.engine.variable_max_bytes, 65_536);
+        assert_eq!(cfg.engine.history_variable_max_bytes, 1024);
         assert_eq!(cfg.log.level, "info");
         assert_eq!(cfg.log.format, "json");
         assert_eq!(cfg.rate_limit.requests_per_minute, 100);
         assert!(cfg.auth.jwt_secret.is_empty());
         assert!(cfg.auth.api_key.is_empty());
+    }
+
+    #[test]
+    fn engine_variable_caps_default_and_toml_override() {
+        // Defaults
+        let cfg: BpmConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.engine.variable_max_bytes, 65_536);
+        assert_eq!(cfg.engine.history_variable_max_bytes, 1024);
+
+        // TOML [engine] override
+        let toml_str = r#"
+[engine]
+variable_max_bytes = 4096
+history_variable_max_bytes = 256
+"#;
+        let cfg: BpmConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.engine.variable_max_bytes, 4096);
+        assert_eq!(cfg.engine.history_variable_max_bytes, 256);
+        // Unset engine fields keep defaults
+        assert_eq!(cfg.engine.timer_poll_interval_ms, 1000);
+    }
+
+    #[test]
+    fn engine_variable_caps_partial_toml_override() {
+        let toml_str = r#"
+[engine]
+variable_max_bytes = 131072
+"#;
+        let cfg: BpmConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.engine.variable_max_bytes, 131_072);
+        assert_eq!(cfg.engine.history_variable_max_bytes, 1024);
     }
 
     #[test]

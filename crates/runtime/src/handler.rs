@@ -1,7 +1,7 @@
 //! EventHandler trait and EngineContext — the dependency injection boundary for the engine.
 
 use async_trait::async_trait;
-use bpm_engine_core::EngineEvent;
+use bpm_engine_core::{EngineEvent, HistoryRedactionPolicy};
 use bpm_engine_storage::{
     CompensationRecordRepo, ExternalTaskStore, HistoryRepo, OutboxRepo, ParallelJoinRepo,
     ProcessDefinitionStore, ProcessInstanceStore, TimerStore, TokenStore,
@@ -42,6 +42,10 @@ pub struct EngineContext {
     pub external_task_store: Option<Arc<dyn ExternalTaskStore>>,
     /// Execution history recording (optional — enables audit/replay).
     pub history_repo: Option<Arc<dyn HistoryRepo>>,
+    /// Redaction policy applied to variable values written into event
+    /// history (E2-3). Defaults to the 1024-byte cap — redaction is ON by
+    /// default, so oversized values never land in history.
+    pub history_redaction_policy: HistoryRedactionPolicy,
     /// Tenant isolation key for multi-tenant deployments.
     pub tenant_id: Option<String>,
 }
@@ -63,6 +67,7 @@ impl EngineContext {
             outbox_repo: None,
             external_task_store: None,
             history_repo: None,
+            history_redaction_policy: HistoryRedactionPolicy::default(),
             tenant_id: None,
         }
     }
@@ -79,6 +84,7 @@ pub struct EngineContextBuilder {
     outbox_repo: Option<Arc<dyn OutboxRepo>>,
     external_task_store: Option<Arc<dyn ExternalTaskStore>>,
     history_repo: Option<Arc<dyn HistoryRepo>>,
+    history_redaction_policy: HistoryRedactionPolicy,
     tenant_id: Option<String>,
 }
 
@@ -119,6 +125,14 @@ impl EngineContextBuilder {
         self
     }
 
+    /// Set the redaction policy for variable values written into event
+    /// history. Unset, the policy defaults to the 1024-byte cap
+    /// (`HistoryRedactionPolicy::default()`), i.e. redaction is ON.
+    pub fn history_redaction_policy(mut self, policy: HistoryRedactionPolicy) -> Self {
+        self.history_redaction_policy = policy;
+        self
+    }
+
     /// Set the tenant isolation key.
     pub fn tenant_id(mut self, id: String) -> Self {
         self.tenant_id = Some(id);
@@ -137,6 +151,7 @@ impl EngineContextBuilder {
             outbox_repo: self.outbox_repo,
             external_task_store: self.external_task_store,
             history_repo: self.history_repo,
+            history_redaction_policy: self.history_redaction_policy,
             tenant_id: self.tenant_id,
         }
     }

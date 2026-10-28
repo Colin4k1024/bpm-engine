@@ -13,6 +13,7 @@ thiserror = { workspace = true }
 aes-gcm = "0.10"
 base64 = "0.22"
 rand = "0.8"
+sha2 = "0.10"
 
 [dev-dependencies]
 proptest = "1"

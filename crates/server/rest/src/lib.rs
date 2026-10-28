@@ -24,7 +24,7 @@ pub mod storage;
 
 use crate::bpm_config::BpmConfig;
 use crate::routes::router;
-use crate::state::{AppState, ExtraHealthChecks};
+use crate::state::{AppState, ExtraHealthChecks, VariableContractLimits};
 use crate::storage::Storage;
 use axum::Router;
 use bpm_engine_adapter_memory::ProcessDefStore;
@@ -254,6 +254,10 @@ pub async fn build_app(config: &BpmConfig) -> anyhow::Result<AppHandle> {
     let state = Arc::new(AppState {
         engine,
         storage,
+        variable_limits: VariableContractLimits::from(&config.engine),
+        history_redaction_policy: bpm_engine_core::HistoryRedactionPolicy {
+            max_variable_bytes: config.engine.history_variable_max_bytes,
+        },
         replay_sessions: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         timer_cancel: timer_cancel.clone(),
         extra_health_checks,

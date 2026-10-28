@@ -138,6 +138,7 @@ async fn postgres_server_config() -> BpmConfig {
         engine: EngineConfig {
             timer_poll_interval_ms: 200,
             timer_batch_size: 100,
+            ..Default::default()
         },
         rate_limit: RateLimitConfig {
             requests_per_minute: 1_000_000,
