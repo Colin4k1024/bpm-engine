@@ -15,19 +15,17 @@ pub fn eval_condition(expr: &str, variables: &HashMap<String, String>) -> Result
     if expr.is_empty() {
         return Err(ElError("empty expression".into()));
     }
-    if expr.contains(" or ") {
-        let parts: Vec<&str> = expr.split(" or ").map(str::trim).collect();
+    if let Some(parts) = split_outside_quotes(expr, " or ") {
         for part in parts {
-            if eval_condition(part, variables)? {
+            if eval_condition(&part, variables)? {
                 return Ok(true);
             }
         }
         return Ok(false);
     }
-    if expr.contains(" and ") {
-        let parts: Vec<&str> = expr.split(" and ").map(str::trim).collect();
+    if let Some(parts) = split_outside_quotes(expr, " and ") {
         for part in parts {
-            if !eval_condition(part, variables)? {
+            if !eval_condition(&part, variables)? {
                 return Ok(false);
             }
         }
@@ -59,6 +57,50 @@ pub fn eval_condition(expr: &str, variables: &HashMap<String, String>) -> Result
         }
     }
     Err(ElError(format!("unrecognized expression: {}", expr)))
+}
+
+/// Split `expr` on `sep`, ignoring separators that appear inside single- or
+/// double-quoted string literals. Returns `None` when `sep` does not occur at
+/// the top level.
+///
+/// Without this, an expression like `x == "salt and pepper"` would be split on
+/// the quoted ` and `, silently corrupting the comparison. Iteration is over
+/// `char_indices` so multi-byte UTF-8 text is preserved verbatim and every
+/// slice is taken at a char boundary.
+fn split_outside_quotes(expr: &str, sep: &str) -> Option<Vec<String>> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let sep_len = sep.len();
+    let mut skip_until = 0usize;
+    for (idx, c) in expr.char_indices() {
+        if idx < skip_until {
+            continue;
+        }
+        if c == '"' && !in_single {
+            in_double = !in_double;
+            current.push(c);
+            continue;
+        }
+        if c == '\'' && !in_double {
+            in_single = !in_single;
+            current.push(c);
+            continue;
+        }
+        if !in_single && !in_double && expr.get(idx..idx + sep_len) == Some(sep) {
+            parts.push(current.trim().to_string());
+            current.clear();
+            skip_until = idx + sep_len;
+            continue;
+        }
+        current.push(c);
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.push(current.trim().to_string());
+    Some(parts)
 }
 
 fn unquote(s: &str) -> Option<&str> {
@@ -161,6 +203,83 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_boolean_split_ignores_quoted_literals() {
+        // Quoted " and " inside a string literal must NOT split the expression.
+        let mut vars = HashMap::new();
+        vars.insert("flavor".to_string(), "salt and pepper".to_string());
+        assert!(eval_condition("flavor == \"salt and pepper\"", &vars).unwrap());
+
+        let mut vars = HashMap::new();
+        vars.insert("flavor".to_string(), "plain".to_string());
+        assert!(!eval_condition("flavor == \"salt and pepper\"", &vars).unwrap());
+    }
+
+    #[test]
+    fn test_multibyte_utf8_is_preserved() {
+        // Non-ASCII identifiers and literals must survive splitting verbatim
+        // (no Latin-1 byte reinterpretation, no char-boundary panic).
+        let mut vars = HashMap::new();
+        vars.insert("café".to_string(), "café".to_string());
+        assert!(eval_condition("café == \"café\"", &vars).unwrap());
+
+        let mut vars = HashMap::new();
+        vars.insert("café".to_string(), "no".to_string());
+        vars.insert("count".to_string(), "2".to_string());
+        assert!(eval_condition("café == \"café and crème\" or count > 1", &vars).unwrap());
+        assert!(!eval_condition("café == \"café and crème\" or count > 5", &vars).unwrap());
+
+        // The unquoted-identifier path (no spaces) also keeps UTF-8 intact.
+        let mut vars = HashMap::new();
+        vars.insert("café".to_string(), "ok".to_string());
+        assert!(eval_condition("café", &vars).unwrap());
+    }
+
+    #[test]
+    fn test_split_outside_quotes_preserves_multibyte() {
+        assert_eq!(
+            split_outside_quotes("café and \"crème brûlée\"", " and "),
+            Some(vec!["café".to_string(), "\"crème brûlée\"".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_boolean_split_ignores_quoted_or() {
+        let mut vars = HashMap::new();
+        vars.insert("song".to_string(), "rock or roll".to_string());
+        assert!(eval_condition("song == \"rock or roll\" or flavor == \"x\"", &vars).unwrap());
+
+        let mut vars = HashMap::new();
+        vars.insert("song".to_string(), "no".to_string());
+        vars.insert("count".to_string(), "2".to_string());
+        assert!(eval_condition("song == \"rock or roll\" or count > 1", &vars).unwrap());
+        assert!(!eval_condition("song == \"rock or roll\" and count > 5", &vars).unwrap());
+    }
+
+    #[test]
+    fn test_boolean_logic_still_splits_outside_quotes() {
+        let mut vars = HashMap::new();
+        vars.insert("x".to_string(), "1".to_string());
+        vars.insert("y".to_string(), "2".to_string());
+        assert!(eval_condition("x == 1 or y == 3", &vars).unwrap());
+        assert!(!eval_condition("x == 2 or y == 3", &vars).unwrap());
+        assert!(eval_condition("x == 1 and y == 2", &vars).unwrap());
+        assert!(!eval_condition("x == 1 and y == 3", &vars).unwrap());
+    }
+
+    #[test]
+    fn test_split_outside_quotes_helper() {
+        assert_eq!(
+            split_outside_quotes("a and \"b and c\"", " and "),
+            Some(vec!["a".to_string(), "\"b and c\"".to_string()])
+        );
+        assert_eq!(split_outside_quotes("no separator", " and "), None);
+        assert_eq!(
+            split_outside_quotes("\"a and b\" and c", " and "),
+            Some(vec!["\"a and b\"".to_string(), "c".to_string()])
+        );
+    }
 
     #[test]
     fn test_negative_number_literal_in_comparison() {

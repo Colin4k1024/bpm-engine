@@ -1,0 +1,14 @@
+[package]
+name = "bpm-engine-dsl"
+version = "0.2.0"
+edition = "2021"
+description = "Minimal declarative JSON DSL compiled to engine ProcessDefinition (shares the BPMN compiler and its semantics)"
+license = "MIT"
+
+[dependencies]
+bpm-engine-core = { path = "../core", version = "0.2.0" }
+bpm-engine-bpmn = { path = "../bpmn", version = "0.2.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_path_to_error = "0.1"
+schemars = "1"

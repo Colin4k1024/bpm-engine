@@ -6,6 +6,7 @@ members = [
     "crates/adapters/memory",
     "crates/adapters/postgres",
     "crates/bpmn",
+    "crates/dsl",
     "crates/server/rest",
     "crates/worker-sdk",
 ]
@@ -41,6 +42,7 @@ bpm-engine-storage = { path = "crates/storage", version = "0.2.0" }
 bpm-engine-runtime = { path = "crates/runtime", version = "0.2.0" }
 bpm-engine-adapter-memory = { path = "crates/adapters/memory", version = "0.2.0" }
 bpm-engine-bpmn = { path = "crates/bpmn", version = "0.2.0" }
+bpm-engine-dsl = { path = "crates/dsl", version = "0.2.0" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
