@@ -25,6 +25,15 @@ fn str_to_external_task_state(s: &str) -> ExternalTaskState {
     }
 }
 
+/// Current unix epoch seconds (TEXT epoch-second convention used by the
+/// `lock_expire_at` / `updated_at` columns).
+fn unix_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
 #[async_trait]
 impl ExternalTaskStore for PostgresExternalTaskStore {
     async fn create(
@@ -167,59 +176,114 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
         worker_id: &str,
         variables: HashMap<String, String>,
     ) -> Result<(), bpm_engine_storage::ExternalTaskError> {
-        let client = self
+        use bpm_engine_storage::ExternalTaskError;
+
+        let mut client = self
             .pool
             .get()
             .await
-            .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?;
+            .map_err(|e| ExternalTaskError::Internal(e.to_string()))?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| ExternalTaskError::Internal(e.to_string()))?;
 
-        // Merge variables
-        let row = client
+        // Lock the row and classify failures with the same semantics as the
+        // memory adapter: TaskNotFound / TaskNotLocked / lease conflict /
+        // LockExpired (a worker whose lease expired is rejected even if the
+        // lock has not been reclaimed yet).
+        let row = tx
             .query_opt(
                 r#"
-                SELECT variables FROM external_task
-                WHERE id = $1 AND worker_id = $2 AND state = 'Locked'
+                SELECT variables, state, worker_id, lock_expire_at
+                FROM external_task
+                WHERE id = $1
+                FOR UPDATE
                 "#,
-                &[&task_id, &worker_id],
+                &[&task_id],
             )
             .await
-            .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?;
+            .map_err(|e| ExternalTaskError::Internal(e.to_string()))?;
 
+        let Some(row) = row else {
+            return Err(ExternalTaskError::TaskNotFound {
+                task_id: task_id.to_string(),
+            });
+        };
+
+        let state: String = row.get("state");
+        if state != "Locked" {
+            return Err(ExternalTaskError::TaskNotLocked {
+                task_id: task_id.to_string(),
+            });
+        }
+        let owner: Option<String> = row.get("worker_id");
+        if owner.as_deref() != Some(worker_id) {
+            return Err(bpm_engine_storage::InvariantViolation::new(
+                bpm_engine_storage::InvariantViolationKind::ExternalTaskLeaseConflict,
+                format!(
+                    "task_id={} expected_owner={:?} actual_worker={}",
+                    task_id,
+                    owner.as_deref(),
+                    worker_id
+                ),
+            )
+            .into());
+        }
+        // Lock expiry guard (same rule as the memory adapter):
+        // lock_expire_at is TEXT unix-epoch seconds; expire <= now rejects.
+        let now = unix_epoch_secs();
+        if let Some(exp) = row
+            .get::<_, Option<String>>("lock_expire_at")
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            if exp <= now {
+                return Err(ExternalTaskError::LockExpired {
+                    task_id: task_id.to_string(),
+                });
+            }
+        }
+
+        // Merge variables
         let existing_variables: HashMap<String, String> = row
-            .as_ref()
-            .and_then(|r| r.get::<_, Option<String>>("variables"))
+            .get::<_, Option<String>>("variables")
             .map(|v| serde_json::from_str(&v).unwrap_or_default())
             .unwrap_or_default();
-
         let mut merged = existing_variables;
         merged.extend(variables);
 
-        let result = client
+        let result = tx
             .execute(
                 r#"
                 UPDATE external_task
                 SET state = 'Completed',
-                    variables = $3,
-                    updated_at = CURRENT_TIMESTAMP,
+                    variables = $2,
+                    updated_at = $3,
                     version = version + 1
-                WHERE id = $1 AND worker_id = $2 AND state = 'Locked'
+                WHERE id = $1 AND worker_id = $4 AND state = 'Locked'
                 "#,
                 &[
                     &task_id,
+                    &serde_json::to_string(&merged)
+                        .map_err(|e| ExternalTaskError::Internal(e.to_string()))?,
+                    &now.to_string(),
                     &worker_id,
-                    &serde_json::to_string(&merged).map_err(|e| {
-                        bpm_engine_storage::ExternalTaskError::Internal(e.to_string())
-                    })?,
                 ],
             )
             .await
-            .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?;
+            .map_err(|e| ExternalTaskError::Internal(e.to_string()))?;
 
         if result == 0 {
-            return Err(bpm_engine_storage::ExternalTaskError::TaskNotFound {
+            // The row was locked FOR UPDATE and verified above; a miss here
+            // means a concurrent transition — classify as not locked.
+            return Err(ExternalTaskError::TaskNotLocked {
                 task_id: task_id.to_string(),
             });
         }
+
+        tx.commit()
+            .await
+            .map_err(|e| ExternalTaskError::Internal(e.to_string()))?;
 
         Ok(())
     }
@@ -252,13 +316,9 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
         let retries: i32 = row.as_ref().map(|r| r.get("retries")).unwrap_or(0);
 
         if retries > 0 {
-            let lock_expire_epoch: Option<u64> = retry_after.map(|d| {
-                SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-                    + d.as_secs()
-            });
+            let lock_expire_epoch: Option<u64> =
+                retry_after.map(|d| unix_epoch_secs() + d.as_secs());
+            let now = unix_epoch_secs().to_string();
 
             let result = if let Some(epoch) = lock_expire_epoch {
                 client
@@ -270,11 +330,11 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                             lock_expire_at = $4,
                             worker_id = NULL,
                             error_message = $3,
-                            updated_at = CURRENT_TIMESTAMP,
+                            updated_at = $5,
                             version = version + 1
                         WHERE id = $1 AND worker_id = $2 AND state = 'Locked'
                         "#,
-                        &[&task_id, &worker_id, &error, &epoch.to_string()],
+                        &[&task_id, &worker_id, &error, &epoch.to_string(), &now],
                     )
                     .await
                     .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?
@@ -288,11 +348,11 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                             lock_expire_at = NULL,
                             worker_id = NULL,
                             error_message = $3,
-                            updated_at = CURRENT_TIMESTAMP,
+                            updated_at = $4,
                             version = version + 1
                         WHERE id = $1 AND worker_id = $2 AND state = 'Locked'
                         "#,
-                        &[&task_id, &worker_id, &error],
+                        &[&task_id, &worker_id, &error, &now],
                     )
                     .await
                     .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?
@@ -305,17 +365,18 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
             }
         } else {
             // No more retries, mark as failed
+            let now = unix_epoch_secs().to_string();
             let result = client
                 .execute(
                     r#"
                     UPDATE external_task
                     SET state = 'Failed',
                         error_message = $3,
-                        updated_at = CURRENT_TIMESTAMP,
+                        updated_at = $4,
                         version = version + 1
                     WHERE id = $1 AND worker_id = $2 AND state = 'Locked'
                     "#,
-                    &[&task_id, &worker_id, &error],
+                    &[&task_id, &worker_id, &error, &now],
                 )
                 .await
                 .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?;

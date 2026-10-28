@@ -542,3 +542,134 @@ async fn history_repo_append_and_list() {
         .unwrap();
     assert!(empty.is_empty());
 }
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn external_task_store_complete_expiry_guard_and_epoch_updated_at() {
+    use bpm_engine_adapter_postgres::PostgresExternalTaskStore;
+    use bpm_engine_core::ExternalTaskState;
+    use bpm_engine_storage::{ExternalTaskError, ExternalTaskStore};
+    use std::collections::HashMap;
+
+    let (pool, _container) = setup_pool().await;
+    insert_test_instance(&pool, "inst-et-3").await;
+    let store = PostgresExternalTaskStore::new(pool);
+
+    let task_id = store
+        .create("tok-et-3", "inst-et-3", "lease", 3, 60, HashMap::new())
+        .await
+        .unwrap();
+
+    // Lock with a zero-duration lease: lock_expire_at = now (epoch seconds).
+    let tasks = store
+        .fetch_and_lock(
+            "worker-1",
+            &["lease".to_string()],
+            10,
+            std::time::Duration::from_secs(0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1);
+
+    // Let wall time pass the expiry boundary (epoch-second granularity).
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    // Worker 1's lease has expired but was NOT reclaimed; complete must be
+    // rejected with LockExpired — the same guard the memory adapter applies.
+    let err = store
+        .complete(&task_id, "worker-1", HashMap::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ExternalTaskError::LockExpired { .. }),
+        "expected LockExpired, got {:?}",
+        err
+    );
+
+    // The rejected complete must not corrupt the row (tx rolled back).
+    let task = store.get(&task_id).await.unwrap().unwrap();
+    assert_eq!(task.state, ExternalTaskState::Locked);
+    assert_eq!(task.lock_owner.as_deref(), Some("worker-1"));
+
+    // A worker that never held the lock gets a lease-conflict invariant error.
+    let err = store
+        .complete(&task_id, "worker-2", HashMap::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ExternalTaskError::InvariantViolation(_)),
+        "expected ExternalTaskLeaseConflict, got {:?}",
+        err
+    );
+
+    // Reclaim + re-lock by worker 2, then complete succeeds.
+    let reclaimed = store.reclaim_expired_locks().await.unwrap();
+    assert!(reclaimed >= 1, "expired lock should be reclaimed");
+    let tasks = store
+        .fetch_and_lock(
+            "worker-2",
+            &["lease".to_string()],
+            10,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1);
+
+    store
+        .complete(&task_id, "worker-2", HashMap::new())
+        .await
+        .unwrap();
+
+    // updated_at round-trips as TEXT unix-epoch seconds (single column
+    // format; complete no longer writes CURRENT_TIMESTAMP).
+    let task = store.get(&task_id).await.unwrap().unwrap();
+    assert_eq!(task.state, ExternalTaskState::Completed);
+    let updated_at = task.updated_at.expect("updated_at set after complete");
+    assert!(
+        !updated_at.is_empty() && updated_at.chars().all(|c| c.is_ascii_digit()),
+        "updated_at should be TEXT unix-epoch seconds, got {:?}",
+        updated_at
+    );
+
+    // A duplicate complete of the completed task is rejected (TaskNotLocked),
+    // not silently accepted.
+    let err = store
+        .complete(&task_id, "worker-2", HashMap::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ExternalTaskError::TaskNotLocked { .. }),
+        "expected TaskNotLocked for duplicate complete, got {:?}",
+        err
+    );
+
+    // fail() also writes updated_at as TEXT unix-epoch seconds.
+    let task_id_2 = store
+        .create("tok-et-4", "inst-et-3", "lease", 3, 60, HashMap::new())
+        .await
+        .unwrap();
+    let tasks = store
+        .fetch_and_lock(
+            "worker-1",
+            &["lease".to_string()],
+            10,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1);
+    store
+        .fail(&task_id_2, "worker-1", "boom".to_string(), None)
+        .await
+        .unwrap();
+    let task = store.get(&task_id_2).await.unwrap().unwrap();
+    assert_eq!(task.state, ExternalTaskState::Ready);
+    let updated_at = task.updated_at.expect("updated_at set after fail");
+    assert!(
+        !updated_at.is_empty() && updated_at.chars().all(|c| c.is_ascii_digit()),
+        "updated_at should be TEXT unix-epoch seconds after fail, got {:?}",
+        updated_at
+    );
+}
