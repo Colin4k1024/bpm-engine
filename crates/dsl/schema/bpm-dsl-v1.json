@@ -1,0 +1,368 @@
+{
+  "$defs": {
+    "DslCondition": {
+      "description": "Gateway edge condition. `variableEq` compares a variable for exact string\nequality (lowered to the canonical expression `${variable == \"value\"}`);\n`expression` is an EL expression (supports `==`, `!=`, `>`, `<`, `>=`,\n`<=`, `and`, `or`), passed through verbatim like a BPMN\n`conditionExpression`.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Exact variable match: `variables[variable] == value`.",
+          "properties": {
+            "kind": {
+              "const": "variableEq",
+              "type": "string"
+            },
+            "value": {
+              "description": "Expected value. Must not contain double quotes (use `expression`\notherwise).",
+              "type": "string"
+            },
+            "variable": {
+              "description": "Variable name to compare. Must be non-empty and must not contain\ndouble quotes, `=`, or whitespace (use `expression` otherwise).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "variable",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Free-form EL expression, e.g. `\"amount > 100\"`. May optionally be\nwrapped in `${...}` like BPMN; the wrapper is stripped by the shared\ncompiler.",
+          "properties": {
+            "expression": {
+              "description": "The expression text. Must not be empty.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "expression",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "expression"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DslEdge": {
+      "additionalProperties": false,
+      "description": "A directed edge (sequence flow) between two nodes.",
+      "properties": {
+        "condition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DslCondition"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional gateway condition. Mutually exclusive with `default: true`."
+        },
+        "default": {
+          "description": "Marks this edge as the default flow of its source gateway (same effect\nas a BPMN `exclusiveGateway default` attribute pointing at the flow).\nMutually exclusive with `condition`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Optional edge id. Auto-generated (`edge_<index>`) when absent; must be\nunique across all edges when provided.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "Source node id. Must reference an existing node.",
+          "type": "string"
+        },
+        "target": {
+          "description": "Target node id. Must reference an existing node.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "target"
+      ],
+      "type": "object"
+    },
+    "DslFormField": {
+      "additionalProperties": false,
+      "description": "A single field in a user-task form. Lowers to the engine's `FormField`:\n`label` defaults to `id`, `type` defaults to `string`, `required` defaults\nto `false` (same defaults as the BPMN parser).",
+      "properties": {
+        "default_value": {
+          "description": "Default value (if not required).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Unique field identifier within the form. Required.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Human-readable label. Defaults to `id` when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "options": {
+          "description": "Predefined options for `\"enum\"` fields.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "required": {
+          "description": "Whether the field must be filled before submission. Defaults to `false`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DslFormFieldType"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Field data type. Defaults to `\"string\"`."
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "DslFormFieldType": {
+      "description": "Data type of a user-task form field. Same set as the engine's\n`FormFieldType`.",
+      "oneOf": [
+        {
+          "const": "string",
+          "description": "Free-text string field.",
+          "type": "string"
+        },
+        {
+          "const": "number",
+          "description": "Numeric field (integer or decimal).",
+          "type": "string"
+        },
+        {
+          "const": "boolean",
+          "description": "Boolean toggle field.",
+          "type": "string"
+        },
+        {
+          "const": "enum",
+          "description": "Enumeration field with predefined options.",
+          "type": "string"
+        }
+      ]
+    },
+    "DslNode": {
+      "additionalProperties": false,
+      "description": "A flow node in the restricted v1 node set. Fields other than `id`, `name`\nand `type` are only valid for specific node types:\n`task_type`/`retries`/`timeout_secs` for `serviceTask`, `form_key`/\n`form_fields` for `userTask`, and `timer` for `timerIntermediateCatch`.\nThe compiler rejects fields set on a node type they do not belong to.",
+      "properties": {
+        "form_fields": {
+          "description": "`userTask` only: form field definitions.",
+          "items": {
+            "$ref": "#/$defs/DslFormField"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "form_key": {
+          "description": "`userTask` only: form key identifier for the task UI.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Unique non-empty node id. Referenced by edges.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Optional human-readable node name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retries": {
+          "description": "`serviceTask` only: retries before dead-letter. Defaults to 3\n(BPMN parser default).",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "task_type": {
+          "description": "`serviceTask` only (required): worker topic workers subscribe to.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeout_secs": {
+          "description": "`serviceTask` only: lock timeout in seconds. Defaults to 60\n(BPMN parser default).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DslTimer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`timerIntermediateCatch` only (required): timer definition."
+        },
+        "type": {
+          "$ref": "#/$defs/DslNodeType",
+          "description": "Node type (restricted v1 set)."
+        }
+      },
+      "required": [
+        "id",
+        "type"
+      ],
+      "type": "object"
+    },
+    "DslNodeType": {
+      "description": "Restricted node-type set of DSL v1.",
+      "oneOf": [
+        {
+          "const": "start",
+          "description": "Start event: creates the initial token. Exactly one per process.",
+          "type": "string"
+        },
+        {
+          "const": "end",
+          "description": "End event: consumes the arriving token. At least one per process.",
+          "type": "string"
+        },
+        {
+          "const": "serviceTask",
+          "description": "Service task: pull-based external task executed by a worker.\nRequires `task_type`; optional `retries` (default 3) and\n`timeout_secs` (default 60), matching the BPMN parser defaults.",
+          "type": "string"
+        },
+        {
+          "const": "userTask",
+          "description": "User task: token waits for external completion; optional form.",
+          "type": "string"
+        },
+        {
+          "const": "exclusiveGateway",
+          "description": "XOR gateway: routes to exactly one outgoing edge based on conditions.",
+          "type": "string"
+        },
+        {
+          "const": "parallelGateway",
+          "description": "AND gateway: forks (1 in, 2+ out) or joins (2+ in, 1 out).",
+          "type": "string"
+        },
+        {
+          "const": "timerIntermediateCatch",
+          "description": "Timer intermediate catch event: token waits until the timer fires.\nRequires `timer.duration` (ISO 8601 duration such as `PT30S`, `PT5M`,\n`PT1H`; the runtime parses `PT{N}S`, `PT{N}M`, `PT{N}H` and falls back\nto 60 seconds for unsupported formats).",
+          "type": "string"
+        }
+      ]
+    },
+    "DslProcess": {
+      "additionalProperties": false,
+      "description": "Process metadata. `id` becomes the compiled definition id (same behavior\nas the BPMN process id).",
+      "properties": {
+        "id": {
+          "description": "Process definition id. Non-empty; becomes the definition id.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Optional process name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "DslTimer": {
+      "additionalProperties": false,
+      "description": "Timer definition for `timerIntermediateCatch` nodes.",
+      "properties": {
+        "duration": {
+          "description": "ISO 8601 duration passed through unchanged to the engine, e.g.\n`\"PT30S\"`, `\"PT5M\"`, `\"PT1H\"`. The runtime supports `PT{N}S`,\n`PT{N}M`, `PT{N}H`; other values fall back to 60 seconds.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "duration"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "BPM DSL v1 document: a restricted declarative process definition.\n\nNode types: `start`, `end`, `serviceTask`, `userTask`, `exclusiveGateway`,\n`parallelGateway`, `timerIntermediateCatch`. Boundary events, call\nactivities, subprocesses, message/signal events and terminate ends are\nnot part of v1. Unknown fields are rejected (`deny_unknown_fields`), so\ntypos produce precise field-level diagnostics. `schema_version` must be\n`1`; later versions gate future node sets.",
+  "properties": {
+    "edges": {
+      "description": "Sequence flows between nodes. Each edge references node ids.",
+      "items": {
+        "$ref": "#/$defs/DslEdge"
+      },
+      "type": "array"
+    },
+    "nodes": {
+      "description": "Flow nodes. Must not be empty.",
+      "items": {
+        "$ref": "#/$defs/DslNode"
+      },
+      "type": "array"
+    },
+    "process": {
+      "$ref": "#/$defs/DslProcess",
+      "description": "Process metadata."
+    },
+    "schema_version": {
+      "const": 1,
+      "description": "Document format version. Must be `1` for DSL v1.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "process",
+    "nodes",
+    "edges"
+  ],
+  "title": "BPM DSL v1",
+  "type": "object"
+}
