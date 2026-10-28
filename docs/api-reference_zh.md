@@ -678,6 +678,7 @@ REST API 中预留了 `Idempotency-Key` 请求头，但**目前在任何端点�
 | `GET` | `/process-instances/:id` | 获取流程实例状态 |
 | `GET` | `/process-instances/:id/trace` | 获取聚合执行轨迹 |
 | `GET` | `/process-instances/:id/history` | 获取执行历史 |
+| `GET` | `/process-instances/:id/steps` | 获取统一步骤轨迹（E6-1：token 步骤 + worker 尝试 + AI 元数据/成本；不含变量值） |
 | `POST` | `/process-instances/:id/replay` | 创建重放会话 |
 | `GET` | `/tasks` | 列出等待中的任务 |
 | `POST` | `/tasks/:task_id/complete` | 完成用户任务 |

@@ -12,6 +12,7 @@
 //! - an idempotency key for side-effect dedup,
 //! - timeout and retry category,
 //! - the model and tool versions used,
+//! - the cost of the execution ([`TaskCost`], E6-1),
 //! - artifact references (E2-3 artifact envelopes).
 //!
 //! The envelope is stored as ONE variable under the reserved key
@@ -43,6 +44,11 @@ pub const AI_TASK_ENVELOPE_KEY: &str = "__task_envelope";
 
 /// The only envelope schema version this build understands.
 pub const AI_TASK_ENVELOPE_SCHEMA_VERSION: u32 = 1;
+
+/// Maximum accepted [`TaskCost::currency`] length in bytes (E6-1): enough
+/// for any ISO 4217 code or provider credit denomination, bounded so the
+/// field cannot be abused as a free-text channel.
+pub const MAX_COST_CURRENCY_BYTES: usize = 8;
 
 /// Derive the execution id: `"<task_id>:<attempt>"`.
 ///
@@ -114,6 +120,12 @@ pub enum AiTaskEnvelopeError {
         /// Human-readable reason naming the offending field.
         reason: String,
     },
+    /// The cost block is invalid (empty or oversized `currency`).
+    #[error("invalid task cost: {reason}")]
+    InvalidCost {
+        /// Human-readable reason naming the offending field.
+        reason: String,
+    },
 }
 
 impl AiTaskEnvelopeError {
@@ -133,6 +145,7 @@ impl AiTaskEnvelopeError {
             AiTaskEnvelopeError::EmptyIdempotencyKey => "ai_task_envelope_invalid_idempotency_key",
             AiTaskEnvelopeError::InvalidTimeout => "ai_task_envelope_invalid_timeout",
             AiTaskEnvelopeError::InvalidSchema { .. } => "ai_task_envelope_invalid_schema",
+            AiTaskEnvelopeError::InvalidCost { .. } => "ai_task_envelope_invalid_cost",
         }
     }
 }
@@ -198,6 +211,36 @@ pub struct ArtifactRef {
     pub media_type: Option<String>,
 }
 
+/// Cost of one AI task execution (E6-1).
+///
+/// Reported by the worker inside the envelope so the step trace can join
+/// model/tool versions with what the attempt cost (money and tokens).
+/// Every field is optional; a partial report is valid. `amount_micros` is
+/// a micro-unit amount in [`currency`](Self::currency) (e.g.
+/// `amount_micros: 1_500_000`, `currency: "USD"` = 1.50 USD) — integers
+/// only, never a float. All numeric fields are `u64`, so non-negative by
+/// construction (a negative JSON number fails to deserialize).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskCost {
+    /// Currency code of [`amount_micros`](Self::amount_micros), e.g.
+    /// `"USD"`. Non-empty, at most 8 bytes when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    /// Billed amount in micro units of `currency` (1_000_000 = 1 unit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_micros: Option<u64>,
+    /// Input tokens consumed by the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_in: Option<u64>,
+    /// Output tokens produced by the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_out: Option<u64>,
+    /// Wall-clock duration of the attempt in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
 /// Typed execution metadata for an AI external task (E3-1).
 ///
 /// Serialized with snake_case JSON keys (matching the variable contract and
@@ -209,7 +252,7 @@ pub struct ArtifactRef {
 /// # Example
 ///
 /// ```
-/// use bpm_engine_core::{execution_id, AiTaskEnvelope, ArtifactRef};
+/// use bpm_engine_core::{execution_id, AiTaskEnvelope, ArtifactRef, TaskCost};
 ///
 /// let envelope = AiTaskEnvelope {
 ///     schema_version: 1,
@@ -219,6 +262,13 @@ pub struct ArtifactRef {
 ///     retry_category: None,
 ///     model: None,
 ///     tools: vec![],
+///     cost: Some(TaskCost {
+///         currency: Some("USD".to_string()),
+///         amount_micros: Some(1_500_000),
+///         tokens_in: Some(1_204),
+///         tokens_out: Some(37),
+///         duration_ms: Some(980),
+///     }),
 ///     artifacts: vec![ArtifactRef {
 ///         uri: "https://storage.example.com/out/report.md".to_string(),
 ///         sha256: None,
@@ -267,6 +317,12 @@ pub struct AiTaskEnvelope {
     /// Tools invoked by the worker while executing the task.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolRef>,
+    /// Cost of the execution (E6-1, additive optional field of envelope
+    /// v1): currency + micro-unit amount, token counts, duration. A
+    /// partial report is valid; all numeric fields are non-negative `u64`
+    /// (negative JSON numbers fail to deserialize).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<TaskCost>,
     /// Artifacts produced by (or consumed by) the task.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactRef>,
@@ -289,6 +345,8 @@ impl AiTaskEnvelope {
     /// - `timeout_secs` > 0 when present
     /// - `model`: non-empty provider/name (and version when present)
     /// - every tool: non-empty name (and version when present)
+    /// - `cost.currency`: non-empty and at most 8 bytes when present
+    ///   (numeric fields are `u64`, non-negative by construction)
     /// - every artifact: passes
     ///   [`validate_artifact_uri`](crate::variable_contract::validate_artifact_uri)
     ///   (URI rules + sha256 = 64 hex when present)
@@ -342,6 +400,27 @@ impl AiTaskEnvelope {
                 return Err(AiTaskEnvelopeError::InvalidToolRef {
                     reason: "tools[].version must not be empty when present".to_string(),
                 });
+            }
+        }
+        if let Some(cost) = &self.cost {
+            // Non-negativity of the numeric fields is enforced by the u64
+            // types themselves (negative JSON fails to deserialize); here
+            // only the currency shape is checked.
+            if let Some(currency) = &cost.currency {
+                if currency.is_empty() {
+                    return Err(AiTaskEnvelopeError::InvalidCost {
+                        reason: "cost.currency must not be empty when present".to_string(),
+                    });
+                }
+                if currency.len() > MAX_COST_CURRENCY_BYTES {
+                    return Err(AiTaskEnvelopeError::InvalidCost {
+                        reason: format!(
+                            "cost.currency must be at most {MAX_COST_CURRENCY_BYTES} bytes \
+                             when present, got {}",
+                            currency.len()
+                        ),
+                    });
+                }
             }
         }
         for artifact in &self.artifacts {
@@ -463,6 +542,13 @@ mod tests {
                     version: None,
                 },
             ],
+            cost: Some(TaskCost {
+                currency: Some("USD".to_string()),
+                amount_micros: Some(1_500_000),
+                tokens_in: Some(1_204),
+                tokens_out: Some(37),
+                duration_ms: Some(980),
+            }),
             artifacts: vec![ArtifactRef {
                 uri: "https://storage.example.com/out/report.md".to_string(),
                 sha256: Some("a".repeat(64)),
@@ -507,6 +593,7 @@ mod tests {
             retry_category: None,
             model: None,
             tools: vec![],
+            cost: None,
             artifacts: vec![],
             input_schema: None,
             output_schema: None,
@@ -537,6 +624,136 @@ mod tests {
             }
             other => panic!("expected a json envelope, got {other:?}"),
         }
+    }
+
+    // --- cost (E6-1, additive optional field of envelope v1) ---------------
+
+    #[test]
+    fn round_trip_envelope_with_cost() {
+        let mut envelope = valid_envelope();
+        envelope.cost = Some(TaskCost {
+            currency: Some("USD".to_string()),
+            amount_micros: Some(2_750_000),
+            tokens_in: Some(9_000),
+            tokens_out: Some(120),
+            duration_ms: Some(1_400),
+        });
+        let value = envelope.to_envelope_value();
+        let mut vars = HashMap::new();
+        vars.insert(AI_TASK_ENVELOPE_KEY.to_string(), value);
+        assert_eq!(
+            AiTaskEnvelope::from_variables(&vars),
+            Some(Ok(envelope.clone()))
+        );
+        assert!(envelope.validate().is_ok());
+    }
+
+    #[test]
+    fn old_envelope_without_cost_still_parses() {
+        // Additive-field compatibility (E6-1): an envelope serialized by a
+        // pre-cost writer carries no `cost` key and must parse with
+        // cost = None.
+        let mut envelope = valid_envelope();
+        envelope.cost = None;
+        let value = envelope.to_envelope_value();
+        let parsed =
+            AiTaskEnvelope::from_envelope_value(&value).expect("old envelope (no cost) must parse");
+        assert_eq!(parsed.cost, None);
+        assert!(parsed.validate().is_ok());
+    }
+
+    #[test]
+    fn partial_cost_is_valid() {
+        let mut envelope = valid_envelope();
+        envelope.cost = Some(TaskCost {
+            currency: None,
+            amount_micros: None,
+            tokens_in: Some(42),
+            tokens_out: None,
+            duration_ms: None,
+        });
+        assert!(envelope.validate().is_ok());
+        let mut envelope = valid_envelope();
+        envelope.cost = Some(TaskCost {
+            currency: Some("EUR".to_string()),
+            amount_micros: None,
+            tokens_in: None,
+            tokens_out: None,
+            duration_ms: None,
+        });
+        assert!(envelope.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_empty_cost_currency() {
+        let mut envelope = valid_envelope();
+        envelope.cost = Some(TaskCost {
+            currency: Some(String::new()),
+            amount_micros: None,
+            tokens_in: None,
+            tokens_out: None,
+            duration_ms: None,
+        });
+        let err = envelope
+            .validate()
+            .expect_err("empty cost.currency must fail");
+        assert!(matches!(err, AiTaskEnvelopeError::InvalidCost { .. }));
+        assert_eq!(err.code(), "ai_task_envelope_invalid_cost");
+        assert!(err.to_string().contains("currency"));
+    }
+
+    #[test]
+    fn validate_oversized_cost_currency() {
+        let mut envelope = valid_envelope();
+        envelope.cost = Some(TaskCost {
+            currency: Some("CREDITS!!".to_string()),
+            amount_micros: None,
+            tokens_in: None,
+            tokens_out: None,
+            duration_ms: None,
+        });
+        let err = envelope
+            .validate()
+            .expect_err("9-byte cost.currency must fail");
+        assert!(matches!(err, AiTaskEnvelopeError::InvalidCost { .. }));
+        assert!(err.to_string().contains('8'));
+        // Exactly 8 bytes is allowed.
+        envelope.cost.as_mut().unwrap().currency = Some("CREDITS!".to_string());
+        assert!(envelope.validate().is_ok());
+    }
+
+    #[test]
+    fn cost_numbers_must_be_non_negative() {
+        // Non-negativity is enforced by the u64 types: a negative JSON
+        // number fails to DESERIALIZE (malformed), not validate.
+        for json in [-1_i64, -12_i64, -3_i64, -100_i64] {
+            let mut envelope = serde_json::to_value(valid_envelope()).unwrap();
+            envelope["cost"] = serde_json::json!({ "tokens_in": json });
+            let raw = VariableEnvelope::Json { val: envelope }.to_storage_string();
+            let err = AiTaskEnvelope::from_envelope_value(&raw)
+                .expect_err("negative cost numbers must be rejected at parse time");
+            assert!(matches!(err, AiTaskEnvelopeError::Malformed { .. }));
+            assert!(
+                err.to_string().contains("expected u64"),
+                "the malformed reason must name the u64 field type: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn cost_denies_unknown_fields() {
+        let mut envelope = serde_json::to_value(valid_envelope()).unwrap();
+        envelope["cost"] = serde_json::json!({ "currency": "USD", "surcharge": 1 });
+        let raw = VariableEnvelope::Json { val: envelope }.to_storage_string();
+        let err = AiTaskEnvelope::from_envelope_value(&raw)
+            .expect_err("unknown cost fields must be rejected");
+        assert!(matches!(err, AiTaskEnvelopeError::Malformed { .. }));
+        assert!(err.to_string().contains("surcharge"));
+        // Top level: `cost` itself is a known field of v1 now.
+        assert!(serde_json::from_value::<TaskCost>(serde_json::json!({
+            "amount_micros": 5
+        }))
+        .is_ok());
     }
 
     // --- execution_id helper ---------------------------------------------------
@@ -891,6 +1108,7 @@ mod tests {
             retry_category: None,
             model: None,
             tools: vec![],
+            cost: None,
             artifacts: vec![],
             input_schema: Some(serde_json::json!({})),
             output_schema: None,
@@ -934,6 +1152,7 @@ mod tests {
                 version: None,
             }),
             tools: vec![],
+            cost: None,
             artifacts: vec![],
             input_schema: None,
             output_schema: None,
@@ -1010,6 +1229,9 @@ mod tests {
             AiTaskEnvelopeError::InvalidSchema {
                 reason: "x".to_string(),
             },
+            AiTaskEnvelopeError::InvalidCost {
+                reason: "x".to_string(),
+            },
         ];
         let codes: Vec<&str> = cases.iter().map(|e| e.code()).collect();
         assert_eq!(
@@ -1024,6 +1246,7 @@ mod tests {
                 "ai_task_envelope_invalid_idempotency_key",
                 "ai_task_envelope_invalid_timeout",
                 "ai_task_envelope_invalid_schema",
+                "ai_task_envelope_invalid_cost",
             ]
         );
     }

@@ -45,6 +45,7 @@ serialized.
 | `retry_category` | `"transient"` \| `"permanent"` | no | Category of the last failure (§9). Recorded only in v1. |
 | `model` | `{provider, name, version?}` | no | The model that executed the task. `provider`/`name` non-empty (and `version` non-empty when present). |
 | `tools` | `[{name, version?}]` | no | Tools invoked while executing. Each `name` non-empty. |
+| `cost` | `{currency?, amount_micros?, tokens_in?, tokens_out?, duration_ms?}` | no | Cost of the execution (E6-1, the first additive optional field — see §11). Every field optional; the numeric fields are non-negative u64 (a negative JSON number is rejected at parse time). `currency` non-empty and ≤ 8 bytes when present (sub-code `ai_task_envelope_invalid_cost`). `amount_micros` is a micro-unit integer in `currency` (1_000_000 = 1 unit), never a float. Surfaced in the `/steps` envelope summaries (`docs/trace.md`). |
 | `artifacts` | `[{uri, sha256?, size?, media_type?}]` | no | Artifacts produced/consumed (inputs and outputs). Each ref passes the E2-3 artifact URI rules (§3 of `docs/variables-and-artifacts.md`): absolute URI, no userinfo, no fragment, ≤ 2048 bytes, `sha256` = exactly 64 hex when present. The engine never dereferences. |
 | `input_schema` | JSON object | no | JSON Schema fragment describing the expected **input variables** of the task. |
 | `output_schema` | JSON object | no | JSON Schema fragment describing the output variables the task promises to produce. |
@@ -150,6 +151,7 @@ client.complete_with_envelope(&task.task_id, worker_id, variables, &envelope).aw
     "timeout_secs": 120,
     "model": { "provider": "openai", "name": "gpt-4o", "version": "2024-08-06" },
     "tools": [ { "name": "web_search", "version": "2.1" } ],
+    "cost": { "currency": "USD", "amount_micros": 1500000, "tokens_in": 1204, "tokens_out": 37, "duration_ms": 980 },
     "artifacts": [ { "uri": "https://storage.example.com/out/report.md", "sha256": "…64 hex…", "size": 4096, "media_type": "text/markdown" } ],
     "input_schema": { "type": "object", "required": ["topic"] },
     "output_schema": { "type": "object", "required": ["summary"] }
@@ -266,6 +268,7 @@ Envelope sub-codes (`AiTaskEnvelopeError::code`, also embedded in
 | `ai_task_envelope_invalid_idempotency_key` | empty `idempotency_key` |
 | `ai_task_envelope_invalid_timeout` | `timeout_secs` = 0 |
 | `ai_task_envelope_invalid_schema` | `input_schema`/`output_schema` not a JSON object |
+| `ai_task_envelope_invalid_cost` | empty or > 8-byte `cost.currency` (numeric fields are u64 — non-negative by construction; a negative JSON number is rejected at parse time as `ai_task_envelope_malformed`) |
 
 Error body shape is the existing `ErrorResponse` with the optional `code`
 field, e.g.:
@@ -288,7 +291,25 @@ field, e.g.:
   `__task_envelope` is treated as opaque (`Malformed` on read,
   `__opaque:` in history), never interpreted.
 - Evolution is intentionally conservative: because `deny_unknown_fields`
-  has been on since day one, even an added OPTIONAL field would be
-  rejected by existing strict readers — so **any field change bumps
-  `schema_version`** and this build reports the old version as
+  has been on since day one, a STRUCTURAL change (renaming/removing
+  fields, changing types, making an optional field required) bumps
+  `schema_version`, and this build reports the old version as
   `ai_task_envelope_unsupported_version` instead of guessing.
+
+**Additive optional field — the one sanctioned evolution path (ADR-007
+style, first exercised by E6-1's `cost`):** a NEW optional field MAY be
+added to envelope v1 without bumping `schema_version`, provided
+
+1. it is optional with a default (`cost` is `Option` — a pre-E6-1 writer
+   produces envelopes without the key and they parse unchanged),
+2. this build's readers accept old envelopes WITHOUT the field (they do
+   — verified by the `old_envelope_without_cost_still_parses` test), and
+3. the forward-compat tradeoff is accepted and documented: an OLDER
+   strict reader (`deny_unknown_fields`) will REJECT a new envelope
+   carrying the field as `ai_task_envelope_malformed` rather than
+   misread it — lossless rejection, never silent misinterpretation.
+   A worker that needs to talk to an older engine simply omits the
+   field.
+
+This mirrors the E2-3/ADR-007 value-envelope evolution: additive and
+optional on the wire, strict everywhere else.

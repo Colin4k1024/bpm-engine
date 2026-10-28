@@ -188,6 +188,27 @@ Returns instance state plus token timelines and external-task history aggregated
 
 ---
 
+#### Get Instance Steps (unified step timeline, E6-1)
+
+```
+GET /process-instances/{instance_id}/steps
+```
+
+One step per `(node_id, token_id)` in causal order, joining token
+transitions, worker lease attempts (lock → complete/fail, a re-lock
+after lease expiry closes the open attempt as `expired`) and the E3-1
+AI task envelope metadata (model/tool versions, cost), keyed by the
+trace id (`trace_id` = the instance id in v1). Read-only aggregation
+over the instance, definition and history stores — no new stores, no
+new event types; sensitive-by-default: the response carries no variable
+values (only event types/timestamps, worker ids, retry counters,
+variable name lists, and envelope metadata summaries; redacted or
+unparsable envelopes degrade to `{"opaque": true}`). Full contract:
+`docs/openapi.yaml` (`StepsResponse`); semantics and design decisions:
+`docs/trace.md`.
+
+---
+
 ### 3.3 Tasks
 
 #### List Pending Tasks
@@ -515,6 +536,7 @@ From **v0.1.0** onward, the following API and semantics are committed to **no br
 - `GET /api/v1/process-instances/:id` — get instance state
 - `GET /api/v1/process-instances/:id/history` — execution history (response: `instance_id` + `events[]` with `sequence`, `category`, `occurred_at`, `payload`)
 - `GET /api/v1/process-instances/:id/trace` — aggregated trace
+- `GET /api/v1/process-instances/:id/steps` — unified step timeline (E6-1: token steps + worker attempts + envelope metadata incl. cost; no variable values; see `docs/trace.md`)
 - External-task APIs: `POST .../external-tasks/fetch-and-lock`, `.../complete`, `.../fail`
 - **History API semantics**: Events are append-only; sequence is globally ordered per process instance; replay produces the same token state; response schema is backward-compatible once released.
 - **Invariant violations**: REST 4xx for invariant violations include `X-Invariant-Violation` header; the header value (kind name) is part of the stable contract.

@@ -40,6 +40,9 @@ pub fn new_envelope(task_id: &str, attempt: u32) -> AiTaskEnvelope {
         retry_category: None,
         model: None,
         tools: Vec::new(),
+        // E6-1: additive core field — compile-only fix, semantics unchanged
+        // (workers opt in by assigning `cost` after `new_envelope`).
+        cost: None,
         artifacts: Vec::new(),
         input_schema: None,
         output_schema: None,
