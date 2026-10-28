@@ -347,9 +347,10 @@ pub struct ExternalTaskFailRequest {
     pub worker_id: String,
     pub error: String,
     pub retry_after_ms: Option<u64>,
-    /// Optional retry category (E3-1): `"transient"` or `"permanent"`.
-    /// Recorded for observability (error message prefix, envelope,
-    /// history, DLQ) — retry BEHAVIOR is unchanged in v1 (E3-2 scope).
+    /// Optional retry category (E3-1 field, E3-2 behavior): `"transient"`
+    /// or `"permanent"`. `permanent` skips the retry loop — the task goes
+    /// straight to Failed with the DLQ + `TokenFailed` path; `transient`
+    /// (or absent) is the legacy decrement-and-requeue behavior.
     #[serde(default)]
     pub category: Option<String>,
     /// Optional AI task envelope (E3-1), validated like on complete. On
@@ -2136,10 +2137,11 @@ pub async fn external_task_fail(
     Path(task_id): Path<String>,
     ValidatedJson(body): ValidatedJson<ExternalTaskFailRequest>,
 ) -> Result<Json<CompleteTaskResponse>, Response> {
-    // E3-1: optional retry category, validated up front. v1 semantics: the
-    // category is RECORDED for observability (error message prefix,
-    // envelope, history, DLQ) — retry behavior is unchanged; acting on it
-    // is E3-2's structured-failure scope.
+    // E3-1: optional retry category, validated up front. E3-2 semantics:
+    // `permanent` is BEHAVIORAL — the task skips the retry loop and goes
+    // straight to Failed (DLQ + TokenFailed, exactly like retry
+    // exhaustion); `transient` (or absent) keeps the legacy
+    // decrement-and-requeue behavior.
     let retry_category = match body.category.as_deref() {
         None => None,
         Some("transient") => Some(RetryCategory::Transient),
@@ -2159,6 +2161,7 @@ pub async fn external_task_fail(
                 .into_response());
         }
     };
+    let permanent = matches!(retry_category, Some(RetryCategory::Permanent));
     // E3-1: optional AI task envelope, validated exactly like on complete
     // (4xx task_envelope_invalid) BEFORE the store mutates the task. A
     // given category is recorded into the envelope's retry_category.
@@ -2182,15 +2185,17 @@ pub async fn external_task_fail(
                 .into_response());
         }
     }
-    // v1 fail-path decision (documented in docs/ai-task-envelope.md): the
-    // store's fail() has no variables channel, and the store trait is not
-    // extended for E3-1 — so the category is persisted as a structured
-    // JSON prefix on the error message (`{"retry_category":...}: <error>`,
-    // surviving task.error_message, ExternalTaskFailed history and the
-    // DLQ), and the envelope is recorded in the ExternalTaskFailed history
-    // payload only. The envelope is deliberately NOT embedded in the error
-    // message: schemas can be multi-KB and that path bypasses history
-    // redaction.
+    // Fail-path persistence decision (E3-1, refined by E3-2): the store's
+    // `fail()` still has no variables channel — the category is persisted
+    // as a structured JSON prefix on the error message
+    // (`{"retry_category":...}: <error>`, surviving task.error_message,
+    // ExternalTaskFailed history and the DLQ), and the envelope is
+    // recorded in the ExternalTaskFailed history payload only. The envelope
+    // is deliberately NOT embedded in the error message: schemas can be
+    // multi-KB and that path bypasses history redaction. E3-2 adds the
+    // BEHAVIOR: the permanent flag routes the store call to the
+    // skip-retries path (task straight to Failed, DLQ + TokenFailed fire
+    // exactly as retry exhaustion does today).
     let error_message = match retry_category {
         Some(category) => format!(
             "{}: {}",
@@ -2207,6 +2212,7 @@ pub async fn external_task_fail(
             &body.worker_id,
             error_message.clone(),
             retry_after,
+            permanent,
         )
         .await
         .map_err(external_task_error_response)?;
@@ -2270,8 +2276,10 @@ pub async fn external_task_fail(
         "external task failed"
     );
     if task.state == ExternalTaskState::Failed {
-        // Insert into dead letter queue (input variables only — the
-        // fail-path envelope is in the ExternalTaskFailed history event).
+        // Reached either by retry exhaustion (legacy) or by a permanent
+        // category fail (E3-2 fast path): insert into dead letter queue
+        // (input variables only — the fail-path envelope is in the
+        // ExternalTaskFailed history event) and terminate the token.
         let dl_entry = bpm_engine_storage::DeadLetterEntry {
             id: uuid::Uuid::new_v4().to_string(),
             task_id: task.task_id.clone(),

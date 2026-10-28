@@ -294,12 +294,43 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
         worker_id: &str,
         error: String,
         retry_after: Option<Duration>,
+        permanent: bool,
     ) -> Result<(), bpm_engine_storage::ExternalTaskError> {
         let client = self
             .pool
             .get()
             .await
             .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?;
+
+        if permanent {
+            // E3-2 structured failure: skip the retry loop entirely — no
+            // decrement, no requeue. The task moves straight to the terminal
+            // Failed state (same downstream path as retry exhaustion).
+            let now = unix_epoch_secs().to_string();
+            let result = client
+                .execute(
+                    r#"
+                    UPDATE external_task
+                    SET state = 'Failed',
+                        error_message = $3,
+                        lock_expire_at = NULL,
+                        worker_id = NULL,
+                        updated_at = $4,
+                        version = version + 1
+                    WHERE id = $1 AND worker_id = $2 AND state = 'Locked'
+                    "#,
+                    &[&task_id, &worker_id, &error, &now],
+                )
+                .await
+                .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?;
+
+            if result == 0 {
+                return Err(bpm_engine_storage::ExternalTaskError::TaskNotFound {
+                    task_id: task_id.to_string(),
+                });
+            }
+            return Ok(());
+        }
 
         // Get current retries
         let row = client
@@ -364,7 +395,10 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                 });
             }
         } else {
-            // No more retries, mark as failed
+            // No more retries, mark as failed. Clear the lease columns
+            // like the permanent-failure path and the memory adapter: a
+            // terminal row must not carry a stale owner/expiry (the
+            // worker no longer holds the lease and will never re-lock).
             let now = unix_epoch_secs().to_string();
             let result = client
                 .execute(
@@ -372,6 +406,8 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                     UPDATE external_task
                     SET state = 'Failed',
                         error_message = $3,
+                        lock_expire_at = NULL,
+                        worker_id = NULL,
                         updated_at = $4,
                         version = version + 1
                     WHERE id = $1 AND worker_id = $2 AND state = 'Locked'

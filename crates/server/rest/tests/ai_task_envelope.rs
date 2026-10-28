@@ -679,11 +679,12 @@ async fn user_task_complete_with_reserved_key_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// Fail path: category + envelope (v1: recorded, retry behavior unchanged)
+// Fail path: category + envelope (E3-2: transient recorded + requeued;
+// permanent is behavioral — covered by tests/worker_context.rs)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn fail_with_category_and_envelope_recorded() {
+async fn fail_with_transient_category_and_envelope_recorded() {
     let server = spawn_server(&memory_config()).await;
     let client = reqwest::Client::new();
     deploy(&client, &server, AI_WORK_BPMN).await;
@@ -694,7 +695,7 @@ async fn fail_with_category_and_envelope_recorded() {
     let task = fetch_and_lock(&client, &server, "w-fail", "ai-work").await;
     let task_id = task["task_id"].as_str().unwrap().to_string();
 
-    // Fail WITH category + envelope: accepted (200).
+    // Fail WITH transient category + envelope: accepted (200).
     let resp = client
         .post(format!(
             "{}/api/v1/external-tasks/{}/fail",
@@ -704,7 +705,7 @@ async fn fail_with_category_and_envelope_recorded() {
             "worker_id": "w-fail",
             "error": "model over quota",
             "retry_after_ms": 5_000,
-            "category": "permanent",
+            "category": "transient",
             "envelope": envelope_json(&format!("{}:0", task_id)),
         }))
         .send()
@@ -724,15 +725,16 @@ async fn fail_with_category_and_envelope_recorded() {
         .expect("task row");
     let error_message = stored_task.error_message.as_deref().expect("error_message");
     assert!(
-        error_message.starts_with(r#"{"retry_category":"permanent"}: model over quota"#),
+        error_message.starts_with(r#"{"retry_category":"transient"}: model over quota"#),
         "structured category prefix missing: {error_message}"
     );
-    // v1: retry behavior UNCHANGED — the task returns to Ready (retries
-    // remain), "permanent" does not shortcut to the DLQ.
+    // E3-2: TRANSIENT keeps the legacy retry behavior — the task returns
+    // to Ready (retries remain). (PERMANENT is now behavioral: straight to
+    // Failed + DLQ — proven in tests/worker_context.rs.)
     assert_eq!(
         stored_task.state,
         ExternalTaskState::Ready,
-        "permanent category must not change retry behavior in v1"
+        "transient category must keep the retry behavior"
     );
     // The store's fail path has no variables channel: the task's input
     // variables are unchanged (no envelope merged there).
@@ -754,12 +756,12 @@ async fn fail_with_category_and_envelope_recorded() {
     // The category given on fail is folded into the envelope.
     assert_eq!(
         parsed.retry_category,
-        Some(bpm_engine_core::RetryCategory::Permanent)
+        Some(bpm_engine_core::RetryCategory::Transient)
     );
     // Everything else round-trips unchanged.
     let mut expected: AiTaskEnvelope =
         serde_json::from_value(envelope_json(&format!("{}:0", task_id))).unwrap();
-    expected.retry_category = Some(bpm_engine_core::RetryCategory::Permanent);
+    expected.retry_category = Some(bpm_engine_core::RetryCategory::Transient);
     assert_eq!(parsed, expected);
 
     server.stop().await;

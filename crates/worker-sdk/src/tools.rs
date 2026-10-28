@@ -121,9 +121,12 @@ pub const REDACTION_MASK: &str = "***";
 /// `ExternalTaskFailed` history payload and the DLQ.
 ///
 /// Retry policy: the [`From`] impl uses `retry_after: None` (engine default
-/// schedule). Notably `tool_not_allowed` / `tool_requires_approval` /
-/// `credential_missing` are permanent until the task inputs or the worker's
-/// environment change — acting on that distinction is E3-2 scope.
+/// schedule). Since E3-2 the category is behavioral: `tool_not_allowed`,
+/// `tool_requires_approval` and `credential_missing` map to
+/// `category: Some(RetryCategory::Permanent)` — no retry will fix an
+/// allowlist, approval or environment problem, so the engine takes the
+/// task straight to Failed + DLQ. `tool_execution_failed` stays transient
+/// (the tool itself may succeed on the next attempt).
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ToolError {
     /// The tool is not registered in this worker's allowlist (deny by
@@ -191,10 +194,29 @@ impl From<ToolError> for TaskResult {
     /// Map a tool error to a task failure whose message carries the code
     /// (`"<code>: <message>"`) — readable in the engine's error message,
     /// history and DLQ. `retry_after` is `None` (engine default schedule).
+    ///
+    /// E3-2 category: allowlist / approval / credential errors are
+    /// **permanent** (retrying cannot fix the worker's configuration, so
+    /// the engine skips the retry loop → Failed + DLQ); a tool that merely
+    /// failed to execute stays **transient**.
     fn from(err: ToolError) -> Self {
+        let category = match &err {
+            ToolError::ToolExecutionFailed { .. } => None,
+            ToolError::ToolNotAllowed { .. }
+            | ToolError::ToolRequiresApproval { .. }
+            | ToolError::CredentialMissing { .. } => {
+                Some(bpm_engine_core::RetryCategory::Permanent)
+            }
+            // Registration-time codes never reach the fail path, but if
+            // they ever do they are configuration problems: permanent.
+            ToolError::ToolAlreadyRegistered { .. } | ToolError::InvalidToolName => {
+                Some(bpm_engine_core::RetryCategory::Permanent)
+            }
+        };
         TaskResult::Fail {
             error: format!("{}: {}", err.code(), err),
             retry_after: None,
+            category,
         }
     }
 }
@@ -1441,10 +1463,25 @@ mod tests {
             let message = err.to_string();
             let result: TaskResult = err.into();
             match result {
-                TaskResult::Fail { error, retry_after } => {
+                TaskResult::Fail {
+                    error,
+                    retry_after,
+                    category,
+                } => {
                     assert!(error.starts_with(&format!("{code}: ")), "got {error:?}");
                     assert!(error.contains(&message), "got {error:?}");
                     assert!(retry_after.is_none());
+                    // E3-2: policy-boundary codes are permanent;
+                    // tool_execution_failed is transient (None).
+                    assert_eq!(
+                        category,
+                        if code == "tool_execution_failed" {
+                            None
+                        } else {
+                            Some(bpm_engine_core::RetryCategory::Permanent)
+                        },
+                        "unexpected category for code {code}"
+                    );
                 }
                 TaskResult::Complete { .. } => panic!("tool errors must map to Fail"),
             }
@@ -1530,6 +1567,7 @@ mod tests {
                 Err(e) => TaskResult::Fail {
                     error: format!("{}: {}", e.code(), e),
                     retry_after: None,
+                    category: None,
                 },
             }
         }

@@ -405,7 +405,7 @@ code is a breaking change**):
 | `encryption_key_not_configured` | 400 | `encrypted` requested while `BPM_VARIABLE_ENCRYPTION_KEY` is unset |
 | `task_envelope_invalid` | 400 | AI task envelope failed validation (E3-1, sub-code in message) |
 | `reserved_variable_key` | 400 | User-supplied `__task_envelope` variable (E3-1) |
-| `invalid_retry_category` | 400 | fail `category` is not `transient`/`permanent` (E3-1) |
+| `invalid_retry_category` | 400 | fail `category` is not `transient`/`permanent` (E3-1; the category is behavioral since E3-2: `permanent` skips the retry loop — straight to `Failed` + DLQ) |
 | `missing_required_fields` | 400 | user-task complete without the form's required fields |
 | `task_not_found` | 400 | External-task store: unknown task (kept 400 for compat) |
 | `task_not_locked` | 400 | External-task store: task not in the Locked state |

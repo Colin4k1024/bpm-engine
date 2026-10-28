@@ -80,6 +80,7 @@ pub enum ExternalTaskError {
 ///    └──fail (retries > 0)────┘
 ///    │
 ///    └──fail (retries = 0)────▶ FAILED
+///              LOCKED ──fail(permanent)──▶ FAILED   (E3-2: no retry)
 /// ```
 ///
 /// # Concurrency model
@@ -121,12 +122,20 @@ pub trait ExternalTaskStore: Send + Sync {
     ) -> Result<(), ExternalTaskError>;
 
     /// Fail: retries -= 1; if retries > 0 -> READY else -> FAILED.
+    ///
+    /// With `permanent = true` (E3-2 structured failure) the retry loop is
+    /// skipped entirely: the task moves straight to FAILED (no decrement, no
+    /// requeue) — the same terminal path as retry exhaustion (DLQ +
+    /// `TokenFailed` are the REST layer's concern, exactly as for retry
+    /// exhaustion). Transient callers pass `false` and get the legacy
+    /// decrement-and-requeue behavior.
     async fn fail(
         &self,
         task_id: &str,
         worker_id: &str,
         error: String,
         retry_after: Option<Duration>,
+        permanent: bool,
     ) -> Result<(), ExternalTaskError>;
 
     /// Reclaim LOCKED tasks whose lock_expire_at < now to READY (plan §9).

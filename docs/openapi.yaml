@@ -776,9 +776,14 @@ paths:
       description: |
         Decrements retries; at zero retries the task moves to Failed and
         is enqueued to the dead letter queue, with a `TokenFailed` event.
-        E3-1: optional `category` (`transient`|`permanent`, else 400
-        `invalid_retry_category`) and `envelope` are recorded for
-        observability; retry behavior is unchanged (E3-2 scope).
+        E3-2 structured failure: optional `category`
+        (`transient`|`permanent`, else 400 `invalid_retry_category`):
+        `permanent` is BEHAVIORAL — the task skips the retry loop and goes
+        straight to Failed (DLQ + `TokenFailed`, exactly like retry
+        exhaustion; no redelivery). `transient` (or absent) keeps the
+        legacy decrement-and-requeue behavior. The category is also
+        recorded for observability (structured `error_message` prefix,
+        `envelope`, history, DLQ).
       tags: [ExternalTasks]
       parameters:
         - $ref: "#/components/parameters/TaskId"
@@ -1633,8 +1638,12 @@ components:
           type: string
           enum: [transient, permanent]
           description: |
-            E3-1 retry category, recorded for observability; retry
-            behavior is unchanged in v1.
+            E3-2 retry category. `permanent`: the task skips the retry
+            loop — straight to Failed with the DLQ + `TokenFailed` path
+            (no redelivery). `transient`: the legacy
+            decrement-and-requeue behavior. Absent behaves as `transient`
+            (backward compatible). Also recorded for observability (the
+            structured `error_message` prefix).
         envelope:
           $ref: "#/components/schemas/AiTaskEnvelope"
 

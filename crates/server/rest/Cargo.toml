@@ -62,6 +62,7 @@ observability = ["bpm-engine/observability", "metrics", "metrics-exporter-promet
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+async-trait = "0.1"
 testcontainers = "0.15"
 testcontainers-modules = { version = "0.3", features = ["postgres"] }
 bpm-engine-worker-sdk = { path = "../../worker-sdk", version = "0.2.0" }

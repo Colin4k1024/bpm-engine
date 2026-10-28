@@ -169,7 +169,7 @@ async fn fail_decrements_retries_and_returns_to_ready() {
         .unwrap();
 
     // First failure — retries go from 2 to 1, task returns to READY
-    repo.fail(&task_id, "worker-1", "timeout".to_string(), None)
+    repo.fail(&task_id, "worker-1", "timeout".to_string(), None, false)
         .await
         .unwrap();
 
@@ -190,9 +190,15 @@ async fn fail_decrements_retries_and_returns_to_ready() {
     assert_eq!(tasks2.len(), 1);
 
     // Second failure — retries go from 1 to 0, task goes to FAILED
-    repo.fail(&task_id, "worker-2", "still failing".to_string(), None)
-        .await
-        .unwrap();
+    repo.fail(
+        &task_id,
+        "worker-2",
+        "still failing".to_string(),
+        None,
+        false,
+    )
+    .await
+    .unwrap();
 
     let task = repo.get(&task_id).await.unwrap().unwrap();
     assert_eq!(task.state, ExternalTaskState::Failed);

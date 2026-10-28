@@ -1,8 +1,15 @@
 //! Graceful shutdown example: listen for SIGINT (Ctrl+C), then stop the worker after the current poll cycle.
 //!
+//! E3-2: on shutdown the worker ALSO signals every in-flight handler through
+//! `ctx.cancelled()` and waits for them (up to `WorkerConfig::shutdown_grace`,
+//! default = lock_duration) before exiting; handlers that poll `ctx.cancelled()`
+//! finish promptly and still submit their result. Handlers that ignore
+//! cancellation past the grace are aborted — their leases expire and the engine
+//! redelivers the tasks (at-least-once), like a crash.
+//!
 //! Run the Engine first: `cargo run -p bpm-engine-server-rest`
 //! Then: `cargo run -p bpm-engine-worker-sdk --example graceful_shutdown`
-//! Press Ctrl+C to shut down; the worker will finish the current iteration and exit.
+//! Press Ctrl+C to shut down.
 
 use bpm_engine_worker_sdk::{
     EngineClient, ExternalTask, TaskContext, TaskHandler, TaskResult, Worker, WorkerConfig,
