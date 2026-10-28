@@ -49,6 +49,12 @@ struct FailRequest {
     error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     retry_after_ms: Option<u64>,
+    /// E3-2 structured failure: `Some(RetryCategory::Permanent)` skips the
+    /// engine's retry loop (task straight to Failed + DLQ); `None` (or
+    /// `Transient`) is the legacy decrement-and-requeue behavior. Omitted
+    /// from the JSON body when `None` — byte-identical to a legacy worker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    category: Option<bpm_engine_core::RetryCategory>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,12 +184,21 @@ impl EngineClient {
     }
 
     /// Fail a task.
+    ///
+    /// `category` (E3-2): `Some(RetryCategory::Permanent)` skips the
+    /// engine's retry loop — the task goes straight to `Failed` with the
+    /// dead-letter + `TokenFailed` path (use for failures that will not
+    /// resolve on retry: bad input, policy refusal). `None` or
+    /// `Some(RetryCategory::Transient)` keeps the legacy
+    /// decrement-and-requeue behavior; `None` is omitted from the wire
+    /// entirely (backward compatible).
     pub async fn fail(
         &self,
         task_id: &str,
         worker_id: &str,
         error: String,
         retry_after: Option<Duration>,
+        category: Option<bpm_engine_core::RetryCategory>,
     ) -> Result<(), ClientError> {
         let url = self.url(&format!("/{}/fail", task_id));
         let retry_after_ms = retry_after.map(|d| d.as_millis() as u64);
@@ -191,6 +206,7 @@ impl EngineClient {
             worker_id: worker_id.to_string(),
             error,
             retry_after_ms,
+            category,
         };
         debug!(%url, "fail");
         let res = self

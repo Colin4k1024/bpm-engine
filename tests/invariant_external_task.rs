@@ -79,7 +79,7 @@ async fn external_task_retries_monotonic() {
         )
         .await
         .unwrap();
-    repo.fail(&task_id, "worker-1", "error".to_string(), None)
+    repo.fail(&task_id, "worker-1", "error".to_string(), None, false)
         .await
         .unwrap();
     let task = repo.get(&task_id).await.unwrap().unwrap();
@@ -94,7 +94,7 @@ async fn external_task_retries_monotonic() {
         )
         .await
         .unwrap();
-    repo.fail(&task_id, "worker-1", "error2".to_string(), None)
+    repo.fail(&task_id, "worker-1", "error2".to_string(), None, false)
         .await
         .unwrap();
     let task = repo.get(&task_id).await.unwrap().unwrap();

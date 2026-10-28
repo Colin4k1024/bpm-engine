@@ -1189,9 +1189,9 @@ fn pin_worker_sdk_surface() {
     let worker_builder: fn() -> WorkerBuilder = Worker::builder;
     let _ = worker_builder;
 
-    // `WorkerConfig`: constructed, all 7 public fields read (worker_id,
+    // `WorkerConfig`: constructed, all 8 public fields read (worker_id,
     // max_tasks, lock_duration, poll_interval, concurrency_limit,
-    // fetch_retry_max, fetch_retry_backoff).
+    // fetch_retry_max, fetch_retry_backoff, shutdown_grace).
     let config = WorkerConfig::new("surface-worker");
     let _ = (
         config.worker_id.clone(),
@@ -1201,6 +1201,7 @@ fn pin_worker_sdk_surface() {
         config.concurrency_limit,
         config.fetch_retry_max,
         config.fetch_retry_backoff,
+        config.shutdown_grace,
     );
 
     // `ExternalTask` (the worker view): struct literal, every public field
@@ -1225,14 +1226,36 @@ fn pin_worker_sdk_surface() {
         let _ = format!("{:?}{:?}", task.token_id, task.process_instance_id);
     }
 
-    // `TaskResult`: both variants with their fields bound.
+    // `TaskResult`: both variants with their fields bound (E3-2 adds the
+    // `category` field to `Fail`).
     let task_result = TaskResult::Complete {
         variables: HashMap::new(),
     };
     let _ = match &task_result {
         TaskResult::Complete { variables } => format!("Complete({variables:?})"),
-        TaskResult::Fail { error, retry_after } => format!("Fail({error}{retry_after:?})"),
+        TaskResult::Fail {
+            error,
+            retry_after,
+            category,
+        } => format!("Fail({error}{retry_after:?}{category:?})"),
     };
+
+    // E3-2 worker-context surface: spawn handle, cancellation, renewal,
+    // timeout, idempotency guard (pinned by name / by construction).
+    use bpm_engine::bpm_engine_worker_sdk::worker::WorkerHandle;
+    use bpm_engine::bpm_engine_worker_sdk::{
+        derive_key, with_timeout, IdempotencyGuard, LeaseRenewalGuard,
+    };
+    let _ = WorkerConfig::new("surface-worker").shutdown_grace(std::time::Duration::from_secs(5));
+    let _: Option<WorkerHandle> = None;
+    let _: Option<LeaseRenewalGuard> = None;
+    let _ = derive_key("task-1", "input");
+    let _guard = IdempotencyGuard::with_capacity_bound(16);
+    let _fut = with_timeout(std::time::Duration::from_secs(1), async {});
+    let mut guard = IdempotencyGuard::new();
+    let _ = guard.check_and_mark("k");
+    let _ = guard.unmark("k");
+    let _ = guard.is_marked("k");
 
     // Type names for items whose fields are not public (pinned by name).
     let _: Option<Worker> = None;

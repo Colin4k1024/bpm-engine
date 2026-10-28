@@ -449,6 +449,7 @@ async fn external_task_store_fail_and_reclaim() {
             "worker-1",
             "timeout".to_string(),
             Some(std::time::Duration::from_millis(1)),
+            false,
         )
         .await
         .unwrap();
@@ -473,6 +474,71 @@ async fn external_task_store_fail_and_reclaim() {
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     let reclaimed = store.reclaim_expired_locks().await.unwrap();
     assert!(reclaimed >= 1, "expired lock should be reclaimed");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn external_task_store_fail_permanent_skips_retries() {
+    use bpm_engine_adapter_postgres::PostgresExternalTaskStore;
+    use bpm_engine_core::ExternalTaskState;
+    use bpm_engine_storage::ExternalTaskStore;
+    use std::collections::HashMap;
+
+    let (pool, _container) = setup_pool().await;
+    insert_test_instance(&pool, "inst-et-perm").await;
+    let store = PostgresExternalTaskStore::new(pool);
+
+    // E3-2: permanent failure skips the retry loop — straight to Failed, no
+    // decrement, no requeue (fetch finds nothing).
+    let task_id = store
+        .create(
+            "tok-et-perm",
+            "inst-et-perm",
+            "email",
+            3,
+            60,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let tasks = store
+        .fetch_and_lock(
+            "worker-1",
+            &["email".to_string()],
+            10,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1);
+
+    store
+        .fail(
+            &task_id,
+            "worker-1",
+            r#"{"retry_category":"permanent"}: bad input"#.to_string(),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+
+    let task = store.get(&task_id).await.unwrap().unwrap();
+    assert_eq!(task.state, ExternalTaskState::Failed);
+    assert_eq!(task.retries, 3, "permanent fail must not decrement retries");
+    assert!(task.error_message.unwrap().contains("permanent"));
+
+    // No redelivery: the terminal task is never fetchable again.
+    let refetched = store
+        .fetch_and_lock(
+            "worker-2",
+            &["email".to_string()],
+            10,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    assert!(refetched.is_empty(), "failed task must not be redelivered");
 }
 
 #[tokio::test]
@@ -661,7 +727,7 @@ async fn external_task_store_complete_expiry_guard_and_epoch_updated_at() {
         .unwrap();
     assert_eq!(tasks.len(), 1);
     store
-        .fail(&task_id_2, "worker-1", "boom".to_string(), None)
+        .fail(&task_id_2, "worker-1", "boom".to_string(), None, false)
         .await
         .unwrap();
     let task = store.get(&task_id_2).await.unwrap().unwrap();

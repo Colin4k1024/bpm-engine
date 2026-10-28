@@ -4,61 +4,60 @@
 //! eventually reclaim the lock and another worker may receive the same task. Use an idempotency
 //! key (e.g. task_id or instance_id + node_id) to check "already processed?" before doing work.
 //!
+//! E3-2: the SDK ships `IdempotencyGuard` + `derive_key` for exactly this pattern. The guard is
+//! per-process only (bounded in-memory map): it survives redelivery within THIS process's
+//! lifetime. Cross-restart / multi-process dedup needs a durable store — see docs/worker-context.md §5
+//! and the E3-1 envelope's idempotency_key for the engine-side hook.
+//!
 //! Run the Engine first: `cargo run -p bpm-engine-server-rest`
 //! Then: `cargo run -p bpm-engine-worker-sdk --example idempotency`
 
+use async_trait::async_trait;
 use bpm_engine_worker_sdk::{
-    EngineClient, ExternalTask, TaskContext, TaskHandler, TaskResult, Worker, WorkerConfig,
+    derive_key, EngineClient, ExternalTask, IdempotencyGuard, TaskContext, TaskHandler, TaskResult,
+    Worker, WorkerConfig,
 };
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::time::Duration;
 
-/// In-memory set of completed task ids (in production, use a DB or cache like Redis).
-static PROCESSED: Mutex<Option<HashMap<String, ()>>> = Mutex::new(None);
-
-fn mark_done(id: &str) {
-    let mut g = PROCESSED.lock().unwrap();
-    if g.is_none() {
-        *g = Some(HashMap::new());
-    }
-    g.as_mut().unwrap().insert(id.to_string(), ());
+struct IdempotentPaymentHandler {
+    /// Per-process dedup guard (in production, add a durable store).
+    guard: tokio::sync::Mutex<IdempotencyGuard>,
 }
 
-fn already_done(id: &str) -> bool {
-    let g = PROCESSED.lock().unwrap();
-    g.as_ref().is_some_and(|m| m.contains_key(id))
-}
-
-struct IdempotentPaymentHandler;
-
-#[async_trait::async_trait]
+#[async_trait]
 impl TaskHandler for IdempotentPaymentHandler {
     fn task_type(&self) -> &str {
         "payment"
     }
 
     async fn handle(&self, task: ExternalTask, _ctx: TaskContext) -> TaskResult {
-        let idempotency_key = &task.task_id;
-        if already_done(idempotency_key) {
-            tracing::info!(task_id = %task.task_id, "already processed (idempotency), completing");
-            let mut variables = HashMap::new();
-            variables.insert("status".to_string(), "PAID".to_string());
-            return TaskResult::Complete { variables };
-        }
-
         let amount = task
             .variables
             .get("amount")
             .cloned()
             .unwrap_or_else(|| "0".into());
+
+        // Stable key: same task + same inputs => same key, so a redelivered
+        // attempt is recognized (per process — see the module docs).
+        let key = derive_key(&task.task_id, &amount);
+
+        let mut guard = self.guard.lock().await;
+        if !guard.check_and_mark(&key) {
+            tracing::info!(task_id = %task.task_id, "already processed (idempotent), completing");
+            let mut variables = HashMap::new();
+            variables.insert("status".to_string(), "PAID".to_string());
+            return TaskResult::Complete { variables };
+        }
+        drop(guard);
+
         tracing::info!(task_id = %task.task_id, amount = %amount, "processing payment");
         tokio::time::sleep(Duration::from_millis(100)).await;
-
-        mark_done(idempotency_key);
         let mut variables = HashMap::new();
         variables.insert("status".to_string(), "PAID".to_string());
         variables.insert("amount".to_string(), amount);
+        // Side effect done: the key stays marked. If the attempt had FAILED
+        // instead, call guard.unmark(&key) so the retry may run.
         TaskResult::Complete { variables }
     }
 }
@@ -74,11 +73,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let worker = Worker::builder()
         .client(client)
-        .handler(IdempotentPaymentHandler)
+        .handler(IdempotentPaymentHandler {
+            guard: tokio::sync::Mutex::new(IdempotencyGuard::new()),
+        })
         .config(config)
         .build();
 
-    tracing::info!("idempotency example worker; task_id is used as idempotency key");
+    tracing::info!("idempotent example worker; task_id is used as idempotency key");
     worker.start().await;
     Ok(())
 }

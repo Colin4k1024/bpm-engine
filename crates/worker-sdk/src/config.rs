@@ -14,6 +14,14 @@ pub struct WorkerConfig {
     pub fetch_retry_max: usize,
     /// Initial backoff duration for fetch retries; doubles each retry, capped at 30s (default 1s).
     pub fetch_retry_backoff: Duration,
+    /// How long a graceful shutdown (`Worker::start` exit on Ctrl-C/SIGTERM,
+    /// `start_until_signal`, or `WorkerHandle::shutdown`) waits for in-flight
+    /// handlers to finish after they are signalled (E3-2). Handlers that
+    /// ignore cancellation past the grace are aborted — their leases expire
+    /// and the engine redelivers the tasks (at-least-once), like a crash.
+    /// Defaults to `lock_duration`: once the lease has expired the engine
+    /// may redeliver anyway, so waiting longer buys little.
+    pub shutdown_grace: Duration,
 }
 
 impl WorkerConfig {
@@ -26,6 +34,7 @@ impl WorkerConfig {
             concurrency_limit: None,
             fetch_retry_max: 5,
             fetch_retry_backoff: Duration::from_secs(1),
+            shutdown_grace: Duration::from_secs(30),
         }
     }
 
@@ -58,6 +67,14 @@ impl WorkerConfig {
     /// Set initial backoff for fetch retries. Default 1s.
     pub fn fetch_retry_backoff(mut self, d: Duration) -> Self {
         self.fetch_retry_backoff = d;
+        self
+    }
+
+    /// Set the graceful-shutdown grace period (E3-2): how long shutdown
+    /// waits for in-flight handlers after signalling them. Default
+    /// `lock_duration` (30 s with the default lock).
+    pub fn shutdown_grace(mut self, d: Duration) -> Self {
+        self.shutdown_grace = d;
         self
     }
 }

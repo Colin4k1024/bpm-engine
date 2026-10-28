@@ -131,9 +131,10 @@ The **Rust Worker SDK** lets you implement external-task workers that poll the e
 ## Core types
 
 - **EngineClient** — HTTP client for the engine REST API (base URL, fetch-and-lock, complete, fail).
-- **WorkerConfig** — Worker id, max tasks, lock duration, poll interval.
+- **WorkerConfig** — Worker id, max tasks, lock duration, poll interval, shutdown grace.
 - **TaskHandler** — Trait you implement: `task_type()` and `handle(task, ctx) -> TaskResult`.
-- **Worker** — Poll loop: fetches tasks, dispatches to your handler, completes or fails.
+- **Worker** — Poll loop: fetches tasks, dispatches to your handler, completes or fails. `Worker::spawn()` returns a `WorkerHandle` with graceful `shutdown(grace)`; `start()`/`start_until_signal()` wire Ctrl-C/SIGTERM.
+- **TaskContext** — Per-task execution context (E3-2): cancellation token, lock extension, auto lease renewal, worker/task ids. See [docs/worker-context.md](worker-context.md).
 
 ---
 
@@ -191,7 +192,9 @@ worker.start().await;
 ## Task result
 
 - **TaskResult::Complete { variables }** — Complete the task and merge variables back into the process.
-- **TaskResult::Fail { error, retry_after }** — Fail the task; engine may retry according to retries/timeout.
+- **TaskResult::Fail { error, retry_after, category }** — Fail the task. `category` (E3-2) is optional: `None`/`Some(Transient)` retries as before (engine decrements retries and requeues); `Some(RetryCategory::Permanent)` skips the retry loop — the task goes straight to `Failed` with the DLQ + `TokenFailed` path (use for failures that will not resolve on retry: bad input, policy refusal). On the wire `None` is omitted entirely (backward compatible).
+
+Long-running or fault-tolerant handlers should also look at the execution-context helpers — cancellation, auto lease renewal (`run_with_renewal`), the `with_timeout` helper and the `IdempotencyGuard` — documented in [docs/worker-context.md](worker-context.md).
 
 ---
 
@@ -212,6 +215,7 @@ Through the `bpm-engine` facade the worker SDK is available behind the default-o
 
 ## See also
 
+- [worker-context.md](worker-context.md) — worker execution context (E3-2): cancellation, auto lease renewal, timeout, permanent vs transient failure, idempotency helpers
 - [dsl-guide.md](dsl-guide.md) — the JSON DSL entry (agents), sharing the same compiler
 - [bpmn.md](bpmn.md) — the BPMN 2.0 XML entry (interop)
 - [api-spec.md](api-spec.md) — REST API (external-tasks endpoints)

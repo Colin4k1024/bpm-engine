@@ -118,7 +118,7 @@ async fn external_task_fail_goes_to_dlq_when_retries_exhausted() {
     assert_eq!(tasks[0].retries, 1);
 
     // Fail it — retries drop to 0, state = Failed
-    repo.fail(&task_id, "worker-1", "boom".to_string(), None)
+    repo.fail(&task_id, "worker-1", "boom".to_string(), None, false)
         .await
         .unwrap();
     let task = repo.get(&task_id).await.unwrap().unwrap();

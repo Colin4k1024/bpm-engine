@@ -237,6 +237,7 @@ async fn e2e_external_task_fail_and_retry() {
         "worker-1",
         "timeout".to_string(),
         Some(Duration::from_secs(1)),
+        false,
     )
     .await
     .unwrap();

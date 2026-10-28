@@ -152,9 +152,12 @@ impl AiTaskEnvelopeError {
 
 /// Retry category reported by a worker for a failed attempt.
 ///
-/// v1 semantics: **recorded only** — carried in the envelope / error message
-/// for observability and the dead-letter queue; the engine's retry behavior
-/// is unchanged (transient vs. permanent retry policy is E3-2 scope).
+/// E3-2 semantics: **behavioral** — `Permanent` skips the engine's retry
+/// loop (the task goes straight to `Failed` with the DLQ +
+/// `TokenFailed` path, like retry exhaustion); `Transient` keeps the
+/// legacy decrement-and-requeue behavior. The category is additionally
+/// carried in the envelope / error message for observability and the
+/// dead-letter queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RetryCategory {
@@ -307,8 +310,9 @@ pub struct AiTaskEnvelope {
     /// node timeout remain authoritative). Must be > 0 when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
-    /// Retry category of the last attempt. Recorded only in v1 — retry
-    /// behavior is unchanged (E3-2 scope).
+    /// Retry category of the last attempt. E3-2: behavioral on the fail
+    /// request (`permanent` skips the retry loop); inside the envelope it
+    /// records what the worker reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_category: Option<RetryCategory>,
     /// The model that executed the task, when known.

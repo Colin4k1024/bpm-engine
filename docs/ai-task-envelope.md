@@ -184,7 +184,7 @@ user-supplied value at that key on start-instance or user-task complete is
 always rejected with 4xx `reserved_variable_key` (those boundaries have no
 envelope semantics).
 
-### fail — recorded, behavior unchanged
+### fail — recorded, and (since E3-2) behavioral for `permanent`
 
 `POST /api/v1/external-tasks/:task_id/fail` gains two optional fields:
 
@@ -203,24 +203,31 @@ envelope semantics).
 - `envelope` is validated exactly like on complete (4xx
   `task_envelope_invalid`); a given `category` is recorded into the
   envelope's `retry_category`.
-- **v1 semantics: retry behavior is UNCHANGED.** The engine retries on
-  lease/redelivery exactly as before — `permanent` does not shortcut to
-  the dead letter queue. The category is carried for observability, DLQ
-  triage and future policy; making the engine act on it is E3-2's
-  structured-failure scope.
+- **E3-2 semantics: the category is BEHAVIORAL.** `permanent` skips the
+  retry loop — the task goes straight to `Failed` with the DLQ +
+  `TokenFailed` path (exactly like retry exhaustion) and is never
+  redelivered. `transient` (or absent) retries as before. The category
+  is additionally carried for observability and DLQ triage; see
+  `docs/worker-context.md` §4.
 
-## 8. The fail path in v1 (design decision)
+## 8. The fail path (design decision, refined by E3-2)
 
 Read the code first, then decide: the storage trait's
-`ExternalTaskStore::fail(task_id, worker_id, error, retry_after)` has no
-variables channel, and E3-1 does not extend the store trait. Therefore:
+`ExternalTaskStore::fail(task_id, worker_id, error, retry_after,
+permanent)` has no variables channel. E3-1 did not extend the store
+trait; E3-2 added ONE parameter — `permanent: bool` — rather than a
+`fail_permanent` method, so the guards (locked state, owner check) exist
+in exactly one place per adapter. Therefore:
 
 - **Category** ⇒ persisted as a **structured JSON prefix** on the error
   message: `{"retry_category":"permanent"}: model over quota`. This
   survives every existing persistence path — `task.error_message`, the
   `ExternalTaskFailed` history payload, the dead letter entry, and the
   `TokenFailed` reason — with zero schema changes. Parse it by splitting
-  on the first `": "`.
+  on the first `": "`. **Behavior**: the `permanent` flag routes the
+  store call to the skip-retries path (task straight to `Failed`, no
+  retry decrement, no requeue; DLQ + `TokenFailed` fire exactly as retry
+  exhaustion does).
 - **Envelope** ⇒ validated, then recorded in the `ExternalTaskFailed`
   history payload under `variables.__task_envelope`, redacted with the
   same `HistoryRedactionPolicy` the engine applies to every history
@@ -231,20 +238,21 @@ variables channel, and E3-1 does not extend the store trait. Therefore:
   inputs).
 - The dead letter entry keeps the task's **input** variables only.
 
-Honest v1 limitation: after a *failure*, the envelope is audit-visible in
+Honest limitation: after a *failure*, the envelope is audit-visible in
 history but not in the task row or instance variables; the variables
 channel for the envelope is `complete` (§6).
 
-## 9. `retry_category` semantics (v1)
+## 9. `retry_category` semantics (E3-2: behavioral)
 
-| Value | Meaning | v1 effect |
-|-------|---------|-----------|
-| `transient` | may resolve on retry (network, rate limit, timeout) | none — recorded only |
-| `permanent` | will not resolve on retry (bad input, policy refusal) | none — recorded only |
+| Value | Meaning | Effect |
+|-------|---------|--------|
+| `transient` | may resolve on retry (network, rate limit, timeout) | retry loop as before: decrement → requeue → at 0 `Failed` + DLQ |
+| `permanent` | will not resolve on retry (bad input, policy refusal) | **retry loop skipped**: straight to `Failed` + DLQ + `TokenFailed`, no redelivery, retries not decremented |
 
 Recorded locations: the envelope (`retry_category`), the error message
-prefix (§8), history, and the DLQ entry's error message. Acting on the
-category (retry policy, DLQ fast-path, backoff) is E3-2.
+prefix (§8), history, and the DLQ entry's error message. Verified by
+`crates/server/rest/tests/worker_context.rs`
+(`permanent_failure_skips_retries_dlq_and_token_failed`).
 
 ## 10. Error codes (stable, REST 4xx)
 

@@ -146,17 +146,25 @@ External tasks delegate work to external workers under a lease. The engine guara
 
 - A crashed worker never completes; its lease expires; the task is redelivered
 - The same side effect may execute **more than once**
-- Workers must be idempotent — use the `task_id` (or a business key from variables) as an idempotency key; see `crates/worker-sdk/examples/idempotency.rs`
+- Workers must be idempotent — use the `task_id` (or a business key from variables) as an idempotency key; see `crates/worker-sdk/examples/idempotency.rs`, the SDK's `IdempotencyGuard`/`derive_key` helpers and `docs/worker-context.md` §5
+- The SDK's graceful shutdown aborts handlers that ignore cancellation past the grace period **without** calling fail (no retry is consumed) — the lease expiry + redelivery is the intended crash path (verified end-to-end by `crates/server/rest/tests/worker_context.rs`)
 
-### 8.5 Retry backoff (current limitation)
+### 8.5 Retry backoff and failure categories
 
 `fail(retry_after)` resets the task to `READY` with a future `lock_expire_at`, but `READY` tasks are immediately fetchable: the backoff is **not enforced**. Do not rely on `retry_after` to delay re-execution.
+
+The fail request's optional `category` (E3-2) is **behavioral**:
+
+- `transient` (or absent) — the behavior above: retries decrement, the task requeues until zero, then `FAILED` + DLQ + `TokenFailed`.
+- `permanent` — the retry loop is skipped entirely: the task goes straight to `FAILED` (no retry decrement, no redelivery) with the same DLQ + `TokenFailed` path as retry exhaustion. See `docs/worker-context.md` §4.
+
+Handlers that only need to keep a long lease valid (not fail) should use the SDK's auto lease renewal (`run_with_renewal`, `docs/worker-context.md` §2) — the lease stays valid across renewals, and a late complete after a lost lease is still rejected 4xx.
 
 ### 8.6 The boundary
 
 > The engine guarantees token transitions happen exactly once. Side effects in workers may execute more than once.
 
-Verified at the REST level by `crates/server/rest/tests/scheduler_workers.rs` (memory driver, runs in CI) and `crates/server/rest/tests/scheduler_workers_postgres.rs` (PostgreSQL, Docker). Lease survival across a hard server kill and redelivery after restart are additionally proven by `crates/server/rest/tests/recovery_postgres.rs` (see §15).
+Verified at the REST level by `crates/server/rest/tests/scheduler_workers.rs` (memory driver, runs in CI) and `crates/server/rest/tests/scheduler_workers_postgres.rs` (PostgreSQL, Docker). Lease survival across a hard server kill and redelivery after restart are additionally proven by `crates/server/rest/tests/recovery_postgres.rs` (see §15). The worker-side story (SDK-level crash abort, auto lease renewal, cancellation drain) is proven by `crates/server/rest/tests/worker_context.rs` (see `docs/worker-context.md`).
 
 Cross-references: `adr/ADR-001-fetch-and-lock-race.md` (fetch-and-lock race), `invariants.md` (external task invariants).
 

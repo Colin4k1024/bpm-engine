@@ -582,6 +582,7 @@ impl ExternalTaskStore for MemoryRepo {
         worker_id: &str,
         error: String,
         _retry_after: Option<Duration>,
+        permanent: bool,
     ) -> Result<(), bpm_engine_storage::ExternalTaskError> {
         let mut guard = self.external_tasks.write().unwrap();
         let r = guard.get_mut(task_id).ok_or_else(|| {
@@ -606,15 +607,22 @@ impl ExternalTaskStore for MemoryRepo {
             )
             .into());
         }
-        r.retries -= 1;
         r.error_message = Some(error);
         r.lock_owner = None;
         r.lock_expire_at = None;
         r.updated_at = utc_now();
-        if r.retries > 0 {
-            r.state = ExternalTaskState::Ready;
-        } else {
+        if permanent {
+            // E3-2 structured failure: skip the retry loop entirely — no
+            // decrement, no requeue; the task goes straight to the terminal
+            // Failed state (same downstream path as retry exhaustion).
             r.state = ExternalTaskState::Failed;
+        } else {
+            r.retries -= 1;
+            if r.retries > 0 {
+                r.state = ExternalTaskState::Ready;
+            } else {
+                r.state = ExternalTaskState::Failed;
+            }
         }
         Ok(())
     }
@@ -832,7 +840,7 @@ mod tests {
         )
         .await
         .unwrap();
-        repo.fail(&task_id, "worker-1", "timeout".to_string(), None)
+        repo.fail(&task_id, "worker-1", "timeout".to_string(), None, false)
             .await
             .unwrap();
         let task = repo.get(&task_id).await.unwrap().unwrap();
@@ -847,11 +855,56 @@ mod tests {
         )
         .await
         .unwrap();
-        repo.fail(&task_id, "worker-1", "again".to_string(), None)
+        repo.fail(&task_id, "worker-1", "again".to_string(), None, false)
             .await
             .unwrap();
         let task = repo.get(&task_id).await.unwrap().unwrap();
         assert_eq!(task.state, ExternalTaskState::Failed);
+    }
+
+    #[tokio::test]
+    async fn external_task_store_fail_permanent_skips_retries() {
+        // E3-2 structured failure: permanent fail goes straight to Failed —
+        // no retry decrement, no requeue (fetch finds nothing).
+        let repo = MemoryRepo::new();
+        let task_id = repo
+            .create("token-1", "instance-1", "notify", 3, 60, HashMap::new())
+            .await
+            .unwrap();
+
+        repo.fetch_and_lock(
+            "worker-1",
+            &["notify".to_string()],
+            10,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+        repo.fail(
+            &task_id,
+            "worker-1",
+            r#"{"retry_category":"permanent"}: bad input"#.to_string(),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        let task = repo.get(&task_id).await.unwrap().unwrap();
+        assert_eq!(task.state, ExternalTaskState::Failed);
+        assert_eq!(task.retries, 3, "permanent fail must not decrement retries");
+        assert!(task.error_message.unwrap().contains("permanent"));
+
+        // No redelivery: the terminal task is never fetchable again.
+        let tasks = repo
+            .fetch_and_lock(
+                "worker-2",
+                &["notify".to_string()],
+                10,
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert!(tasks.is_empty(), "failed task must not be redelivered");
     }
 
     #[tokio::test]
