@@ -88,7 +88,8 @@ const RESPONSE_CODES: &[(&str, &[&str])] = &[
         ],
     ),
     ("InvalidJson", &["invalid_json"]),
-    ("Unauthorized", &["unauthorized"]),
+    ("Unauthorized", &["unauthorized", "invalid_token"]),
+    ("Forbidden", &["forbidden"]),
     ("NotFound", &["not_found"]),
     ("LockConflict", &["lock_conflict"]),
     ("RateLimited", &["rate_limited"]),
@@ -206,6 +207,16 @@ const ERROR_EXAMPLES: &[(&str, u16, &str)] = &[
         "process instance not found: 00000000-0000-4000-8000-000000000000",
     ),
     ("unauthorized", 401, "missing or invalid API key"),
+    (
+        "invalid_token",
+        401,
+        "invalid or missing JWT: token rejected: ExpiredSignature",
+    ),
+    (
+        "forbidden",
+        403,
+        "role 'auditor' is not allowed to POST /api/v1/process-instances",
+    ),
     ("rate_limited", 429, "rate limit exceeded"),
     (
         "invalid_request",
@@ -337,17 +348,25 @@ struct Catalog {
 
 #[derive(Serialize)]
 struct AuthInfo {
-    /// Security scheme type from the spec (`securitySchemes`).
+    /// Security scheme type of the PRIMARY scheme (the JWT bearer scheme,
+    /// E5-1): `http` (or `apiKey` in a spec without the bearer scheme).
     #[serde(rename = "type")]
     kind: String,
-    /// Where the credential is carried (`in` of the security scheme).
+    /// Where the credential is carried (header).
     #[serde(rename = "in")]
     location: String,
-    /// Header name of the security scheme.
+    /// Header name of the primary scheme (Authorization).
     name: String,
-    /// `false`: the server enforces the key only when one is configured
-    /// (PoC mode accepts all requests) — see `notes`.
+    /// `false`: the server enforces the bearer token only when a JWT
+    /// secret is configured — see `notes`.
     required: bool,
+    /// OpenAPI `scheme` of the primary scheme (`bearer`).
+    scheme: String,
+    /// OpenAPI `bearerFormat` of the primary scheme (`JWT`).
+    bearer_format: String,
+    /// Every security scheme the spec defines (BearerAuth + ApiKeyAuth),
+    /// sorted.
+    schemes: Vec<String>,
     notes: String,
 }
 
@@ -357,6 +376,7 @@ struct Conventions {
     error_shape: String,
     pagination: String,
     idempotency: String,
+    roles: String,
 }
 
 #[derive(Serialize)]
@@ -389,8 +409,9 @@ struct Tool {
     classification: String,
     /// What the call changes (see `conventions.classification`).
     side_effects: String,
-    /// Whether the request passes the X-API-Key layer when the server
-    /// has one configured (root routes do not).
+    /// Whether the request passes the auth layer when the server has
+    /// credentials configured (JWT bearer or the admin API key; root
+    /// routes do not).
     auth_required: bool,
     parameters: Vec<Param>,
     responses: Responses,
@@ -462,28 +483,39 @@ fn build_catalog(spec: &Value) -> Catalog {
         .expect("spec must carry info.version")
         .to_string();
 
-    // Security scheme facts come from the spec; the "optional" honesty
-    // and the tenant note describe the actual server behavior.
+    // Security scheme facts come from the spec (E5-1: the primary scheme
+    // is the JWT bearer); the "optional" honesty and the mode/precedence
+    // notes describe the actual server behavior.
     let scheme = spec
-        .pointer("/components/securitySchemes/ApiKeyAuth")
-        .expect("spec must define the ApiKeyAuth security scheme");
+        .pointer("/components/securitySchemes/BearerAuth")
+        .expect("spec must define the BearerAuth security scheme");
+    let schemes: Vec<String> = spec
+        .pointer("/components/securitySchemes")
+        .and_then(Value::as_object)
+        .expect("spec must define securitySchemes")
+        .keys()
+        .cloned()
+        .collect();
     let auth = AuthInfo {
         kind: scheme
             .get("type")
             .and_then(Value::as_str)
-            .expect("ApiKeyAuth must have a type")
+            .expect("BearerAuth must have a type")
             .to_string(),
-        location: scheme
-            .get("in")
-            .and_then(Value::as_str)
-            .expect("ApiKeyAuth must have an in")
-            .to_string(),
-        name: scheme
-            .get("name")
-            .and_then(Value::as_str)
-            .expect("ApiKeyAuth must have a name")
-            .to_string(),
+        location: "header".to_string(),
+        name: "Authorization".to_string(),
         required: false,
+        scheme: scheme
+            .get("scheme")
+            .and_then(Value::as_str)
+            .expect("BearerAuth must have a scheme")
+            .to_string(),
+        bearer_format: scheme
+            .get("bearerFormat")
+            .and_then(Value::as_str)
+            .expect("BearerAuth must have a bearerFormat")
+            .to_string(),
+        schemes,
         notes: AUTH_NOTES.to_string(),
     };
 
@@ -501,19 +533,41 @@ fn build_catalog(spec: &Value) -> Catalog {
             error_shape: ERROR_SHAPE_CONVENTION.to_string(),
             pagination: PAGINATION_CONVENTION.to_string(),
             idempotency: IDEMPOTENCY_CONVENTION.to_string(),
+            roles: ROLES_CONVENTION.to_string(),
         },
         error_examples,
         tools,
     }
 }
 
-const AUTH_NOTES: &str = "Optional at the protocol level: the server enforces the key only \
-when one is configured (auth.api_key / BPM_API_KEY); without a configured key it accepts every \
-request (PoC mode). When enforced, a missing or invalid key is rejected with 401 \
-\"unauthorized\". Tools with auth_required=false (health, readiness, capabilities) sit outside \
-the API-key layer entirely. An optional, untrusted X-Tenant-Id header scopes listings and \
-instance starts to a tenant; there is no per-operation authorization in v1 (RBAC is future \
-scope).";
+const AUTH_NOTES: &str = "Optional at the protocol level: the runtime mode depends on the server \
+configuration (docs/rbac.md). JWT mode — when auth.jwt_secret / BPM_AUTH__JWT_SECRET is set, \
+/api/v1 requests must carry \"Authorization: Bearer <jwt>\" (HS256, claims {sub: actor, tenant, \
+role, exp}); signature/expiry/claims are verified, failures answer 401 \"invalid_token\", and \
+the verified claims drive tenancy and the roles matrix (403 \"forbidden\"). The tenant comes \
+FROM THE CLAIM — the X-Tenant-Id header is deprecated in this mode and a header conflicting \
+with the claim is rejected with 403 \"forbidden\". API-key mode — X-API-Key (auth.api_key / \
+BPM_API_KEY) is the legacy admin/bootstrap credential with FULL access (no role checks) and \
+X-Tenant-Id honored as untrusted input; a missing or invalid key answers 401 \"unauthorized\". \
+When both are configured, a presented JWT takes precedence (the API key is the fallback when \
+no bearer token is sent). Open mode — with neither configured every request is accepted (PoC) \
+and X-Tenant-Id remains a dev-mode affordance. Tools with auth_required=false (health, \
+readiness, capabilities) sit outside the auth layer entirely. Mint tokens with: cargo run -p \
+bpm-engine-server-rest --example mint_jwt -- --sub <actor> --tenant <tenant> --role <role>.";
+
+const ROLES_CONVENTION: &str = "E5-1 role→permission matrix, enforced for JWT-authenticated \
+requests only (the admin API key bypasses role checks; open mode has no credentials to \
+authorize). Roles: deployer — deploy, activate, deprecate process definitions; operator — \
+start instances, complete user tasks, replay sessions, requeue/delete dead letters; worker — \
+external-task fetch-and-lock, complete, fail, extend-lock (worker ONLY: the lease lifecycle \
+belongs to the worker role; operators administrate via the DLQ); auditor — the read-only role. \
+READS (every GET, plus the side-effect-free POSTs validate and dry-run) are allowed for ALL \
+authenticated roles — cross-tenant reads are rejected by tenancy (404 \"not_found\"), not by \
+role. A role without permission for an operation answers 403 \"forbidden\". All store queries \
+are scoped by the VERIFIED tenant claim: lists are filtered to the tenant, instance/task/DLQ \
+access of another tenant answers 404 (indistinguishable from unknown ids), and worker \
+fetch-and-lock delivers only the claim tenant's tasks. Definitions are engine-global in v1 \
+(readable by every tenant; only deployers modify them). See docs/rbac.md.";
 
 const CLASSIFICATION_CONVENTION: &str = "read_only — GET operations, plus the two POST \
 endpoints validate and dry-run: they compile/simulate in memory and persist nothing (no \

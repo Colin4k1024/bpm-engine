@@ -438,7 +438,7 @@ fn error_codes_identifiers_used_in_routes_are_declared_consts() {
 /// The middleware's typed codes are part of the same stable contract.
 #[test]
 fn middleware_codes_are_registered() {
-    for code in ["unauthorized", "rate_limited"] {
+    for code in ["unauthorized", "invalid_token", "forbidden", "rate_limited"] {
         assert!(
             error_codes::ERROR_CODES.contains(&code),
             "middleware code {code:?} must be part of the canonical error-code list"

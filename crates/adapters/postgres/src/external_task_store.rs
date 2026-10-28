@@ -170,6 +170,98 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
         Ok(tasks)
     }
 
+    async fn fetch_and_lock_scoped(
+        &self,
+        worker_id: &str,
+        task_types: &[String],
+        max_tasks: usize,
+        lock_duration: Duration,
+        tenant_id: &str,
+    ) -> anyhow::Result<Vec<ExternalTask>> {
+        // E5-1 tenant-scoped fetch: only tasks whose process instance carries
+        // `tenant_id` are selected and locked, inside the same atomic
+        // UPDATE ... FOR UPDATE SKIP LOCKED section as fetch_and_lock — a
+        // scoped worker never leases another tenant's task.
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        tx.execute(
+            r#"
+            UPDATE external_task
+            SET state = 'Ready', lock_expire_at = NULL, worker_id = NULL
+            WHERE state = 'Locked' AND lock_expire_at < $1
+            "#,
+            &[&now.to_string()],
+        )
+        .await?;
+
+        let lock_expire_at = now + lock_duration.as_secs();
+
+        let task_types_str: Vec<&str> = task_types.iter().map(|s| s.as_str()).collect();
+        let rows = tx
+            .query(
+                r#"
+                UPDATE external_task AS t
+                SET state = 'Locked',
+                    worker_id = $1,
+                    lock_expire_at = $2,
+                    version = version + 1
+                WHERE t.id IN (
+                    SELECT et.id FROM external_task et
+                    JOIN process_instance pi ON pi.id = et.process_instance_id
+                    WHERE et.state = 'Ready'
+                      AND et.task_type = ANY($3)
+                      AND pi.tenant_id = $5
+                    ORDER BY et.created_at ASC
+                    LIMIT $4
+                    FOR UPDATE OF et SKIP LOCKED
+                )
+                RETURNING t.id, t.token_id, t.process_instance_id, t.task_type, t.retries,
+                          t.timeout_secs, t.variables, t.state, t.worker_id, t.error_message,
+                          t.lock_expire_at, t.created_at, t.updated_at
+                "#,
+                &[
+                    &worker_id,
+                    &lock_expire_at.to_string(),
+                    &task_types_str,
+                    &(max_tasks as i64),
+                    &tenant_id,
+                ],
+            )
+            .await?;
+
+        tx.commit().await?;
+
+        let tasks: Vec<ExternalTask> = rows
+            .iter()
+            .map(|row| {
+                let variables: HashMap<String, String> =
+                    serde_json::from_str(row.get("variables")).unwrap_or_default();
+                let lock_expire_at: Option<String> = row.get("lock_expire_at");
+                ExternalTask {
+                    task_id: row.get("id"),
+                    token_id: row.get("token_id"),
+                    process_instance_id: row.get("process_instance_id"),
+                    task_type: row.get("task_type"),
+                    retries: row.get::<_, i32>("retries"),
+                    state: str_to_external_task_state(row.get("state")),
+                    lock_owner: row.get("worker_id"),
+                    lock_expire_at,
+                    error_message: row.get("error_message"),
+                    variables,
+                    created_at: row.get("created_at"),
+                    updated_at: row.get("updated_at"),
+                }
+            })
+            .collect();
+
+        Ok(tasks)
+    }
+
     async fn complete(
         &self,
         task_id: &str,

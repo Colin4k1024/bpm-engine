@@ -46,10 +46,31 @@ pub struct DatabaseConfig {
     pub migrate_on_start: bool,
 }
 
+/// Authentication configuration (E5-1).
+///
+/// The two credentials define three runtime modes (see `docs/rbac.md`):
+///
+/// - **JWT mode** — `jwt_secret` set (env `BPM_AUTH__JWT_SECRET`, synced to
+///   `BPM_JWT_SECRET`): `/api/v1` requests must carry
+///   `Authorization: Bearer <jwt>` (HS256, claims `{sub, tenant, role, exp}`);
+///   identity, tenant scope, and role-based permissions are derived from the
+///   VERIFIED claims. The client `X-Tenant-Id` header is deprecated in this
+///   mode (a header conflicting with the claim is rejected with 403).
+/// - **API-key mode** — `api_key` set (env `BPM_AUTH__API_KEY`, synced to
+///   `BPM_API_KEY`): the legacy admin/bootstrap credential with FULL access
+///   (no role checks); `X-Tenant-Id` is honored as untrusted input. When
+///   BOTH are configured, a presented JWT takes precedence; without one,
+///   the API key is the fallback.
+/// - **Open mode** — neither set: every request is accepted (PoC) and
+///   `X-Tenant-Id` remains a dev-mode affordance.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
+    /// HS256 secret for JWT signing/verification (E5-1). Empty = JWT auth
+    /// disabled.
     pub jwt_secret: String,
+    /// Legacy admin API key (`X-API-Key`). Empty = the API-key layer is
+    /// disabled.
     pub api_key: String,
 }
 

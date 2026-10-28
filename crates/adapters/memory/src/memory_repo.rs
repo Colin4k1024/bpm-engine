@@ -529,6 +529,57 @@ impl ExternalTaskStore for MemoryRepo {
         Ok(out)
     }
 
+    async fn fetch_and_lock_scoped(
+        &self,
+        worker_id: &str,
+        task_types: &[String],
+        max_tasks: usize,
+        lock_duration: Duration,
+        tenant_id: &str,
+    ) -> anyhow::Result<Vec<ExternalTask>> {
+        let _ = self.reclaim_expired_locks().await?;
+        let expire_at = unix_secs() + lock_duration.as_secs();
+        let task_types: std::collections::HashSet<_> = task_types.iter().cloned().collect();
+        // Tenant scoping INSIDE the select-and-lock section (E5-1): a task of
+        // another tenant is never selected, so no lease is taken for it. The
+        // instance read lock is taken before the task write lock; no
+        // MemoryRepo method takes the two locks in the opposite order, so
+        // this cannot deadlock.
+        let instances = self.instances.read().unwrap();
+        let tenant_ok = |instance_id: &str| {
+            instances
+                .get(instance_id)
+                .is_some_and(|i| i.tenant_id.as_deref() == Some(tenant_id))
+        };
+        let mut guard = self.external_tasks.write().unwrap();
+        let mut order: Vec<(String, String)> = guard
+            .iter()
+            .filter(|(_, r)| {
+                r.state == ExternalTaskState::Ready
+                    && task_types.contains(&r.task_type)
+                    && tenant_ok(&r.process_instance_id)
+            })
+            .map(|(id, r)| (id.clone(), r.created_at.clone()))
+            .collect();
+        order.sort_by(|a, b| a.1.cmp(&b.1));
+        let take: Vec<String> = order
+            .into_iter()
+            .take(max_tasks)
+            .map(|(id, _)| id)
+            .collect();
+        let mut out = vec![];
+        for task_id in take {
+            if let Some(r) = guard.get_mut(&task_id) {
+                r.state = ExternalTaskState::Locked;
+                r.lock_owner = Some(worker_id.to_string());
+                r.lock_expire_at = Some(expire_at);
+                r.updated_at = utc_now();
+                out.push(r.to_external_task());
+            }
+        }
+        Ok(out)
+    }
+
     async fn complete(
         &self,
         task_id: &str,
@@ -930,5 +981,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tasks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fetch_and_lock_scoped_delivers_only_the_tenants_tasks() {
+        // E5-1: tenant scoping happens inside the select-and-lock section —
+        // another tenant's task is neither delivered NOR leased, and a
+        // tenant-less instance is not visible to a scoped tenant.
+        let repo = MemoryRepo::new();
+        let make_instance = |id: &str, tenant: Option<&str>| ProcessInstance {
+            id: id.to_string(),
+            process_def_id: "def-1".to_string(),
+            tenant_id: tenant.map(String::from),
+            tokens: vec![],
+            variables: HashMap::new(),
+            state: InstanceState::Running,
+            version: 1,
+            parent_instance_id: None,
+            parent_token_id: None,
+        };
+        repo.save(&make_instance("inst-a", Some("tenant-a")))
+            .await
+            .unwrap();
+        repo.save(&make_instance("inst-b", Some("tenant-b")))
+            .await
+            .unwrap();
+        repo.save(&make_instance("inst-none", None)).await.unwrap();
+        repo.create("tok-a", "inst-a", "job", 1, 60, HashMap::new())
+            .await
+            .unwrap();
+        repo.create("tok-b", "inst-b", "job", 1, 60, HashMap::new())
+            .await
+            .unwrap();
+        repo.create("tok-n", "inst-none", "job", 1, 60, HashMap::new())
+            .await
+            .unwrap();
+
+        // Tenant-a's worker: gets only its own task.
+        let tasks = repo
+            .fetch_and_lock_scoped(
+                "w-a",
+                &["job".to_string()],
+                10,
+                Duration::from_secs(30),
+                "tenant-a",
+            )
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].process_instance_id, "inst-a");
+
+        // The other two tasks were never leased: they stay fetchable for
+        // their own (or any unscoped) worker.
+        let all = repo
+            .fetch_and_lock("w-any", &["job".to_string()], 10, Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(
+            all.len(),
+            2,
+            "scoped fetch must not lease other tenants' tasks"
+        );
     }
 }
