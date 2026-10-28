@@ -271,12 +271,15 @@ dependencies = [
 name = "bpm-engine"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
  "axum",
  "bpm-engine-adapter-memory",
+ "bpm-engine-ai-reference",
  "bpm-engine-bpmn",
  "bpm-engine-core",
  "bpm-engine-dsl",
  "bpm-engine-runtime",
+ "bpm-engine-server-rest",
  "bpm-engine-storage",
  "bpm-engine-worker-sdk",
  "criterion",
@@ -324,6 +327,26 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "bpm-engine-ai-reference"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "bpm-engine-core",
+ "bpm-engine-dsl",
+ "bpm-engine-server-rest",
+ "bpm-engine-storage",
+ "bpm-engine-worker-sdk",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

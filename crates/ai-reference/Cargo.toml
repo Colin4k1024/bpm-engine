@@ -1,0 +1,37 @@
+[package]
+name = "bpm-engine-ai-reference"
+version = "0.2.0"
+edition = "2021"
+description = "AI reference flows (retrieval / inference / approval / tool / compensation) and a swappable model-provider adapter layer for the BPM engine (E3-4)"
+license = "MIT"
+
+[dependencies]
+bpm-engine-core = { path = "../core", version = "0.2.0" }
+bpm-engine-dsl = { path = "../dsl", version = "0.2.0" }
+bpm-engine-storage = { path = "../storage", version = "0.2.0" }
+bpm-engine-worker-sdk = { path = "../worker-sdk", version = "0.2.0" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+# Engine-REST plumbing for the flow runner only (localhost HTTP, same reqwest
+# version `bpm-engine-worker-sdk` already provides). The model-provider layer
+# (provider.rs) is reqwest-free: the real-provider HTTP adapter lives behind
+# the default-off `http` feature, so the default build stays offline/light.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
+[features]
+default = []
+# Real-provider HTTP adapter (`OpenAiCompatProvider`). OFF by default: the
+# reference suite always runs offline against `MockModelProvider`. Enabling
+# turns on TLS for the provider client (the runner's engine client works
+# without it).
+http = ["reqwest/default-tls"]
+
+[dev-dependencies]
+bpm-engine-server-rest = { path = "../server/rest", version = "0.2.0" }
+bpm-engine-storage = { path = "../storage", version = "0.2.0" }
+tokio-util = { version = "0.7", features = ["rt"] }
+axum = "0.7"

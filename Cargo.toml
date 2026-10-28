@@ -9,6 +9,7 @@ members = [
     "crates/dsl",
     "crates/server/rest",
     "crates/worker-sdk",
+    "crates/ai-reference",
 ]
 resolver = "2"
 
@@ -67,6 +68,12 @@ worker-sdk = ["bpm-engine-worker-sdk"]
 reqwest = { version = "0.11", features = ["json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 criterion = { version = "0.5", features = ["html_reports"] }
+# examples/ai_flow.rs (E3-4): the self-contained AI reference flow demo.
+# Dev-deps only — the facade's normal dependency surface is unchanged.
+bpm-engine-ai-reference = { path = "crates/ai-reference", version = "0.2.0" }
+bpm-engine-server-rest = { path = "crates/server/rest", version = "0.2.0" }
+axum = "0.7"
+anyhow = { workspace = true }
 
 [package.metadata.tarpaulin]
 # Coverage configuration for cargo-tarpaulin
