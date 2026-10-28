@@ -1,6 +1,10 @@
 import { test, expect } from '@playwright/test'
+import { mkdirSync } from 'node:fs'
 
-const screenshotDir = '/Users/jiafan/.codex/visualizations/2026/07/22/019f89cd-4a69-7100-a0ed-e6458d48bf46'
+// Screenshots default into the Playwright output dir so the suite runs on
+// any machine; set E2E_SCREENSHOT_DIR to restore the original fixed path.
+const screenshotDir = process.env.E2E_SCREENSHOT_DIR || 'test-results/screenshots'
+mkdirSync(screenshotDir, { recursive: true })
 
 const approvalBpmn = `<?xml version="1.0" encoding="UTF-8"?>
 <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL" targetNamespace="http://bpm.local/e2e">

@@ -2,6 +2,7 @@ import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
 import { DeadLettersPage } from './pages/DeadLettersPage'
 import { DefinitionsPage } from './pages/DefinitionsPage'
+import { DiagnosisPage } from './pages/DiagnosisPage'
 import { DiagnosticsPage } from './pages/DiagnosticsPage'
 import { HomePage } from './pages/HomePage'
 import { InstancesPage } from './pages/InstancesPage'
@@ -16,6 +17,7 @@ export default function App() {
     <Route path="/definitions" element={<DefinitionsPage />} />
     <Route path="/instances" element={<InstancesPage />} />
     <Route path="/trace/:instanceId" element={<TracePage />} />
+    <Route path="/diagnosis/:instanceId" element={<DiagnosisPage />} />
     <Route path="/tasks" element={<TasksPage />} />
     <Route path="/workers" element={<WorkersPage />} />
     <Route path="/dead-letters" element={<DeadLettersPage />} />

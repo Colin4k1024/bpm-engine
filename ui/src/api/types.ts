@@ -115,6 +115,85 @@ export interface ReplayStepResponse {
 export interface ReplaySeekResponse { cursor: number; snapshot: ReplaySnapshot }
 export interface ReplaySnapshotResponse extends ReplaySnapshot { cursor: number; total_events: number }
 
+// --- Step trace (E6-1 wire shape; consumed by the E6-2 diagnosis view) ---
+// Matches docs/openapi.yaml StepsResponse family / step_trace.rs DTOs
+// exactly; fields the server skips when empty are optional here.
+
+export interface StepEventView {
+  event_type: string
+  occurred_at: string
+}
+
+export interface StepModelRef {
+  provider: string
+  name: string
+  version?: string
+}
+
+export interface StepToolRef {
+  name: string
+  version?: string
+}
+
+export interface StepTaskCost {
+  currency?: string
+  amount_micros?: number
+  tokens_in?: number
+  tokens_out?: number
+  duration_ms?: number
+}
+
+export interface StepArtifactRef {
+  uri: string
+  sha256?: string
+  size?: number
+  media_type?: string
+}
+
+export interface StepEnvelopeSummary {
+  execution_id?: string
+  retry_category?: 'transient' | 'permanent'
+  model?: StepModelRef
+  tools?: StepToolRef[]
+  cost?: StepTaskCost
+  artifacts?: StepArtifactRef[]
+  /** true when the stored envelope was redacted (E2-3 policy) or unparsable. */
+  opaque?: boolean
+}
+
+export type StepAttemptOutcome = 'in_flight' | 'completed' | 'failed' | 'expired'
+
+export interface StepAttemptView {
+  worker_id: string
+  outcome: StepAttemptOutcome
+  locked_at: string
+  completed_or_failed?: string | null
+  error?: string | null
+  retries_remaining?: number | null
+  envelope?: StepEnvelopeSummary
+}
+
+export type StepKind = 'node' | 'external_task' | 'timer'
+
+export interface StepView {
+  step_no: number
+  node_id: string
+  token_id: string
+  kind: StepKind
+  events: StepEventView[]
+  attempts?: StepAttemptView[]
+  envelope_summary?: StepEnvelopeSummary
+  variables_touched?: string[]
+}
+
+export interface StepsResponse {
+  trace_id: string
+  instance_id: string
+  process_def_id: string
+  state: string
+  steps: StepView[]
+}
+
 export interface DeadLetterEntry {
   id: string
   task_id: string

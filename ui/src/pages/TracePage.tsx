@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import type { HistoryEventResponse, ProcessDefinitionView, ProcessInstance, ReplaySnapshotResponse, ReplayStepResponse, TraceResponse } from '../api/types'
 import { InstanceHeader } from '../components/InstanceHeader'
@@ -14,6 +14,7 @@ import { useI18n } from '../i18n'
 export function TracePage() {
   const { locale, t } = useI18n()
   const { instanceId } = useParams<{ instanceId: string }>()
+  const [searchParams] = useSearchParams()
   const [instance, setInstance] = useState<ProcessInstance | null>(null)
   const [definition, setDefinition] = useState<ProcessDefinitionView | null>(null)
   const [trace, setTrace] = useState<TraceResponse | null>(null)
@@ -22,7 +23,7 @@ export function TracePage() {
   const [historyLoading, setHistoryLoading] = useState(true)
   const [eventTypeFilter, setEventTypeFilter] = useState('')
   const [error, setError] = useState('')
-  const { tokenFilter, setTokenFilter } = useTraceStore()
+  const { tokenFilter } = useTraceStore()
   const [sessionId, setSessionId] = useState('')
   const [replay, setReplay] = useState<ReplaySnapshotResponse | null>(null)
   const [lastStep, setLastStep] = useState<ReplayStepResponse | null>(null)
@@ -38,15 +39,44 @@ export function TracePage() {
     } catch (e) { setInstance(null); setDefinition(null); setError(errorMessage(e)) } finally { setLoading(false) }
   }, [instanceId])
 
+  // Last-request-wins guard: filter changes (user or the E6-2 deep-link
+  // effect below) can re-issue the history request while a slower earlier
+  // one is still in flight; a stale response must never clobber the
+  // newest filter's result.
+  const historyRequest = useRef(0)
   const loadHistory = useCallback(async () => {
     if (!instanceId) return
+    const request = ++historyRequest.current
     setHistoryLoading(true)
-    try { setHistory(await api.getHistory(instanceId, { token_id: tokenFilter ?? undefined, event_type: eventTypeFilter || undefined })) }
-    catch (e) { setHistory([]); setError(errorMessage(e)) } finally { setHistoryLoading(false) }
+    try {
+      const events = await api.getHistory(instanceId, { token_id: tokenFilter ?? undefined, event_type: eventTypeFilter || undefined })
+      if (historyRequest.current === request) setHistory(events)
+    } catch (e) {
+      if (historyRequest.current === request) { setHistory([]); setError(errorMessage(e)) }
+    } finally {
+      if (historyRequest.current === request) setHistoryLoading(false)
+    }
   }, [instanceId, tokenFilter, eventTypeFilter])
 
   useEffect(() => { void load() }, [load])
   useEffect(() => { void loadHistory() }, [loadHistory])
+
+  // E6-2 deep links (error → history jump from the diagnosis view): apply
+  // the `token_id` / `event_type` query params to the history filters once
+  // per navigation. Absent params never clobber user-selected filters, but
+  // switching to a DIFFERENT instance clears the token filter — token ids
+  // are instance-scoped, and a stale deep-link filter from a previous
+  // instance must not silently apply to this one.
+  const { setTokenFilter } = useTraceStore()
+  useEffect(() => {
+    setTokenFilter(null)
+  }, [instanceId, setTokenFilter])
+  useEffect(() => {
+    const token = searchParams.get('token_id')
+    const type = searchParams.get('event_type')
+    if (token !== null) setTokenFilter(token || null)
+    if (type !== null) setEventTypeFilter(type)
+  }, [searchParams, setTokenFilter])
 
   const refreshReplay = async (id = sessionId) => { if (id) setReplay(await api.replaySnapshot(id)) }
   const createReplay = async () => {
@@ -76,7 +106,8 @@ export function TracePage() {
   return <>
     <div className="trace-breadcrumb"><Link to="/instances">{t('trace.instances')}</Link><span>/</span><code>{instanceId}</code></div>
     {error && <Notice kind="error">{error}</Notice>}
-    <InstanceHeader instance={instance} loading={loading} onRefresh={() => { void load(); void loadHistory() }} />
+    <InstanceHeader instance={instance} loading={loading} onRefresh={() => { void load(); void loadHistory() }}
+      actions={instance && <Link className="header-link" to={`/diagnosis/${encodeURIComponent(instanceId)}`}>{t('diagnosis.openDiagnosis')}</Link>} />
     <div className="trace-layout">
       <Card title={t('trace.topology')} subtitle={t('trace.topologyHint')}><ProcessDiagramPanel definition={definition} tokens={instance?.tokens ?? []} loading={loading} /></Card>
       <Card title={t('trace.history')} subtitle={t('trace.historyHint')}><ExecutionTimelinePanel events={history} loading={historyLoading} tokenFilter={tokenFilter} eventTypeFilter={eventTypeFilter} tokenOptions={instance?.tokens ?? []} onTokenFilterChange={setTokenFilter} onEventTypeFilterChange={setEventTypeFilter} /></Card>

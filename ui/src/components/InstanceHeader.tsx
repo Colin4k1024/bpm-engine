@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import type { ProcessInstance } from '../api/types'
 import { useI18n } from '../i18n'
 
@@ -5,9 +6,12 @@ interface InstanceHeaderProps {
   instance: ProcessInstance | null
   loading: boolean
   onRefresh: () => void
+  /** Extra controls rendered next to the refresh button (e.g. the E6-2
+   * diagnosis-view link on the trace page). */
+  actions?: ReactNode
 }
 
-export function InstanceHeader({ instance, loading, onRefresh }: InstanceHeaderProps) {
+export function InstanceHeader({ instance, loading, onRefresh, actions }: InstanceHeaderProps) {
   const { locale, t } = useI18n()
   if (loading) {
     return (
@@ -38,6 +42,7 @@ export function InstanceHeader({ instance, loading, onRefresh }: InstanceHeaderP
         </span>
       </div>
       <div className="instance-header-actions">
+        {actions}
         <button type="button" onClick={onRefresh} disabled={loading}>
           {t('common.refresh')}
         </button>

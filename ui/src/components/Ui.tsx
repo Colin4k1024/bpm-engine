@@ -22,9 +22,12 @@ export function Card({ title, subtitle, actions, className = '', children }: Pro
 }
 
 export function Badge({ value }: { value: string }) {
-  const { locale, t } = useI18n()
+  const { t } = useI18n()
   const key = `status.${value.toLowerCase()}`
-  return <span className={`badge badge-${value.toLowerCase().replace(/[^a-z]+/g, '-')}`}>{locale === 'zh' ? t(key) : value}</span>
+  // Fall back to the raw value when no dictionary defines the status key
+  // (never leak the lookup key itself onto the screen).
+  const label = t(key)
+  return <span className={`badge badge-${value.toLowerCase().replace(/[^a-z]+/g, '-')}`}>{label === key ? value : label}</span>
 }
 
 export function EmptyState({ title, detail }: { title: string; detail: string }) {
