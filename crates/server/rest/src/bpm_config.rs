@@ -37,6 +37,13 @@ pub struct DatabaseConfig {
     pub url: String,
     /// Maximum number of postgres pool connections.
     pub max_connections: u32,
+    /// Run pending SQL migrations automatically on startup (postgres driver).
+    ///
+    /// When `false`, the server validates the schema instead: startup fails
+    /// if any migration is pending, so an operator must apply migrations out
+    /// of band (or re-enable auto-migration). Deployment contract for
+    /// environments where DDL is change-managed.
+    pub migrate_on_start: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -83,6 +90,7 @@ impl Default for DatabaseConfig {
             driver: "memory".to_string(),
             url: String::new(),
             max_connections: 10,
+            migrate_on_start: true,
         }
     }
 }
@@ -173,6 +181,7 @@ impl BpmConfig {
             database.driver = %self.database.driver,
             database.url = %mask_secret(&self.database.url),
             database.max_connections = self.database.max_connections,
+            database.migrate_on_start = self.database.migrate_on_start,
             auth.jwt_secret = %mask_secret(&self.auth.jwt_secret),
             auth.api_key = %mask_secret(&self.auth.api_key),
             engine.timer_poll_interval_ms = self.engine.timer_poll_interval_ms,
@@ -207,6 +216,7 @@ mod tests {
         assert_eq!(cfg.server.port, 3000);
         assert_eq!(cfg.database.driver, "memory");
         assert_eq!(cfg.database.max_connections, 10);
+        assert!(cfg.database.migrate_on_start, "auto-migration defaults on");
         assert_eq!(cfg.engine.timer_poll_interval_ms, 1000);
         assert_eq!(cfg.engine.timer_batch_size, 100);
         assert_eq!(cfg.log.level, "info");
@@ -288,7 +298,37 @@ max_connections = 5
             "postgres://user:secret@localhost:5432/bpm"
         );
         assert_eq!(cfg.database.max_connections, 5);
+        // Unset migrate_on_start keeps its default (true)
+        assert!(cfg.database.migrate_on_start);
         // Other sections keep defaults
         assert_eq!(cfg.server.port, 3000);
+    }
+
+    #[test]
+    fn load_from_toml_string_can_disable_migrate_on_start() {
+        let toml_str = r#"
+[database]
+driver = "postgres"
+url = "postgres://user:secret@localhost:5432/bpm"
+migrate_on_start = false
+"#;
+        let cfg: BpmConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.database.driver, "postgres");
+        assert!(
+            !cfg.database.migrate_on_start,
+            "TOML [database] migrate_on_start = false must override the default"
+        );
+        // Unset fields keep defaults
+        assert_eq!(cfg.database.max_connections, 10);
+    }
+
+    #[test]
+    fn load_from_toml_string_migrate_on_start_true() {
+        let toml_str = r#"
+[database]
+migrate_on_start = true
+"#;
+        let cfg: BpmConfig = toml::from_str(toml_str).unwrap();
+        assert!(cfg.database.migrate_on_start);
     }
 }

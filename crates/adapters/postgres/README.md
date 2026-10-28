@@ -60,12 +60,27 @@ export DEADPOOL_TIMEOUTS_RECYCLE_SECS=60
 
 ## Schema Migration
 
-Run `migrate()` once at application startup. It creates all required tables
-(idempotent — safe to call multiple times):
+The schema is managed by **versioned, forward-only SQL migrations** in
+`migrations/` (embedded at compile time) and applied by the runner in
+`src/migrations.rs` (see `docs/adr/ADR-005-forward-only-sql-migrations.md`).
+Run it at application startup — it is idempotent and safe to call multiple
+times (a second call is a no-op):
 
 ```rust
+// Applies pending migrations; returns the versions applied by this call.
+run_migrations(&pool).await?;
+
+// Introspection for health checks / startup validation:
+let status = migration_status(&pool).await?; // applied / latest / pending
+
+// Backward-compatible thin wrapper over run_migrations:
 migrate(&pool).await?;
 ```
+
+Legacy databases created before versioning (inline `migrate()` era) are
+detected automatically and **baseline-stamped**: the runner records 0001 as
+applied without re-executing it, then applies later migrations. An empty
+database is migrated from scratch.
 
 Tables created:
 - `process_definition` — BPMN definitions with versioning

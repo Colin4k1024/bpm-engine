@@ -77,6 +77,7 @@ fn postgres_config(url: &str) -> BpmConfig {
             driver: "postgres".to_string(),
             url: url.to_string(),
             max_connections: 5,
+            ..Default::default()
         },
         ..Default::default()
     }
@@ -138,7 +139,9 @@ async fn postgres_mode_survives_restart() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "RUNNING");
 
-    // Readiness includes the db_pool check wired from the postgres pool.
+    // Readiness includes the db_pool check wired from the postgres pool,
+    // plus migration state (db_migrations, db_schema_version) from the
+    // versioned migration runner.
     let resp = client
         .get(format!("{}/ready", app1.base_url))
         .send()
@@ -152,6 +155,8 @@ async fn postgres_mode_survives_restart() {
         body
     );
     assert_eq!(body["checks"]["db_pool"], "ok");
+    assert_eq!(body["checks"]["db_migrations"], "ok");
+    assert_eq!(body["checks"]["db_schema_version"], "2");
 
     // --- Stop app 1 (cancel timer token, abort serve task, drop state) ------
     app1.stop().await;
