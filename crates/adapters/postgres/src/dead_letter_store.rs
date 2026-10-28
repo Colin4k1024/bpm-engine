@@ -139,4 +139,27 @@ impl DeadLetterStore for PostgresDeadLetterStore {
             .await?;
         Ok(())
     }
+
+    async fn delete_older_than(&self, cutoff: &str) -> anyhow::Result<u64> {
+        // E5-3 retention: numeric comparison of the TEXT unix-seconds
+        // column (a text compare would misorder different digit counts);
+        // the regex guard keeps non-numeric rows (never delete what cannot
+        // be age-assessed) and makes the cast safe. The cutoff binds as
+        // int8 (fail-safe no-op when unparseable, matching the memory
+        // adapter); SQL is parameter-bound.
+        let Ok(cutoff) = cutoff.parse::<i64>() else {
+            return Ok(0);
+        };
+        let client = self.pool.get().await?;
+        let n = client
+            .execute(
+                r#"
+                DELETE FROM dead_letter
+                WHERE created_at ~ '^[0-9]+$' AND created_at::bigint < $1
+                "#,
+                &[&cutoff],
+            )
+            .await?;
+        Ok(n)
+    }
 }

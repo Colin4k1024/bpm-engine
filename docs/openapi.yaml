@@ -291,10 +291,11 @@ paths:
       description: |
         Events in causal order (by `occurred_at`, then `id`) with
         zero-based `sequence` and `category` (`instance` | `token` |
-        `external`). Optional filters `token_id` and `event_type`; the
-        optional `limit` (1..=500, E2-4) truncates the returned list
-        after sorting. Absent parameters keep the pre-existing
-        full-history behavior.
+        `external` | `approval`). Optional filters `token_id` and
+        `event_type`; the optional `limit` (1..=500, E2-4) truncates the
+        returned list after sorting. Absent parameters keep the
+        pre-existing full-history behavior. For the actor-attributed
+        audit view use `/process-instances/{id}/audit` (E5-3).
       tags: [ProcessInstances]
       parameters:
         - $ref: "#/components/parameters/InstanceId"
@@ -360,6 +361,55 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/StepsResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-instances/{id}/audit:
+    get:
+      operationId: getInstanceAudit
+      summary: Audit view of a process instance (E5-3)
+      description: |
+        The single place that answers "who did what, against which
+        definition version, with which decisions and artifact
+        references" (E5-3, issue #25). Read-only aggregation over the
+        instance, definition, and history stores — no new stores, no new
+        writes.
+
+        - **events**: the full history timeline with `actor` attribution
+          on the ROUTE-LAYER boundary events (`InstanceStarted`,
+          `TaskCompleted`, `ExternalTaskLocked`, `ExternalTaskFailed`,
+          `InstancePaused`/`InstanceResumed`/`InstanceCancelled`,
+          `ApprovalGranted`/`ApprovalRejected`,
+          `DeadLetterRequeued`/`DeadLetterDeleted`). Engine-internal
+          transitions (`TokenArrived`, `TokenCompleted`, …) have no human
+          actor BY DESIGN and serialize without the field.
+        - **definition**: the instance's versioned `process_def_id`
+          (`key:version`) plus the definition record's current status.
+        - **decisions**: the approval decisions (approved/rejected) with
+          actor and note.
+        - **artifacts**: artifact references parsed read-only from
+          `__var:1:` artifact envelopes in the history payloads and the
+          instance's variables (uri, sha256, size, media_type).
+
+        Secrecy by construction: the endpoint NEVER decrypts —
+        `__encrypted:` values appear as ciphertext exactly as history
+        stored them, and oversized values appear as the E2-3
+        `__truncated:` markers. Read operation (all roles); cross-tenant
+        access is rejected as 404 like every instance-scoped read.
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+        - $ref: "#/components/parameters/TenantId"
+      responses:
+        "200":
+          description: The audit view of the instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditResponse"
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -1691,12 +1741,154 @@ components:
           description: e.g. `ProcessStarted`, `TokenArrived`, `ExternalTaskLocked`.
         category:
           type: string
-          enum: [instance, token, external]
+          enum: [instance, token, external, approval]
         occurred_at:
           type: string
           description: Unix epoch seconds.
         payload:
           description: Raw event payload.
+
+    AuditEventView:
+      type: object
+      required: [sequence, id, event_type, category, occurred_at, payload]
+      description: |
+        One audited history event (E5-3). The `actor` is present only on
+        route-layer boundary events — engine-internal transitions have no
+        human actor by design.
+      properties:
+        sequence:
+          type: integer
+          description: Zero-based index in causal order.
+        id:
+          type: string
+        event_type:
+          type: string
+        category:
+          type: string
+          enum: [instance, token, external, approval]
+        occurred_at:
+          type: string
+          description: Unix epoch seconds.
+        actor:
+          type: string
+          description: The verified principal who performed the boundary
+            operation (`"api-key"` / `"anonymous"` for the non-JWT modes);
+            absent on engine-internal events.
+        payload:
+          description: |
+            The history payload verbatim — already redacted by the E2-3
+            policy (oversized values are `__truncated:` markers) and
+            never decrypted (`__encrypted:` values are ciphertext).
+
+    AuditDecisionView:
+      type: object
+      required: [approval_id, decision, node_id, occurred_at]
+      description: One approval decision surfaced by the audit view (E5-3).
+      properties:
+        approval_id:
+          type: string
+        decision:
+          type: string
+          enum: [approved, rejected]
+        node_id:
+          type: string
+        actor:
+          type: string
+          description: The verified principal who decided.
+        note:
+          type: string
+          description: The operator note recorded with the decision.
+        occurred_at:
+          type: string
+          description: Unix epoch seconds.
+
+    AuditArtifactView:
+      type: object
+      required: [variable, uri, source]
+      description: |
+        One artifact reference parsed read-only from a `__var:1:`
+        artifact envelope (E5-3). The engine never dereferences the URI.
+        Envelope values redacted by the E2-3 history policy are no longer
+        parseable and therefore do not appear.
+      properties:
+        variable:
+          type: string
+          description: The variable name the envelope was stored under.
+        uri:
+          type: string
+        sha256:
+          type: string
+          description: 64 hex characters, when known.
+        size:
+          type: integer
+          description: Artifact byte size, when known.
+        media_type:
+          type: string
+        source:
+          type: string
+          enum: [history, instance]
+          description: Where the reference was seen — an event payload or
+            the current variables.
+
+    AuditDefinitionView:
+      type: object
+      required: [id, key, version]
+      description: |
+        Definition-version context of the audited instance (E5-3): the
+        instance's `process_def_id` IS the versioned id (`key:version`),
+        so the version is inherent; `status` is the definition record's
+        CURRENT metadata.
+      properties:
+        id:
+          type: string
+          description: The versioned definition id (e.g. `order-flow:3`).
+        key:
+          type: string
+        version:
+          type: integer
+        status:
+          type: string
+          description: Current record status — `active` or `deprecated`;
+            absent when the record is gone.
+
+    AuditInstanceView:
+      type: object
+      required: [state]
+      properties:
+        state:
+          type: string
+          description: RUNNING | COMPLETED | TERMINATED.
+        tenant_id:
+          type: string
+          description: The instance's tenant scope, when set.
+
+    AuditResponse:
+      type: object
+      required: [instance_id, instance, definition, events, decisions, artifacts]
+      description: |
+        The audit view of one process instance (E5-3, issue #25): the
+        actor-attributed event timeline joined with definition-version
+        context, approval decisions, and artifact references. Never
+        decrypted; already redacted at history-write time.
+      properties:
+        instance_id:
+          type: string
+        instance:
+          $ref: "#/components/schemas/AuditInstanceView"
+        definition:
+          $ref: "#/components/schemas/AuditDefinitionView"
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEventView"
+        decisions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditDecisionView"
+        artifacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditArtifactView"
 
     HistoryResponse:
       type: object

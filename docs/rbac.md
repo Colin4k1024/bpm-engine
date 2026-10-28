@@ -42,7 +42,7 @@ HS256, signed with `auth.jwt_secret`. Claims:
 
 | Claim | Type | Meaning |
 |-------|------|---------|
-| `sub` | string | actor identity (non-empty; recorded in request logs today — persisted audit trail is E5-3) |
+| `sub` | string | actor identity (non-empty; since E5-3 persisted on the route-layer boundary history events — see `docs/audit-and-retention.md`) |
 | `tenant` | string | tenant scope of every store query (non-empty) |
 | `role` | string | `deployer` \| `operator` \| `worker` \| `auditor` (anything else → 401 `invalid_token`) |
 | `exp` | u64 | unix-seconds expiry, enforced with ZERO leeway |
@@ -105,7 +105,7 @@ bootstrap path), and open mode has no credentials to authorize.
 | Replay sessions (`POST /process-instances/:id/replay`, `POST /replay/:sid/step`, `POST /replay/:sid/seek`, `DELETE /replay/:sid`) | | ✓ | | |
 | DLQ requeue / delete (`POST /dead-letters/:id/requeue`, `DELETE /dead-letters/:id`) | | ✓ | | |
 | External-task lease lifecycle (`fetch-and-lock`, `complete`, `fail`, `extend-lock`) | | | ✓ | |
-| **All reads** — every `GET` (instances, trace, history, steps, approval lists, definitions, versions, tasks, forms, dead-letters, invariants, replay snapshot) | ✓ | ✓ | ✓ | ✓ |
+| **All reads** — every `GET` (instances, trace, history, steps, audit view (E5-3), approval lists, definitions, versions, tasks, forms, dead-letters, invariants, replay snapshot) | ✓ | ✓ | ✓ | ✓ |
 | Side-effect-free POSTs: `validate`, `dry-run` (E2-2) | ✓ | ✓ | ✓ | ✓ |
 
 Decisions worth restating:
@@ -210,10 +210,13 @@ consistency suite):
 
 ## Boundaries and forward references
 
-- **Actor persistence is E5-3.** The verified `actor` is part of the
-  request context (`Identity`, request logs) but is NOT yet written into
-  history events / the audit trail — that is E5-3's deliverable, and the
-  engine core has no actor field today.
+- **Actor persistence (E5-3, delivered).** The verified `actor` is now
+  written into the instance's history on the route-layer boundary events
+  (start, task completions, locks/fails, lifecycle, decisions, DLQ ops)
+  and joined by `GET /process-instances/:id/audit` — see
+  `docs/audit-and-retention.md` for the model and its honest limits
+  (engine-internal transitions stay actorless; deploy/activate/deprecate
+  are log-only).
 - **Token issuance/rotation/revocation** is out of scope: the server only
   verifies. Operators mint tokens out-of-band (example above); short
   expiry plus secret rotation is the v1 story.

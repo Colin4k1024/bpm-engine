@@ -47,4 +47,13 @@ pub trait DeadLetterStore: Send + Sync {
 
     /// Delete a dead letter entry.
     async fn delete(&self, id: &str) -> anyhow::Result<()>;
+
+    /// Delete dead letter entries created strictly before `cutoff`
+    /// (E5-3 retention). `cutoff` is a unix-seconds string, compared
+    /// NUMERICALLY against `created_at` — rows whose `created_at` is not
+    /// a unix-seconds number are kept. Applies across ALL tenants
+    /// (retention is a global data-lifecycle policy).
+    ///
+    /// Returns the number of deleted rows.
+    async fn delete_older_than(&self, cutoff: &str) -> anyhow::Result<u64>;
 }

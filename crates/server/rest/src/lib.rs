@@ -12,6 +12,7 @@
 //! are registered) or `"postgres"` (definitions must be deployed via the
 //! REST API; state survives restarts).
 
+pub mod audit;
 pub mod bpm_config;
 pub mod capabilities;
 #[cfg(feature = "observability")]
@@ -271,6 +272,10 @@ pub async fn build_app(config: &BpmConfig) -> anyhow::Result<AppHandle> {
         instance_lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
         replay_sessions: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         timer_cancel: timer_cancel.clone(),
+        retention: crate::state::RetentionState {
+            retention_days: config.audit.retention_days,
+            last_sweep: std::sync::Mutex::new(None),
+        },
         extra_health_checks,
         #[cfg(feature = "observability")]
         metrics_render,
@@ -286,6 +291,25 @@ pub async fn build_app(config: &BpmConfig) -> anyhow::Result<AppHandle> {
     // failures are logged (the decision stays durable, a retried decide
     // re-drives the effect).
     routes::recover_pending_approval_effects(&state).await;
+
+    // E5-3: retention startup sweep, then the periodic task. Runs once
+    // BEFORE serving (an aged-out database is converged by the time the
+    // first request arrives); the periodic task re-sweeps every
+    // `audit.sweep_interval_secs` and stops with `timer_cancel`. A sweep
+    // failure is logged, not fatal (the next tick retries); retention is
+    // disabled (retention_days = 0, the default) ⇒ both are no-ops.
+    if let Err(err) = crate::audit::run_retention_sweep(&state).await {
+        tracing::warn!(
+            error = %err,
+            "retention startup sweep failed (the periodic task will retry)"
+        );
+    }
+    if config.audit.retention_days > 0 {
+        let sweep_state = Arc::clone(&state);
+        let sweep_interval =
+            std::time::Duration::from_secs(config.audit.sweep_interval_secs.max(1));
+        crate::audit::spawn_retention_task(sweep_state, sweep_interval, timer_cancel.clone());
+    }
 
     // Start the timer scheduler in the background.
     // Wire the event channel so TimerFired events are processed by the engine.

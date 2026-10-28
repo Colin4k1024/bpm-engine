@@ -19,6 +19,7 @@ pub struct BpmConfig {
     pub engine: EngineConfig,
     pub log: LogConfig,
     pub rate_limit: RateLimitConfig,
+    pub audit: AuditConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +150,30 @@ pub struct RateLimitConfig {
     pub requests_per_minute: u64,
 }
 
+/// Audit & data-retention configuration (E5-3, issue #25).
+///
+/// Retention covers the **append-only audit records** — history events and
+/// dead-letter entries — only. Instances, tokens, and process definitions
+/// are OPERATIONAL state and are never deleted by the sweep (see
+/// `docs/audit-and-retention.md`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuditConfig {
+    /// Days to retain history events and dead-letter entries. `0` (the
+    /// DEFAULT) disables retention entirely: nothing is ever deleted —
+    /// the safe default, since deletion is irreversible and can break
+    /// replay/crash-recovery for old instances.
+    ///
+    /// When set, a sweep runs at startup and then periodically: rows
+    /// strictly older than `now - retention_days` are deleted (history by
+    /// `occurred_at`, dead letters by `created_at`).
+    pub retention_days: u64,
+    /// Seconds between periodic retention sweeps (default 3600). Only
+    /// meaningful when `retention_days > 0`. The startup sweep always
+    /// runs once.
+    pub sweep_interval_secs: u64,
+}
+
 // --- Defaults ---
 
 impl Default for ServerConfig {
@@ -196,6 +221,15 @@ impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
             requests_per_minute: 100,
+        }
+    }
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            retention_days: 0,
+            sweep_interval_secs: 3600,
         }
     }
 }
@@ -277,6 +311,8 @@ impl BpmConfig {
             log.level = %self.log.level,
             log.format = %self.log.format,
             rate_limit.requests_per_minute = self.rate_limit.requests_per_minute,
+            audit.retention_days = self.audit.retention_days,
+            audit.sweep_interval_secs = self.audit.sweep_interval_secs,
             "effective configuration"
         );
     }
@@ -312,12 +348,39 @@ mod tests {
         assert_eq!(cfg.log.level, "info");
         assert_eq!(cfg.log.format, "json");
         assert_eq!(cfg.rate_limit.requests_per_minute, 100);
-        assert!(cfg.auth.jwt_secret.is_empty());
-        assert!(cfg.auth.api_key.is_empty());
+        assert_eq!(cfg.auth.jwt_secret, String::new());
+        assert_eq!(cfg.auth.api_key, String::new());
         assert!(
             cfg.engine.approval_required_task_types.is_empty(),
             "no task types require approval by default (pre-E5-2 behavior)"
         );
+        // E5-3: retention is OFF by default (0 = keep everything).
+        assert_eq!(cfg.audit.retention_days, 0);
+        assert_eq!(cfg.audit.sweep_interval_secs, 3600);
+    }
+
+    #[test]
+    fn audit_retention_toml_override_and_default_off() {
+        // Defaults: retention disabled, hourly sweep.
+        let cfg: BpmConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.audit.retention_days, 0);
+        assert_eq!(cfg.audit.sweep_interval_secs, 3600);
+
+        // TOML [audit] override.
+        let toml_str = r#"
+[audit]
+retention_days = 30
+sweep_interval_secs = 600
+"#;
+        let cfg: BpmConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.audit.retention_days, 30);
+        assert_eq!(cfg.audit.sweep_interval_secs, 600);
+        // Partial override keeps the other default.
+        let cfg: BpmConfig = toml::from_str("[audit]\nretention_days = 7\n").unwrap();
+        assert_eq!(cfg.audit.retention_days, 7);
+        assert_eq!(cfg.audit.sweep_interval_secs, 3600);
+        // Unset sections keep defaults.
+        assert_eq!(cfg.rate_limit.requests_per_minute, 100);
     }
 
     #[test]

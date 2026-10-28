@@ -1284,6 +1284,26 @@ pub async fn start_instance(
         initial_variables,
     });
     state.engine.run_async(ev, &mut ctx).await;
+    // E5-3 boundary event: the engine's `ProcessStarted` has no human
+    // actor (core events stay actorless by design); the route appends the
+    // attribution the audit trail needs — WHO started the instance, and
+    // against which definition version (the id IS `key:version`). Not a
+    // replayable event type, so replay is unaffected.
+    {
+        let payload = serde_json::json!({
+            "instance_id": instance_id.as_str(),
+            "process_def_id": body.process_def_id,
+            "actor": identity.actor(),
+        });
+        let _ = HistoryRepo::append(
+            state.storage.history_repo.as_ref(),
+            &instance_id,
+            "InstanceStarted",
+            &payload,
+            &occurred_at_now(),
+        )
+        .await;
+    }
     // Record the idempotency key AFTER creation: on failure the instance
     // exists but the mapping is missing, so the response is a 500 whose
     // message names the situation (see the handler docs).
@@ -1483,17 +1503,26 @@ pub struct HistoryResponse {
     pub events: Vec<HistoryEventView>,
 }
 
-/// Map event_type to human-friendly category: instance | token | external |
-/// approval.
+/// Map event_type to human-friendly category: instance | token | external
+/// | approval.
 fn event_type_to_category(event_type: &str) -> &'static str {
     match event_type {
         "ProcessStarted" | "ProcessCompleted" | "ProcessTerminated" => "instance",
+        // E5-3 route-layer boundary event: the operator who STARTED the
+        // instance (the engine's ProcessStarted has no human actor).
+        "InstanceStarted" => "instance",
         // E5-2 route-layer instance lifecycle events (ADR-008 §8).
         "InstancePaused" | "InstanceResumed" | "InstanceCancelled" => "instance",
         "TokenArrived" | "TokenCompleted" | "TokenFailed" | "UserTaskCreated"
         | "UserTaskCompleted" | "TimerScheduled" | "TimerFired" | "SagaStarted"
         | "SagaCompleted" => "token",
+        // E5-3 route-layer boundary event: the operator/worker who
+        // completed a task (user or external).
+        "TaskCompleted" => "token",
         "ExternalTaskLocked" | "ExternalTaskCompleted" | "ExternalTaskFailed" => "external",
+        // E5-3 route-layer boundary events: the operator who requeued /
+        // deleted a dead-letter entry (the DLQ is external-task family).
+        "DeadLetterRequeued" | "DeadLetterDeleted" => "external",
         // E5-2 approval events: ApprovalCreated is written by the engine
         // gate, Granted/Rejected by the decide endpoint (with the actor).
         "ApprovalCreated" | "ApprovalGranted" | "ApprovalRejected" => "approval",
@@ -1774,6 +1803,323 @@ pub async fn get_instance_history(
     Ok(Json(HistoryResponse {
         instance_id: id,
         events,
+    }))
+}
+
+// --- Audit API (E5-3, issue #25) ----------------------------------------------
+
+/// One audited history event with the ACTOR attribution joined on (E5-3).
+///
+/// The actor is read from the event payload's `actor` field — carried by
+/// the ROUTE-LAYER boundary events (`InstanceStarted`, `TaskCompleted`,
+/// `ExternalTaskLocked`, `ExternalTaskFailed`, `InstancePaused`/
+/// `InstanceResumed`/`InstanceCancelled`, `ApprovalGranted`/
+/// `ApprovalRejected`, `DeadLetterRequeued`/`DeadLetterDeleted`).
+/// Engine-internal transitions (`TokenArrived`, `TokenCompleted`, …)
+/// have no human actor BY DESIGN (see docs/audit-and-retention.md) and
+/// serialize without the field.
+#[derive(Debug, Serialize)]
+pub struct AuditEventView {
+    pub sequence: u64,
+    pub id: String,
+    pub event_type: String,
+    pub category: String,
+    pub occurred_at: String,
+    /// The verified principal who performed the boundary operation, when
+    /// the event carries one (`"api-key"` / `"anonymous"` for the
+    /// non-JWT modes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    /// The history payload VERBATIM — already redacted by the E2-3 policy
+    /// (oversized → `__truncated:` markers) and never decrypted: `__encrypted:`
+    /// values appear as ciphertext.
+    pub payload: serde_json::Value,
+}
+
+/// One approval decision surfaced by the audit endpoint (E5-3): the
+/// decision, who made it, and the recorded note.
+#[derive(Debug, Serialize)]
+pub struct AuditDecisionView {
+    pub approval_id: String,
+    /// `approved` | `rejected`.
+    pub decision: String,
+    pub node_id: String,
+    /// The verified principal who decided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    /// The operator note recorded with the decision, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub occurred_at: String,
+}
+
+/// One artifact reference seen in the instance's data (E5-3): parsed
+/// read-only from a `__var:1:` artifact envelope in a history payload or
+/// the instance's variables — the engine never dereferences the URI.
+///
+/// Envelope values redacted by the E2-3 history policy (`__truncated:`)
+/// are no longer parseable and therefore do not appear — the audit shows
+/// what is recoverable, not a guess.
+#[derive(Debug, Serialize)]
+pub struct AuditArtifactView {
+    /// The variable name the artifact envelope was stored under.
+    pub variable: String,
+    pub uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    /// Where the reference was seen: `history` (an event payload) or
+    /// `instance` (the current variables).
+    pub source: String,
+}
+
+/// Definition-version context of the audited instance (E5-3). The
+/// instance's `process_def_id` IS the versioned id (`key:version`), so
+/// the version is inherent; `status` is the definition store's CURRENT
+/// metadata for that version record.
+#[derive(Debug, Serialize)]
+pub struct AuditDefinitionView {
+    /// The versioned definition id the instance executes (e.g.
+    /// `order-flow:3`).
+    pub id: String,
+    /// Definition key (e.g. `order-flow`).
+    pub key: String,
+    /// Version number parsed from the id (`1` when the id carries none).
+    pub version: u32,
+    /// Current record status (`active` | `deprecated`); absent when the
+    /// definition record is gone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+/// Instance context of the audit response (E5-3).
+#[derive(Debug, Serialize)]
+pub struct AuditInstanceView {
+    /// `RUNNING` | `COMPLETED` | `TERMINATED`.
+    pub state: String,
+    /// The instance's tenant scope, when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+}
+
+/// Response of `GET /api/v1/process-instances/:id/audit` (E5-3): the
+/// single place that answers "who did what, against which definition
+/// version, with which decisions and artifact references".
+#[derive(Debug, Serialize)]
+pub struct AuditResponse {
+    pub instance_id: String,
+    pub instance: AuditInstanceView,
+    pub definition: AuditDefinitionView,
+    /// The full event timeline with actor attribution on boundary events.
+    pub events: Vec<AuditEventView>,
+    /// Approval decisions (approved/rejected) with actor and note.
+    pub decisions: Vec<AuditDecisionView>,
+    /// Artifact references parsed from `__var:1:` envelopes.
+    pub artifacts: Vec<AuditArtifactView>,
+}
+
+/// Parse `(key, version)` out of a versioned definition id, using the
+/// same rule as the definition stores (`order-flow:3` →
+/// `("order-flow", 3)`; a colonless id → version 1).
+fn parse_definition_id_version(id: &str) -> (String, u32) {
+    if let Some((key, ver_str)) = id.rsplit_once(':') {
+        if let Ok(v) = ver_str.parse::<u32>() {
+            return (key.to_string(), v);
+        }
+    }
+    (id.to_string(), 1)
+}
+
+/// Build the definition-version context of the audit response (E5-3).
+///
+/// `list_versions` failures PROPAGATE (a storage error is a 500, like
+/// every other store error); a definition record that is merely ABSENT
+/// degrades to the id-inherent metadata with no `status` (the instance
+/// may outlive its definition).
+async fn audit_definition_view(
+    state: &AppState,
+    process_def_id: &str,
+) -> anyhow::Result<AuditDefinitionView> {
+    let (key, version) = parse_definition_id_version(process_def_id);
+    let versions = state.storage.def_store.list_versions(&key).await?;
+    let status = versions
+        .iter()
+        .find(|r| r.id == process_def_id)
+        .map(|r| r.status.to_string());
+    Ok(AuditDefinitionView {
+        id: process_def_id.to_string(),
+        key,
+        version,
+        status,
+    })
+}
+
+/// Extract the actor of a history event payload, when it carries one.
+fn audit_event_actor(payload: &serde_json::Value) -> Option<String> {
+    payload
+        .get("actor")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Collect the artifact references of one variable map into `out` (E5-3):
+/// every value that parses as a v1 ARTIFACT envelope contributes its
+/// URI + metadata. Read-only extraction — nothing is dereferenced or
+/// decrypted, and redacted values simply do not parse.
+fn collect_artifact_refs(
+    variables: &serde_json::Map<String, serde_json::Value>,
+    source: &str,
+    out: &mut Vec<AuditArtifactView>,
+    seen: &mut std::collections::HashSet<(String, String)>,
+) {
+    for (name, value) in variables {
+        let Some(stored) = value.as_str() else {
+            continue;
+        };
+        if let Some(Ok(VariableEnvelope::Artifact {
+            uri,
+            size,
+            sha256,
+            media_type,
+        })) = parse_envelope(stored)
+        {
+            if seen.insert((uri.clone(), name.clone())) {
+                out.push(AuditArtifactView {
+                    variable: name.clone(),
+                    uri,
+                    sha256,
+                    size,
+                    media_type,
+                    source: source.to_string(),
+                });
+            }
+        }
+    }
+}
+
+/// GET /api/v1/process-instances/:id/audit — the audit view of one
+/// process instance (E5-3, issue #25): the actor-attributed event
+/// timeline joined with definition-version context, the approval
+/// decisions, and the artifact references parsed from envelope
+/// variables.
+///
+/// Read-only aggregation over the instance, definition, and history
+/// stores — no new stores, no new writes. Secrecy by construction: the
+/// endpoint NEVER decrypts (`__encrypted:` values appear as ciphertext,
+/// exactly as history stored them) and history was already redacted by
+/// the E2-3 policy at write time (oversized values are `__truncated:`
+/// markers). RBAC: a read — every authenticated role may call it;
+/// cross-tenant access is rejected as 404 like every instance-scoped
+/// read. Errors: 404 `not_found` for an unknown instance, 500 `internal`
+/// on storage failures.
+pub async fn get_instance_audit(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    Path(id): Path<String>,
+) -> Result<Json<AuditResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // E5-1: an instance of another tenant is reported like a missing one
+    // (no existence leak) — the same gate shape as every instance read.
+    let inst = state
+        .storage
+        .process_store
+        .load(&id)
+        .await
+        .map_err(internal_error_tuple)?
+        .ok_or_else(|| tenant_gate_not_found(&id))?;
+    if tenant_denied(&identity, &inst) {
+        return Err(tenant_gate_not_found(&id));
+    }
+
+    let definition = audit_definition_view(state.as_ref(), &inst.process_def_id)
+        .await
+        .map_err(internal_error_tuple)?;
+
+    let mut events =
+        HistoryRepo::list_by_instance(state.storage.history_repo.as_ref(), &id, None, None)
+            .await
+            .map_err(internal_error_tuple)?;
+    // Deterministic causal order across stores (same key the /steps
+    // endpoint uses): (occurred_at, phase_rank, listing order).
+    crate::step_trace::sort_history_causally(&mut events);
+
+    // Actor-attributed event views + approval decisions, in one pass.
+    let mut views = Vec::with_capacity(events.len());
+    let mut decisions = Vec::new();
+    for (seq, ev) in events.iter().enumerate() {
+        let actor = audit_event_actor(&ev.payload);
+        match ev.event_type.as_str() {
+            "ApprovalGranted" | "ApprovalRejected" => decisions.push(AuditDecisionView {
+                approval_id: ev
+                    .payload
+                    .get("approval_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                decision: if ev.event_type == "ApprovalGranted" {
+                    "approved"
+                } else {
+                    "rejected"
+                }
+                .to_string(),
+                node_id: ev
+                    .payload
+                    .get("node_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                actor: actor.clone(),
+                note: ev
+                    .payload
+                    .get("note")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                occurred_at: ev.occurred_at.clone(),
+            }),
+            _ => {}
+        }
+        views.push(AuditEventView {
+            sequence: seq as u64,
+            id: ev.id.clone(),
+            event_type: ev.event_type.clone(),
+            category: event_type_to_category(&ev.event_type).to_string(),
+            occurred_at: ev.occurred_at.clone(),
+            actor,
+            payload: ev.payload.clone(),
+        });
+    }
+
+    // Artifact references: history payloads first (chronological), then
+    // the instance's current variables (deduped by (uri, variable)).
+    let mut artifacts = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for ev in &events {
+        for key in ["variables", "initial_variables"] {
+            if let Some(map) = ev.payload.get(key).and_then(|v| v.as_object()) {
+                collect_artifact_refs(map, "history", &mut artifacts, &mut seen);
+            }
+        }
+    }
+    let instance_variables: serde_json::Map<String, serde_json::Value> = inst
+        .variables
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+        .collect();
+    collect_artifact_refs(&instance_variables, "instance", &mut artifacts, &mut seen);
+
+    Ok(Json(AuditResponse {
+        instance_id: id,
+        instance: AuditInstanceView {
+            state: status_str(inst.state).to_string(),
+            tenant_id: inst.tenant_id.clone(),
+        },
+        definition,
+        events: views,
+        decisions,
+        artifacts,
     }))
 }
 
@@ -2064,6 +2410,25 @@ pub async fn complete_task_by_id(
         variables: body.variables,
     });
     state.engine.run_async(ev, &mut ctx).await;
+    // E5-3 boundary event: WHO completed the user task (the engine's
+    // `UserTaskCompleted` carries the variables but no actor).
+    {
+        let payload = serde_json::json!({
+            "instance_id": instance_id.as_str(),
+            "task_id": task_id.as_str(),
+            "node_id": node_id.as_str(),
+            "task_kind": "user",
+            "actor": identity.actor(),
+        });
+        let _ = HistoryRepo::append(
+            state.storage.history_repo.as_ref(),
+            &instance_id,
+            "TaskCompleted",
+            &payload,
+            &occurred_at_now(),
+        )
+        .await;
+    }
     info!(
         task_id = %task_id,
         instance_id = %instance_id,
@@ -2120,6 +2485,10 @@ pub async fn external_task_fetch_and_lock(
             "process_instance_id": t.process_instance_id,
             "worker_id": body.worker_id,
             "retries": t.retries,
+            // E5-3: the VERIFIED request identity (JWT `sub` under JWT
+            // auth) alongside the client-claimed `worker_id` — the lease
+            // owner and the accountable principal can differ.
+            "actor": identity.actor(),
         });
         let _ = HistoryRepo::append(
             state.storage.history_repo.as_ref(),
@@ -2306,10 +2675,32 @@ pub async fn external_task_complete(
     let ev = EngineEvent::ExternalTaskCompleted(payloads::ExternalTaskCompleted {
         instance_id: task.process_instance_id.clone(),
         token_id: task.token_id.clone(),
-        node_id,
+        node_id: node_id.clone(),
         variables,
     });
     state.engine.run_async(ev, &mut ctx).await;
+    // E5-3 boundary event: WHO completed the external task — the verified
+    // actor alongside the client-claimed `worker_id` (the engine's
+    // `ExternalTaskCompleted` event has neither).
+    {
+        let instance_id = task.process_instance_id.clone();
+        let payload = serde_json::json!({
+            "instance_id": instance_id.as_str(),
+            "task_id": task.task_id,
+            "node_id": node_id,
+            "task_kind": "external",
+            "worker_id": body.worker_id,
+            "actor": identity.actor(),
+        });
+        let _ = HistoryRepo::append(
+            state.storage.history_repo.as_ref(),
+            &instance_id,
+            "TaskCompleted",
+            &payload,
+            &occurred_at_now(),
+        )
+        .await;
+    }
     Ok(Json(CompleteTaskResponse {
         status: "COMPLETED".to_string(),
     }))
@@ -2479,6 +2870,9 @@ pub async fn external_task_fail(
         "worker_id": worker_id_for_log,
         "retries": task.retries,
         "error_message": error_message,
+        // E5-3: the VERIFIED request identity alongside the client-claimed
+        // `worker_id` — who is accountable for the failure report.
+        "actor": identity.actor(),
     });
     // The envelope rides in the standard variable-carrying payload key and
     // is redacted with the same policy the engine's history handler
@@ -4092,8 +4486,15 @@ pub async fn delete_replay_session(
 
 /// POST /api/v1/process-definitions/deploy — deploy a process definition from BPMN 2.0 XML.
 /// On compile failure returns 400 with list of CompilerErrors (03.md).
+///
+/// E5-3: the deployer is logged with the verified actor. Definition
+/// lifecycle actions have NO instance to attach history rows to (history
+/// is instance-scoped, and the Postgres schema enforces that with a
+/// foreign key), so their traceability is the server log — see
+/// `docs/audit-and-retention.md` for the honest scope.
 pub async fn deploy_bpmn(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     body: String,
 ) -> Result<(StatusCode, Json<DeployResponse>), (StatusCode, Json<DeployErrorResponse>)> {
     let def = match bpm_engine_bpmn::parse_and_compile(&body) {
@@ -4126,6 +4527,11 @@ pub async fn deploy_bpmn(
             }),
         ));
     }
+    info!(
+        definition_id = %process_definition_id,
+        actor = identity.actor(),
+        "process definition deployed"
+    );
     Ok((
         StatusCode::CREATED,
         Json(DeployResponse {
@@ -4458,8 +4864,13 @@ pub async fn get_active_definition(
 }
 
 /// PUT /api/v1/process-definitions/:id/activate — set a version as active.
+///
+/// E5-3: the operator is logged with the verified actor (definition
+/// lifecycle actions carry no instance-scoped history rows — see
+/// `docs/audit-and-retention.md`).
 pub async fn activate_definition(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
 ) -> Result<Json<ActivateResponse>, (StatusCode, Json<ErrorResponse>)> {
     state
@@ -4468,7 +4879,7 @@ pub async fn activate_definition(
         .activate(&id)
         .await
         .map_err(internal_error_tuple)?;
-    info!(definition_id = %id, "process definition activated");
+    info!(definition_id = %id, actor = identity.actor(), "process definition activated");
     Ok(Json(ActivateResponse {
         id,
         status: "active".to_string(),
@@ -4476,8 +4887,11 @@ pub async fn activate_definition(
 }
 
 /// PUT /api/v1/process-definitions/:id/deprecate — mark a version as deprecated.
+///
+/// E5-3: the operator is logged with the verified actor.
 pub async fn deprecate_definition(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
 ) -> Result<Json<ActivateResponse>, (StatusCode, Json<ErrorResponse>)> {
     state
@@ -4486,7 +4900,7 @@ pub async fn deprecate_definition(
         .deprecate(&id)
         .await
         .map_err(internal_error_tuple)?;
-    info!(definition_id = %id, "process definition deprecated");
+    info!(definition_id = %id, actor = identity.actor(), "process definition deprecated");
     Ok(Json(ActivateResponse {
         id,
         status: "deprecated".to_string(),
@@ -4553,6 +4967,26 @@ pub async fn readiness(
     // Merge extra health checks (e.g. postgres pool status)
     if let Some(ref extra) = state.extra_health_checks {
         checks.extend(extra());
+    }
+
+    // E5-3: retention readiness. "ok" = retention is ON and the last sweep
+    // COMPLETED (last_sweep is set only on a fully successful run — the
+    // startup sweep runs before serving, so by the time /ready answers a
+    // None means the sweep errored: a persistently failing retention sweep
+    // reports "degraded" instead of green, which is the correct compliance
+    // signal). Reported only when retention is ON — the default (0 days) is
+    // "keep everything", which needs no readiness signal.
+    if state.retention.retention_days > 0 {
+        let sweep_ok = state
+            .retention
+            .last_sweep
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false);
+        checks.insert(
+            "audit_retention".to_string(),
+            if sweep_ok { "ok" } else { "degraded" }.to_string(),
+        );
     }
 
     // Informational metrics (e.g. db_pool_active) are numeric; they report
@@ -4663,6 +5097,26 @@ async fn requeue_dead_letter(
         .await
         .map_err(internal_error_tuple)?
         .ok_or_else(dead_letter_not_found)?;
+    // E5-3 boundary event: WHO requeued the dead-letter entry (the DLQ
+    // requeue is an operator action; its history lands on the instance the
+    // entry belongs to).
+    {
+        let payload = serde_json::json!({
+            "instance_id": entry.process_instance_id,
+            "dead_letter_id": id,
+            "task_id": task_id,
+            "actor": identity.actor(),
+        });
+        let _ = HistoryRepo::append(
+            state.storage.history_repo.as_ref(),
+            &entry.process_instance_id,
+            "DeadLetterRequeued",
+            &payload,
+            &occurred_at_now(),
+        )
+        .await;
+    }
+    info!(dead_letter_id = %id, actor = identity.actor(), "dead letter requeued");
     Ok(Json(
         serde_json::json!({ "status": "requeued", "task_id": task_id }),
     ))
@@ -4691,6 +5145,24 @@ async fn delete_dead_letter(
         .delete(&id)
         .await
         .map_err(internal_error_tuple)?;
+    // E5-3 boundary event: WHO deleted the dead-letter entry (irreversible
+    // operator action).
+    {
+        let payload = serde_json::json!({
+            "instance_id": entry.process_instance_id,
+            "dead_letter_id": id,
+            "actor": identity.actor(),
+        });
+        let _ = HistoryRepo::append(
+            state.storage.history_repo.as_ref(),
+            &entry.process_instance_id,
+            "DeadLetterDeleted",
+            &payload,
+            &occurred_at_now(),
+        )
+        .await;
+    }
+    info!(dead_letter_id = %id, actor = identity.actor(), "dead letter deleted");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -4864,6 +5336,14 @@ fn api_v1_router(
         GET,
         "/process-instances/:id/steps",
         get_instance_steps
+    );
+    // Audit view (E5-3, issue #25): actor-attributed timeline + decisions
+    // + artifact references. A read — all authenticated roles.
+    let router = api_route!(
+        router,
+        GET,
+        "/process-instances/:id/audit",
+        get_instance_audit
     );
     let router = api_route!(router, POST, "/process-instances/:id/replay", create_replay);
     let router = api_route!(router, POST, "/replay/:session_id/step", replay_step);
@@ -5086,5 +5566,107 @@ mod tests {
             routes.iter().all(|(_, p)| p.starts_with('/')),
             "registry paths must be absolute wire paths: {routes:?}"
         );
+    }
+
+    // --- Audit helpers (E5-3) ---------------------------------------------------
+
+    #[test]
+    fn audit_definition_id_version_parsing_matches_the_stores() {
+        use super::parse_definition_id_version;
+        assert_eq!(
+            parse_definition_id_version("order-flow:3"),
+            ("order-flow".to_string(), 3)
+        );
+        // Colonless id → version 1 (the stores' rule).
+        assert_eq!(
+            parse_definition_id_version("audit-approval-flow"),
+            ("audit-approval-flow".to_string(), 1)
+        );
+        // A NON-numeric version segment is not a version: the whole id is
+        // the key (the stores' fallback rule).
+        assert_eq!(
+            parse_definition_id_version("weird:key:notnum"),
+            ("weird:key:notnum".to_string(), 1)
+        );
+    }
+
+    #[test]
+    fn audit_event_actor_reads_only_nonempty_actors() {
+        use super::audit_event_actor;
+        assert_eq!(
+            audit_event_actor(&serde_json::json!({ "actor": "alice" })),
+            Some("alice".to_string())
+        );
+        assert_eq!(
+            audit_event_actor(&serde_json::json!({ "actor": null })),
+            None,
+            "a null actor (e.g. an undecided record) stays absent"
+        );
+        assert_eq!(
+            audit_event_actor(&serde_json::json!({ "actor": "" })),
+            None,
+            "an empty actor is not an attribution"
+        );
+        assert_eq!(
+            audit_event_actor(&serde_json::json!({ "token_id": "t1" })),
+            None,
+            "engine-internal events carry no actor"
+        );
+    }
+
+    #[test]
+    fn audit_artifact_extraction_parses_envelopes_and_dedups() {
+        use super::collect_artifact_refs;
+        use std::collections::HashSet;
+        let sha = "a".repeat(64);
+        let mut variables = serde_json::Map::new();
+        variables.insert(
+            "report".to_string(),
+            serde_json::Value::String(format!(
+                r#"__var:1:{{"t":"artifact","uri":"https://x.example.com/r1.md","sha256":"{sha}","size":4096}}"#
+            )),
+        );
+        // The SAME reference seen again (a later event) — deduped.
+        variables.insert(
+            "report_copy".to_string(),
+            serde_json::Value::String(format!(
+                r#"__var:1:{{"t":"artifact","uri":"https://x.example.com/r1.md","sha256":"{sha}","size":4096}}"#
+            )),
+        );
+        // A json envelope is NOT an artifact reference.
+        variables.insert(
+            "data".to_string(),
+            serde_json::Value::String(r#"__var:1:{"t":"json","val":1}"#.to_string()),
+        );
+        // Redacted / encrypted / plain values contribute nothing.
+        variables.insert(
+            "redacted".to_string(),
+            serde_json::Value::String("__truncated:5000:0123456789ab:".to_string()),
+        );
+        variables.insert(
+            "secret".to_string(),
+            serde_json::Value::String("__encrypted:QUFB:QkJC".to_string()),
+        );
+        variables.insert(
+            "plain".to_string(),
+            serde_json::Value::String("hello".to_string()),
+        );
+
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        collect_artifact_refs(&variables, "history", &mut out, &mut seen);
+        // Both variables reference the same URI but under DIFFERENT
+        // names: both are listed (the dedup key is (uri, variable)).
+        assert_eq!(out.len(), 2, "{out:?}");
+        for a in &out {
+            assert_eq!(a.uri, "https://x.example.com/r1.md");
+            assert_eq!(a.sha256.as_deref(), Some(sha.as_str()));
+            assert_eq!(a.size, Some(4096));
+            assert!(a.media_type.is_none());
+            assert_eq!(a.source, "history");
+        }
+        // Re-collecting the same map adds nothing (idempotent dedup).
+        collect_artifact_refs(&variables, "instance", &mut out, &mut seen);
+        assert_eq!(out.len(), 2, "{out:?}");
     }
 }

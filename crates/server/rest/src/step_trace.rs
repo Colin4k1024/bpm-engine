@@ -186,6 +186,10 @@ fn phase_rank(event_type: &str) -> u16 {
         | "TimerFired"
         | "MessageSent"
         | "SignalSent" => 40,
+        // Route-layer attribution events (E5-3): rank AFTER the outcome
+        // they attribute (40) so a same-second TaskCompleted follows the
+        // engine's ExternalTaskCompleted/UserTaskCompleted it describes.
+        "TaskCompleted" => 45,
         "TokenCompleted" => 50,
         "SagaStarted" => 60,
         "SagaCompleted" => 61,
