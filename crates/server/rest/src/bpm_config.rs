@@ -86,6 +86,54 @@ pub struct EngineConfig {
     /// Maximum byte length of a variable value recorded verbatim in event
     /// history; longer values are replaced with a `__truncated:` marker.
     pub history_variable_max_bytes: usize,
+    /// Task types whose external tasks are approval-required (E5-2,
+    /// ADR-008): the engine persists an approval record when a token
+    /// arrives and creates the fetchable task only after an operator
+    /// approves. Accepts a TOML array
+    /// (`approval_required_task_types = ["payment_charge"]`) or a
+    /// comma-separated string (env
+    /// `BPM_ENGINE__APPROVAL_REQUIRED_TASK_TYPES=payment_charge,audit`).
+    /// Default: empty (no approval gate — pre-E5-2 behavior).
+    #[serde(deserialize_with = "comma_list_or_vec")]
+    pub approval_required_task_types: Vec<String>,
+}
+
+/// Deserialize a `Vec<String>` that may arrive as EITHER a sequence (TOML
+/// array) or a single comma-separated string (env var override): empty
+/// segments are dropped, whitespace is trimmed.
+fn comma_list_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a list of task types or a comma-separated string")
+        }
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            Ok(value
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect())
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(item) = seq.next_element::<String>()? {
+                let item = item.trim().to_string();
+                if !item.is_empty() {
+                    out.push(item);
+                }
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_any(V)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +178,7 @@ impl Default for EngineConfig {
             timer_batch_size: 100,
             variable_max_bytes: 65_536,
             history_variable_max_bytes: 1024,
+            approval_required_task_types: Vec::new(),
         }
     }
 }
@@ -224,6 +273,7 @@ impl BpmConfig {
             engine.timer_batch_size = self.engine.timer_batch_size,
             engine.variable_max_bytes = self.engine.variable_max_bytes,
             engine.history_variable_max_bytes = self.engine.history_variable_max_bytes,
+            engine.approval_required_task_types = ?self.engine.approval_required_task_types,
             log.level = %self.log.level,
             log.format = %self.log.format,
             rate_limit.requests_per_minute = self.rate_limit.requests_per_minute,
@@ -264,6 +314,10 @@ mod tests {
         assert_eq!(cfg.rate_limit.requests_per_minute, 100);
         assert!(cfg.auth.jwt_secret.is_empty());
         assert!(cfg.auth.api_key.is_empty());
+        assert!(
+            cfg.engine.approval_required_task_types.is_empty(),
+            "no task types require approval by default (pre-E5-2 behavior)"
+        );
     }
 
     #[test]
@@ -295,6 +349,52 @@ variable_max_bytes = 131072
         let cfg: BpmConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.engine.variable_max_bytes, 131_072);
         assert_eq!(cfg.engine.history_variable_max_bytes, 1024);
+    }
+
+    #[test]
+    fn approval_required_task_types_toml_array_and_comma_string() {
+        // TOML array form.
+        let toml_str = r#"
+[engine]
+approval_required_task_types = ["payment_charge", "audit"]
+"#;
+        let cfg: BpmConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            cfg.engine.approval_required_task_types,
+            vec!["payment_charge".to_string(), "audit".to_string()]
+        );
+        // Unset fields keep defaults.
+        assert_eq!(cfg.engine.variable_max_bytes, 65_536);
+    }
+
+    #[test]
+    fn approval_required_task_types_comma_string_form() {
+        // Comma-separated string form (the env-var override shape),
+        // including whitespace trimming and empty-segment dropping.
+        let toml_str = r#"
+[engine]
+approval_required_task_types = "payment_charge, audit , ,payout"
+"#;
+        let cfg: BpmConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            cfg.engine.approval_required_task_types,
+            vec![
+                "payment_charge".to_string(),
+                "audit".to_string(),
+                "payout".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn approval_required_task_types_empty_forms() {
+        // Empty string and empty array both yield no gate.
+        let cfg: BpmConfig =
+            toml::from_str("[engine]\napproval_required_task_types = \"\"\n").unwrap();
+        assert!(cfg.engine.approval_required_task_types.is_empty());
+        let cfg: BpmConfig =
+            toml::from_str("[engine]\napproval_required_task_types = []\n").unwrap();
+        assert!(cfg.engine.approval_required_task_types.is_empty());
     }
 
     #[test]

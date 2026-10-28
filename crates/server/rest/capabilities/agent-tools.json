@@ -24,6 +24,20 @@
     "roles": "E5-1 role→permission matrix, enforced for JWT-authenticated requests only (the admin API key bypasses role checks; open mode has no credentials to authorize). Roles: deployer — deploy, activate, deprecate process definitions; operator — start instances, complete user tasks, replay sessions, requeue/delete dead letters; worker — external-task fetch-and-lock, complete, fail, extend-lock (worker ONLY: the lease lifecycle belongs to the worker role; operators administrate via the DLQ); auditor — the read-only role. READS (every GET, plus the side-effect-free POSTs validate and dry-run) are allowed for ALL authenticated roles — cross-tenant reads are rejected by tenancy (404 \"not_found\"), not by role. A role without permission for an operation answers 403 \"forbidden\". All store queries are scoped by the VERIFIED tenant claim: lists are filtered to the tenant, instance/task/DLQ access of another tenant answers 404 (indistinguishable from unknown ids), and worker fetch-and-lock delivers only the claim tenant's tasks. Definitions are engine-global in v1 (readable by every tenant; only deployers modify them). See docs/rbac.md."
   },
   "error_examples": {
+    "approval_already_decided": {
+      "status": 409,
+      "body": {
+        "error": "approval 00000000-0000-4000-8000-000000000000 is already decided (Approved); a conflicting decision is rejected and the original outcome stands",
+        "code": "approval_already_decided"
+      }
+    },
+    "approval_not_found": {
+      "status": 404,
+      "body": {
+        "error": "approval not found: 00000000-0000-4000-8000-000000000000",
+        "code": "approval_not_found"
+      }
+    },
     "deploy_failed": {
       "status": 500,
       "body": {
@@ -50,6 +64,27 @@
       "body": {
         "error": "role 'auditor' is not allowed to POST /api/v1/process-instances",
         "code": "forbidden"
+      }
+    },
+    "instance_cancelled": {
+      "status": 409,
+      "body": {
+        "error": "process instance 00000000-0000-4000-8000-000000000000 was cancelled; task operations on it are rejected",
+        "code": "instance_cancelled"
+      }
+    },
+    "instance_not_pausable": {
+      "status": 409,
+      "body": {
+        "error": "process instance 00000000-0000-4000-8000-000000000000 is COMPLETED and cannot be paused",
+        "code": "instance_not_pausable"
+      }
+    },
+    "instance_paused": {
+      "status": 409,
+      "body": {
+        "error": "process instance 00000000-0000-4000-8000-000000000000 is paused; the task operation is refused until the instance is resumed",
+        "code": "instance_paused"
       }
     },
     "internal": {
@@ -209,6 +244,159 @@
     }
   },
   "tools": [
+    {
+      "name": "decide_approval",
+      "operation": "POST /api/v1/approvals/{approval_id}/decide",
+      "summary": "Approve or reject a pending approval record",
+      "description": "Operator action (E5-2, ADR-008): decides a Pending approval record\natomically — exactly once. Approve creates the fetchable external\ntask with the ENGINE-written `__approval` task variable\n(task-creation-after-approval: until then no task row exists, so\nworkers never see unapproved work). Reject dead-letters the step,\nterminates the token (`TokenFailed`), and terminates the instance\nwhen nothing else is active. Both decisions append an\n`ApprovalGranted`/`ApprovalRejected` history event carrying the\nverified actor and the optional note.\n\nOnly-once contract: a retried SAME decision replays 200 with the\nrecorded outcome; a CONFLICTING decision on a decided record\nanswers 409 `approval_already_decided` — the original outcome\nalways stands. Approvals of a cancelled instance are still decided\n(audit) but create no task.",
+      "classification": "mutating",
+      "side_effects": "Persists the decision on the approval record (exactly once, with the actor and note) and takes effect: approve creates the fetchable external task with the engine-written __approval variable; reject dead-letters the step and fails the token. Both append ApprovalGranted/Rejected history.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "approval_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Approval record id (a UUID; discover via the instance approvals list)."
+        },
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "schema": {
+            "properties": {
+              "decision": {
+                "enum": [
+                  "approve",
+                  "reject"
+                ],
+                "type": "string"
+              },
+              "note": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "decision"
+            ],
+            "type": "object"
+          },
+          "content_type": "application/json"
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "The decision was applied (or replayed identically).",
+          "schema": "ApprovalRecordResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 404,
+            "code": "approval_not_found"
+          },
+          {
+            "status": 409,
+            "code": "approval_already_decided"
+          },
+          {
+            "status": 422,
+            "code": "invalid_json"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
     {
       "name": "list_dead_letters",
       "operation": "GET /api/v1/dead-letters",
@@ -887,6 +1075,10 @@
             "code": "forbidden"
           },
           {
+            "status": 409,
+            "description": "Refused by the E5-2 instance lifecycle gate: `instance_paused`\n(the task stays Locked; complete after resume or redelivery)\nor `instance_cancelled` (the work is discarded)."
+          },
+          {
             "status": 422,
             "code": "invalid_json"
           },
@@ -1030,7 +1222,7 @@
           },
           {
             "status": 409,
-            "code": "lock_conflict"
+            "description": "`lock_conflict` (unknown / not locked / wrong owner), or\n`instance_cancelled` — E5-2: lease maintenance continues during\na PAUSE, but a cancelled instance rejects the extension."
           },
           {
             "status": 422,
@@ -1294,6 +1486,10 @@
           {
             "status": 403,
             "code": "forbidden"
+          },
+          {
+            "status": 409,
+            "description": "Refused by the E5-2 instance lifecycle gate: `instance_paused`\nor `instance_cancelled`."
           },
           {
             "status": 422,
@@ -2329,6 +2525,121 @@
       }
     },
     {
+      "name": "list_instance_approvals",
+      "operation": "GET /api/v1/process-instances/{id}/approvals",
+      "summary": "List the instance's approval records",
+      "description": "The engine-owned approval records of the instance (E5-2, ADR-008):\none per approval-required step visit, with the decision, actor and\nnote once decided. Operators use this to discover pending approval\nids for the decide endpoint; auditors inspect the records. Read\noperation (all roles).",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        },
+        {
+          "name": "X-Tenant-Id",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Tenant scope for the request (optional). DEPRECATED for\nJWT-authenticated requests (E5-1): the tenant comes from the\nverified `tenant` claim, an absent or agreeing header is accepted,\nand a CONFLICTING header is rejected with 403 `forbidden`. In open\nand API-key modes the header keeps its pre-E5-1 meaning: untrusted\nclient input that scopes listings and instance starts (dev-mode\naffordance)."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "The instance's approval records (may be empty).",
+          "schema": "ApprovalListResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "cancel_instance",
+      "operation": "POST /api/v1/process-instances/{id}/cancel",
+      "summary": "Cancel a process instance",
+      "description": "Operator action (E5-2, ADR-008 §6): terminates every non-terminal\ntoken and the instance itself (TerminateEnd semantics — a\n`ProcessTerminated` engine event is recorded), plus an\n`InstanceCancelled` history event with the actor. Only-once:\ncancelling a TERMINATED instance replays 200 with the terminal\nstate; a COMPLETED instance replays 200 as a no-op. Task operations\n(external-task complete/fail/extend-lock, user-task complete) on a\ncancelled instance are rejected with 409 `instance_cancelled`.",
+      "classification": "mutating",
+      "side_effects": "Terminates every non-terminal token and the instance itself (persisted), records an InstanceCancelled history event and a ProcessTerminated engine event; task operations on the instance are rejected afterwards.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Instance cancelled (or an idempotent terminal replay).",
+          "schema": "InstanceLifecycleResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
       "name": "get_instance_history",
       "operation": "GET /api/v1/process-instances/{id}/history",
       "summary": "Execution history (auditable timeline)",
@@ -2473,6 +2784,63 @@
       }
     },
     {
+      "name": "pause_instance",
+      "operation": "POST /api/v1/process-instances/{id}/pause",
+      "summary": "Pause a running process instance",
+      "description": "Operator action (E5-2, ADR-008 §5): suspends every non-terminal\ntoken of the instance (Suspended status; the instance state stays\nRUNNING — `paused` in the response is derived from the token\nstates) and records an `InstancePaused` history event with the\nactor. Only-once: pausing an already-paused instance replays 200\nwithout a second history event; a terminal instance answers 409\n`instance_not_pausable`. Honest pause semantics: in-flight\nexternal-task leases are NOT revoked — complete/fail (and user-task\ncomplete) are refused with 409 `instance_paused` until resume,\nwhile lease extension continues.",
+      "classification": "mutating",
+      "side_effects": "Suspends every non-terminal token of the instance (persisted, version-bumped) and records an InstancePaused history event; in-flight task completions are refused until resume.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Instance paused (or an idempotent replay).",
+          "schema": "InstanceLifecycleResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 409,
+            "code": "instance_not_pausable"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
       "name": "create_replay_session",
       "operation": "POST /api/v1/process-instances/{id}/replay",
       "summary": "Create a replay session",
@@ -2513,6 +2881,63 @@
           {
             "status": 404,
             "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "resume_instance",
+      "operation": "POST /api/v1/process-instances/{id}/resume",
+      "summary": "Resume a paused process instance",
+      "description": "Operator action (E5-2, ADR-008 §5): flips Suspended tokens back to\nReady (version-bumped) and records an `InstanceResumed` history\nevent with the actor. Idempotent: resuming an unpaused instance is\na 200 no-op; a terminal instance answers 409 `instance_not_pausable`.",
+      "classification": "mutating",
+      "side_effects": "Flips Suspended tokens back to Ready (persisted, version-bumped) and records an InstanceResumed history event.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Instance resumed (or an idempotent no-op replay).",
+          "schema": "InstanceLifecycleResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 409,
+            "code": "instance_not_pausable"
           },
           {
             "status": 429,
@@ -3202,6 +3627,10 @@
           {
             "status": 403,
             "code": "forbidden"
+          },
+          {
+            "status": 409,
+            "description": "Refused by the E5-2 instance lifecycle gate: `instance_paused`\n(the instance's tokens are Suspended — complete after resume)\nor `instance_cancelled` (the instance was cancelled)."
           },
           {
             "status": 422,

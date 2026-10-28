@@ -174,4 +174,15 @@ pub trait ExternalTaskStore: Send + Sync {
 
     /// Load task by id (for REST layer after complete to get token_id/instance_id for transition).
     async fn get(&self, task_id: &str) -> anyhow::Result<Option<ExternalTask>>;
+
+    /// Load the (first) task created for `token_id`, if any — regardless of
+    /// its state (Ready/Locked/Completed/Failed).
+    ///
+    /// Used by the E5-2 approval-grant effect re-drive (ADR-008 §7.1):
+    /// `create` is NOT idempotent (it mints a fresh task id), so a re-drive
+    /// of a granted approval checks this first — an existing task row for
+    /// the token proves the grant effect already ran (a crash between task
+    /// creation and `mark_effect_applied`) and the re-drive must not create
+    /// a second task.
+    async fn get_by_token(&self, token_id: &str) -> anyhow::Result<Option<ExternalTask>>;
 }

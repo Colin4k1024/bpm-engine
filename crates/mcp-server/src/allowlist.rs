@@ -1,12 +1,13 @@
 //! The MCP v1 tool surface and the minimal-permission allowlist model
 //! (issue #20: 按最小权限授权 — minimal permission by allowlist).
 //!
-//! [`V1_SURFACE`] is the DECIDED, documented v1 subset of the 35-tool E4-1
+//! [`V1_SURFACE`] is the DECIDED, documented v1 subset of the E4-1
 //! catalog: definition validation/dry-run/deploy/version listing, instance
 //! start/query/history/steps, the external-task lease lifecycle, user-task
 //! list/complete, and dead-letter list/get/requeue. Tools outside the
 //! surface (replay sessions, definition view/activate/deprecate, invariant
-//! checks, health) are never exposed in v1 regardless of configuration.
+//! checks, health, and the E5-2 approval/lifecycle endpoints) are never
+//! exposed in v1 regardless of configuration.
 //!
 //! Resolution of the effective allowlist (fail closed on typos and unknown
 //! names):

@@ -11,14 +11,16 @@ use axum::{
 };
 use bpm_engine_core::{
     parse_envelope, payloads, redact_history_variable_value, validate_artifact_uri,
-    AesGcmEncryptor, AiTaskEnvelope, EngineEvent, ExternalTaskState, HistoryRedactionPolicy,
-    InstanceState, NodeType, ProcessDefinition, ProcessInstance, RetryCategory, TokenStatus,
-    VariableEncryptor, VariableEnvelope, AI_TASK_ENVELOPE_KEY, ENCRYPTED_PREFIX,
+    AesGcmEncryptor, AiTaskEnvelope, ApprovalDecision, EngineEvent, ExternalTaskState,
+    HistoryRedactionPolicy, InstanceState, NodeType, ProcessDefinition, ProcessInstance,
+    RetryCategory, TokenStatus, VariableEncryptor, VariableEnvelope, AI_TASK_ENVELOPE_KEY,
+    ENCRYPTED_PREFIX,
 };
 use bpm_engine_runtime::EngineContext;
 use bpm_engine_storage::{
-    CompensationRecordRepo, ExternalTaskStore, HistoryRepo, ParallelJoinRepo,
-    ProcessDefinitionStore, ProcessInstanceStore, TimerStore, TokenStore,
+    ApprovalDecideOutcome, ApprovalError, ApprovalStore, CompensationRecordRepo, ExternalTaskStore,
+    HistoryRepo, ParallelJoinRepo, ProcessDefinitionStore, ProcessInstanceStore, TimerStore,
+    TokenStore,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
@@ -128,6 +130,25 @@ pub mod error_codes {
         // `lock_conflict`: 409 — lock extension refused (task unknown, not
         // locked, or owned by a different worker).
         "lock_conflict",
+        // Approval & instance lifecycle (E5-2, ADR-008).
+        //
+        // `approval_not_found`: 404 — unknown approval record id (a record
+        // of another tenant is reported the same way — no existence leak).
+        "approval_not_found",
+        // `approval_already_decided`: 409 — a decide on an already-decided
+        // record whose decision CONFLICTS with the submitted one (a retried
+        // same decision is a 200 replay).
+        "approval_already_decided",
+        // `instance_paused`: 409 — external-task complete/fail or user-task
+        // complete on an instance whose tokens are Suspended (paused);
+        // the operation is refused until resume.
+        "instance_paused",
+        // `instance_cancelled`: 409 — external-task or user-task operations
+        // on a cancelled (Terminated) instance.
+        "instance_cancelled",
+        // `instance_not_pausable`: 409 — pause/resume on an instance that
+        // already reached a terminal state.
+        "instance_not_pausable",
     ];
 
     /// 404 — unknown resource id.
@@ -158,6 +179,16 @@ pub mod error_codes {
     pub const INVARIANT_VIOLATION: &str = "invariant_violation";
     /// 409 — lock extension refused.
     pub const LOCK_CONFLICT: &str = "lock_conflict";
+    /// 404 — unknown approval record id (E5-2).
+    pub const APPROVAL_NOT_FOUND: &str = "approval_not_found";
+    /// 409 — a conflicting decide on an already-decided approval record (E5-2).
+    pub const APPROVAL_ALREADY_DECIDED: &str = "approval_already_decided";
+    /// 409 — task operations on a paused instance (E5-2).
+    pub const INSTANCE_PAUSED: &str = "instance_paused";
+    /// 409 — task operations on a cancelled instance (E5-2).
+    pub const INSTANCE_CANCELLED: &str = "instance_cancelled";
+    /// 409 — pause/resume on a terminal instance (E5-2).
+    pub const INSTANCE_NOT_PAUSABLE: &str = "instance_not_pausable";
 }
 
 /// A request-body extractor that produces the API's typed error contract
@@ -584,6 +615,8 @@ fn build_ctx(state: &AppState, tenant_id: Option<String>) -> EngineContext {
     .compensation_repo(Arc::clone(&s.compensation_repo))
     .external_task_store(Arc::clone(&s.external_task_store))
     .history_repo(Arc::clone(&s.history_repo))
+    .approval_store(Arc::clone(&s.approval_store))
+    .approval_required_task_types(Arc::clone(&state.approval_required_task_types))
     .history_redaction_policy(state.history_redaction_policy);
     if let Some(id) = tenant_id {
         builder = builder.tenant_id(id);
@@ -615,7 +648,13 @@ fn build_ctx_with_repo(
     .timer_store(repo.clone() as Arc<dyn TimerStore>)
     .compensation_repo(repo.clone() as Arc<dyn CompensationRecordRepo>)
     .external_task_store(repo.clone() as Arc<dyn ExternalTaskStore>)
-    .history_repo(repo as Arc<dyn HistoryRepo>)
+    .history_repo(repo.clone() as Arc<dyn HistoryRepo>)
+    // E5-2: replay runs against the shadow MemoryRepo with an EMPTY
+    // approval-required set — approval decisions are route-layer history
+    // events (ApprovalGranted/Rejected), not engine events, so an
+    // approval-required step replays as immediate task creation in the
+    // simulation (ADR-008 §8).
+    .approval_store(repo as Arc<dyn ApprovalStore>)
     .history_redaction_policy(history_redaction_policy);
     if let Some(id) = tenant_id {
         builder = builder.tenant_id(id);
@@ -1444,14 +1483,20 @@ pub struct HistoryResponse {
     pub events: Vec<HistoryEventView>,
 }
 
-/// Map event_type to human-friendly category: instance | token | external.
+/// Map event_type to human-friendly category: instance | token | external |
+/// approval.
 fn event_type_to_category(event_type: &str) -> &'static str {
     match event_type {
-        "ProcessStarted" | "ProcessCompleted" => "instance",
+        "ProcessStarted" | "ProcessCompleted" | "ProcessTerminated" => "instance",
+        // E5-2 route-layer instance lifecycle events (ADR-008 §8).
+        "InstancePaused" | "InstanceResumed" | "InstanceCancelled" => "instance",
         "TokenArrived" | "TokenCompleted" | "TokenFailed" | "UserTaskCreated"
         | "UserTaskCompleted" | "TimerScheduled" | "TimerFired" | "SagaStarted"
         | "SagaCompleted" => "token",
         "ExternalTaskLocked" | "ExternalTaskCompleted" | "ExternalTaskFailed" => "external",
+        // E5-2 approval events: ApprovalCreated is written by the engine
+        // gate, Granted/Rejected by the decide endpoint (with the actor).
+        "ApprovalCreated" | "ApprovalGranted" | "ApprovalRejected" => "approval",
         _ => "token",
     }
 }
@@ -1974,6 +2019,11 @@ pub async fn complete_task_by_id(
     enforce_reserved_variable_keys(&body.variables)?;
     enforce_variable_contract(&body.variables, &state.variable_limits)?;
 
+    // E5-2 lifecycle gate: a user-task completion is a token transition —
+    // refused while the instance is paused (409 `instance_paused`) and
+    // rejected after it was cancelled (409 `instance_cancelled`).
+    instance_task_op_gate(state.as_ref(), &instance_id, false).await?;
+
     // Validate required form fields if the user task has a form definition
     let process_store = Arc::clone(&state.storage.process_store);
     let def_store = Arc::clone(&state.storage.def_store);
@@ -2182,6 +2232,19 @@ pub async fn external_task_complete(
     external_task_tenant_gate(&state, &identity, &external_task_store, &task_id)
         .await
         .map_err(|(status, json)| (status, json).into_response())?;
+    // E5-2 lifecycle gate: refuse the completion while the instance is
+    // paused (the task stays Locked; the worker retries after resume or
+    // the expired lease re-delivers) or after it was cancelled. Checked
+    // BEFORE the store mutates the task.
+    if let Some(task) = external_task_store
+        .get(&task_id)
+        .await
+        .map_err(internal_error)?
+    {
+        instance_task_op_gate(state.as_ref(), &task.process_instance_id, false)
+            .await
+            .map_err(|(status, json)| (status, json).into_response())?;
+    }
     external_task_store
         .complete(&task_id, &body.worker_id, variables.clone())
         .await
@@ -2262,6 +2325,16 @@ pub async fn external_task_extend_lock(
     let external_task_store = Arc::clone(&state.storage.external_task_store);
     // E5-1 cross-tenant gate (see external_task_tenant_gate).
     external_task_tenant_gate(&state, &identity, &external_task_store, &task_id).await?;
+    // E5-2 lifecycle gate: lease MAINTENANCE continues during a pause
+    // (in-flight leases are deliberately kept alive, ADR-008 §5), but a
+    // cancelled instance rejects even the extension.
+    if let Some(task) = external_task_store
+        .get(&task_id)
+        .await
+        .map_err(internal_error_tuple)?
+    {
+        instance_task_op_gate(state.as_ref(), &task.process_instance_id, true).await?;
+    }
     let extension = Duration::from_millis(body.extension_ms);
     let ok = external_task_store
         .extend_lock(&task_id, &body.worker_id, extension)
@@ -2361,6 +2434,17 @@ pub async fn external_task_fail(
     external_task_tenant_gate(&state, &identity, &external_task_store, &task_id)
         .await
         .map_err(|(status, json)| (status, json).into_response())?;
+    // E5-2 lifecycle gate: fail (retry/requeue) is a transition like
+    // complete — refused while paused, rejected after cancel.
+    if let Some(task) = external_task_store
+        .get(&task_id)
+        .await
+        .map_err(internal_error)?
+    {
+        instance_task_op_gate(state.as_ref(), &task.process_instance_id, false)
+            .await
+            .map_err(|(status, json)| (status, json).into_response())?;
+    }
     let retry_after = body.retry_after_ms.map(Duration::from_millis);
     external_task_store
         .fail(
@@ -2486,6 +2570,1154 @@ pub async fn external_task_fail(
     Ok(Json(CompleteTaskResponse {
         status: "FAILED".to_string(),
     }))
+}
+
+// --- Approval & instance lifecycle API (E5-2, ADR-008) ----------------------
+
+/// E5-2 lifecycle gate for task operations: an external-task or user-task
+/// operation is refused (409) while the target instance is paused
+/// (`instance_paused`) or after it was cancelled (`instance_cancelled`).
+///
+/// `allow_paused = true` lets lease MAINTENANCE (extend-lock) continue
+/// during a pause — the honest pause semantics keep in-flight leases
+/// alive (ADR-008 §5) — while cancelled instances still reject everything.
+/// A missing instance keeps the caller's own not-found error (the gate is
+/// additive, not a replacement).
+async fn instance_task_op_gate(
+    state: &AppState,
+    instance_id: &str,
+    allow_paused: bool,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let inst = state
+        .storage
+        .process_store
+        .load(instance_id)
+        .await
+        .map_err(internal_error_tuple)?;
+    let Some(inst) = inst else {
+        return Ok(());
+    };
+    if inst.state == InstanceState::Terminated {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::with_code(
+                format!(
+                    "process instance {} was cancelled; task operations on it are rejected",
+                    instance_id
+                ),
+                error_codes::INSTANCE_CANCELLED,
+            )),
+        ));
+    }
+    if !allow_paused
+        && inst
+            .tokens
+            .iter()
+            .any(|t| t.status == TokenStatus::Suspended)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::with_code(
+                format!(
+                    "process instance {} is paused; the task operation is refused until \
+                     the instance is resumed",
+                    instance_id
+                ),
+                error_codes::INSTANCE_PAUSED,
+            )),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct ApprovalDecideRequest {
+    /// The decision: `"approve"` or `"reject"` (anything else is 400
+    /// `invalid_request`).
+    pub decision: String,
+    /// Optional operator note recorded with the decision (record + history).
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ApprovalRecordResponse {
+    pub approval_id: String,
+    pub instance_id: String,
+    pub node_id: String,
+    pub token_id: String,
+    pub task_type: String,
+    /// `PENDING` | `APPROVED` | `REJECTED`.
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Serialize)]
+pub struct ApprovalListResponse {
+    pub instance_id: String,
+    pub approvals: Vec<ApprovalRecordResponse>,
+}
+
+fn approval_record_response(record: &bpm_engine_core::ApprovalRecord) -> ApprovalRecordResponse {
+    let status = match record.status {
+        bpm_engine_core::ApprovalStatus::Pending => "PENDING",
+        bpm_engine_core::ApprovalStatus::Approved => "APPROVED",
+        bpm_engine_core::ApprovalStatus::Rejected => "REJECTED",
+    };
+    ApprovalRecordResponse {
+        approval_id: record.id.clone(),
+        instance_id: record.instance_id.clone(),
+        node_id: record.node_id.clone(),
+        token_id: record.token_id.clone(),
+        task_type: record.task_type.clone(),
+        status: status.to_string(),
+        decided_by: record.decided_by.clone(),
+        decided_at: record.decided_at.clone(),
+        note: record.note.clone(),
+        created_at: record.created_at.clone(),
+    }
+}
+
+/// 404 `approval_not_found` — the same body for an unknown id and (under a
+/// verified identity) another tenant's record (no existence leak).
+fn approval_not_found(approval_id: &str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse::with_code(
+            format!("approval not found: {}", approval_id),
+            error_codes::APPROVAL_NOT_FOUND,
+        )),
+    )
+}
+
+/// Map an [`ApprovalError`] to the typed REST contract.
+fn approval_error_response(e: ApprovalError) -> (StatusCode, Json<ErrorResponse>) {
+    match e {
+        ApprovalError::NotFound { approval_id } => approval_not_found(&approval_id),
+        ApprovalError::Internal(msg) => {
+            tracing::error!(error = %msg, "approval store internal error");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal("internal server error")),
+            )
+        }
+    }
+}
+
+/// GET /api/v1/process-instances/:id/approvals — list the instance's
+/// approval records (all roles may read; operators use this to discover
+/// pending approval ids for the decide endpoint).
+pub async fn list_instance_approvals(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    Path(id): Path<String>,
+) -> Result<Json<ApprovalListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let inst = state
+        .storage
+        .process_store
+        .load(&id)
+        .await
+        .map_err(internal_error_tuple)?;
+    match inst {
+        Some(inst) if tenant_denied(&identity, &inst) => Err(tenant_gate_not_found(&id)),
+        Some(_) => {
+            let records = state
+                .storage
+                .approval_store
+                .list_by_instance(&id)
+                .await
+                .map_err(internal_error_tuple)?;
+            Ok(Json(ApprovalListResponse {
+                instance_id: id,
+                approvals: records.iter().map(approval_record_response).collect(),
+            }))
+        }
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found(format!(
+                "process instance not found: {}",
+                id
+            ))),
+        )),
+    }
+}
+
+/// POST /api/v1/approvals/:approval_id/decide — approve or reject a pending
+/// approval record (operator action, E5-2 / ADR-008).
+///
+/// Only-once: the FIRST decide flips the record and takes effect (approve
+/// creates the fetchable external task with the engine-written
+/// `__approval=true`; reject dead-letters the step and fails the token).
+/// A retried SAME decision replays 200 with the recorded outcome — and, if
+/// the decision's EFFECT is still Pending (a crash or failure between the
+/// durable decision and its application), the replay RE-DRIVES the effect
+/// before answering (self-healing retry). A CONFLICTING decision answers
+/// 409 `approval_already_decided` — the original outcome always stands.
+///
+/// If applying the effect fails (e.g. the task store rejects the insert),
+/// the DECISION is already durably recorded with effect=Pending and the
+/// route answers 500 `internal` naming the approval id and the recovery
+/// action — the operator retries the SAME decide call, which re-drives the
+/// effect (the single-service recovery story, ADR-008 §7.1; the startup
+/// sweep re-drives pending effects as well).
+pub async fn approval_decide(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    Path(approval_id): Path<String>,
+    ValidatedJson(body): ValidatedJson<ApprovalDecideRequest>,
+) -> Result<Json<ApprovalRecordResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let decision = ApprovalDecision::parse(&body.decision).ok_or_else(|| {
+        bad_request(format!(
+            "decision must be \"approve\" or \"reject\", got {:?}",
+            body.decision
+        ))
+    })?;
+    let approval_store = Arc::clone(&state.storage.approval_store);
+    let record = approval_store
+        .get(&approval_id)
+        .await
+        .map_err(internal_error_tuple)?
+        .ok_or_else(|| approval_not_found(&approval_id))?;
+    // E5-1 tenant gate: a record of another tenant is reported exactly like
+    // an unknown one.
+    let instance = state
+        .storage
+        .process_store
+        .load(&record.instance_id)
+        .await
+        .map_err(internal_error_tuple)?;
+    if instance
+        .as_ref()
+        .is_some_and(|i| tenant_denied(&identity, i))
+    {
+        return Err(approval_not_found(&approval_id));
+    }
+
+    let actor = identity.actor().to_string();
+    let outcome = approval_store
+        .decide(&approval_id, decision, &actor, body.note.as_deref())
+        .await
+        .map_err(approval_error_response)?;
+
+    let record = match outcome {
+        ApprovalDecideOutcome::AlreadyDecided(record) => {
+            // Only-once: the original outcome stands. A retried same
+            // decision is a 200 replay; a conflicting decision is 409.
+            if record.status != decision.resulting_status() {
+                warn!(
+                    approval_id = %approval_id,
+                    actor = %actor,
+                    status = ?record.status,
+                    "rejecting conflicting decision on an already-decided approval"
+                );
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse::with_code(
+                        format!(
+                            "approval {} is already decided ({:?}); a conflicting decision \
+                             is rejected and the original outcome stands",
+                            approval_id, record.status
+                        ),
+                        error_codes::APPROVAL_ALREADY_DECIDED,
+                    )),
+                ));
+            }
+            if record.effect == bpm_engine_core::ApprovalEffect::Pending {
+                // Self-healing replay (ADR-008 §7.1): the decision is
+                // durable but its effect was never (fully) applied —
+                // re-drive it BEFORE answering, so a retried decide
+                // converges the state instead of papering over the gap.
+                info!(
+                    approval_id = %approval_id,
+                    actor = %actor,
+                    "approval decide replayed with a pending effect; re-driving the effect"
+                );
+                drive_approval_effect(&state, &record, Some(&identity))
+                    .await
+                    .map_err(|e| approval_effect_pending_error(&approval_id, e))?;
+            } else {
+                info!(
+                    approval_id = %approval_id,
+                    actor = %actor,
+                    "approval decide replayed (already decided identically)"
+                );
+            }
+            return Ok(Json(approval_record_response(&record)));
+        }
+        ApprovalDecideOutcome::Decided(record) => record,
+    };
+
+    // The decision history event is appended by ensure_decision_history
+    // INSIDE drive_approval_effect's lifecycle lock (exactly-once by
+    // approval id) — a route-level append here would duplicate or race it.
+
+    info!(
+        approval_id = %approval_id,
+        instance_id = %record.instance_id,
+        actor = %actor,
+        decision = body.decision,
+        "approval decided"
+    );
+
+    // Apply the effect of the now-durable decision. Errors PROPAGATE as a
+    // typed 500: the decision is recorded and its effect is pending — the
+    // operator retries the SAME decide call, which re-drives it.
+    drive_approval_effect(&state, &record, Some(&identity))
+        .await
+        .map_err(|e| approval_effect_pending_error(&approval_id, e))?;
+    Ok(Json(approval_record_response(&record)))
+}
+
+/// 500 `internal` for a failed approval EFFECT application (E5-2, ADR-008
+/// §7.1): names the approval id and states the recovery contract — the
+/// DECISION is durable, the EFFECT is pending, and retrying the SAME decide
+/// call (or restarting, whose startup sweep re-drives pending effects)
+/// converges it. The underlying error is logged server-side only.
+fn approval_effect_pending_error(
+    approval_id: &str,
+    error: anyhow::Error,
+) -> (StatusCode, Json<ErrorResponse>) {
+    tracing::error!(
+        approval_id = %approval_id,
+        error = %error,
+        "approval decision effect failed; the decision is recorded and its effect is pending"
+    );
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse::internal(format!(
+            "approval {}: the decision is durably recorded but applying its effect \
+             failed; retry the same decide call — the effect is re-driven (the \
+             server's startup sweep re-drives pending effects as well)",
+            approval_id
+        ))),
+    )
+}
+
+/// Apply (or re-apply) the EFFECT of a decided approval record and confirm
+/// it (`mark_effect_applied`) — the decision/effect re-drivable unit of
+/// ADR-008 §7.1.
+///
+/// - grant → [`apply_approval_granted`]: create the fetchable external task
+///   with the ENGINE-written `__approval=true`;
+/// - reject → [`apply_approval_rejected`]: dead-letter the step and
+///   terminate the token.
+///
+/// The WHOLE application runs under `instance_lifecycle_lock` (F2 + the
+/// concurrent-replay race): the first decide's drive, a replay's re-drive,
+/// and pause/resume/cancel serialize, so the idempotency guards below can
+/// never race each other and a cancel's Terminated save can never be
+/// overwritten by a later reject save.
+///
+/// IDEMPOTENT by construction, so a re-drive (a retried same-decision
+/// decide, or the startup sweep via [`recover_pending_approval_effects`])
+/// never duplicates the effect: the grant skips creation when a task
+/// already exists for the token; the reject's dead-letter entry carries a
+/// deterministic id and the token transition is conditional; a missing
+/// decision history event is healed exactly once.
+///
+/// `identity` is the deciding caller on the decide path and `None` on the
+/// startup sweep (the sweep resolves the tenant from the instance).
+///
+/// Returns Err when the effect could not be applied (e.g. the task insert
+/// failed): the DECISION stays durable with effect=Pending and the caller
+/// surfaces a retryable 500 / a logged sweep failure.
+pub async fn drive_approval_effect(
+    state: &AppState,
+    record: &bpm_engine_core::ApprovalRecord,
+    identity: Option<&Identity>,
+) -> anyhow::Result<()> {
+    // Pre-lock observation (F2's defensive version tripwire): the instance
+    // as last seen BEFORE serialization.
+    let observed = state
+        .storage
+        .process_store
+        .load(&record.instance_id)
+        .await?;
+    let _guard = state.instance_lifecycle_lock.lock().await;
+    // Heal the audit trail first: the decision's history event is appended
+    // by the decide route BETWEEN the durable decide and this effect, so a
+    // crash in that window loses it. The check is by (event_type,
+    // approval_id) — on the normal path the event exists and this is a
+    // no-op; on a re-drive it is appended exactly once with the RECORDED
+    // actor/note (the durable decision's).
+    ensure_decision_history(state, record).await;
+    match record.status {
+        bpm_engine_core::ApprovalStatus::Approved => apply_approval_granted(state, record).await?,
+        bpm_engine_core::ApprovalStatus::Rejected => {
+            apply_approval_rejected(state, record, identity, observed.as_ref()).await?
+        }
+        bpm_engine_core::ApprovalStatus::Pending => {
+            // Undecided: there is no decision to apply (the sweep never
+            // returns these; the decide route never passes one).
+            return Ok(());
+        }
+    }
+    state
+        .storage
+        .approval_store
+        .mark_effect_applied(&record.id)
+        .await?;
+    Ok(())
+}
+
+/// Ensure the DECISION's history event exists (ADR-008 §7.1/§8: the
+/// approval history must explain the decision even across the crash
+/// window between the durable decide and the route's append).
+///
+/// Idempotent: appends only when no event of the decision's type carries
+/// this approval id; the appended payload uses the RECORDED decision
+/// (actor, note), not the current caller's.
+async fn ensure_decision_history(state: &AppState, record: &bpm_engine_core::ApprovalRecord) {
+    let history_type = match record.status {
+        bpm_engine_core::ApprovalStatus::Approved => "ApprovalGranted",
+        bpm_engine_core::ApprovalStatus::Rejected => "ApprovalRejected",
+        bpm_engine_core::ApprovalStatus::Pending => return,
+    };
+    let Ok(events) = HistoryRepo::list_by_instance(
+        state.storage.history_repo.as_ref(),
+        &record.instance_id,
+        None,
+        Some(history_type),
+    )
+    .await
+    else {
+        return;
+    };
+    let already = events.iter().any(|e| {
+        e.payload
+            .get("approval_id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| id == record.id)
+    });
+    if already {
+        return;
+    }
+    let payload = serde_json::json!({
+        "approval_id": record.id,
+        "instance_id": record.instance_id,
+        "node_id": record.node_id,
+        "token_id": record.token_id,
+        "task_type": record.task_type,
+        "actor": record.decided_by,
+        "note": record.note,
+    });
+    let _ = HistoryRepo::append(
+        state.storage.history_repo.as_ref(),
+        &record.instance_id,
+        history_type,
+        &payload,
+        &occurred_at_now(),
+    )
+    .await;
+}
+
+/// Startup recovery sweep (E5-2, ADR-008 §7.1): re-drive every DECIDED
+/// approval record whose effect is still Pending — decisions that survived
+/// a crash between the durable decide and the effect application.
+///
+/// Invoked from `build_app` after storage wiring, before serving. This is
+/// the single-service recovery story's second re-drive path (the first is
+/// a retried same-decision decide). Meaningful for the persistent
+/// (Postgres) driver: the memory store is process-lifetime dev/test state
+/// and starts empty at boot, so the sweep is a no-op there by construction.
+///
+/// Failures are logged, not fatal: a record whose effect still fails keeps
+/// its pending effect — a retried decide re-drives it (the 500 body of a
+/// failed decide says exactly that).
+pub async fn recover_pending_approval_effects(state: &AppState) {
+    let pending = match state
+        .storage
+        .approval_store
+        .list_decided_with_pending_effect()
+        .await
+    {
+        Ok(pending) => pending,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "approval effect startup sweep: listing pending effects failed"
+            );
+            return;
+        }
+    };
+    for record in pending {
+        tracing::info!(
+            approval_id = %record.id,
+            instance_id = %record.instance_id,
+            status = ?record.status,
+            "approval effect startup sweep: re-driving a pending effect"
+        );
+        if let Err(err) = drive_approval_effect(state, &record, None).await {
+            tracing::error!(
+                approval_id = %record.id,
+                error = %err,
+                "approval effect startup sweep: re-drive failed (the decision stays \
+                 durable, the effect stays pending; a retried decide re-drives it)"
+            );
+        }
+    }
+}
+
+/// Effect of a granted approval: create the fetchable external task with
+/// the ENGINE-written `__approval=true` (task-creation-after-approval,
+/// ADR-008 §2-3). Skipped — as complete — when the instance is no longer
+/// running or the token is no longer at the node (cancelled/moved on).
+///
+/// Called UNDER `instance_lifecycle_lock` (by [`drive_approval_effect`]):
+/// the in-lock fresh load below is the authoritative guard, serialized
+/// against cancel/pause/resume and any concurrent re-drive.
+///
+/// Idempotent (ADR-008 §7.1): a task row already existing for the token
+/// proves a prior (partially applied) grant effect created it — a re-drive
+/// must not create a second task. Task-create errors PROPAGATE (the caller
+/// answers a retryable 500 naming the approval id).
+async fn apply_approval_granted(
+    state: &AppState,
+    record: &bpm_engine_core::ApprovalRecord,
+) -> anyhow::Result<()> {
+    // Fresh load: this is a guard read only — the grant path never mutates
+    // the instance, so it takes no lifecycle lock (F2 concerns the reject
+    // path's instance save).
+    let instance = state
+        .storage
+        .process_store
+        .load(&record.instance_id)
+        .await?;
+    let Some(instance) = instance else {
+        warn!(
+            instance_id = %record.instance_id,
+            approval_id = %record.id,
+            "approval grant effect on a missing instance; the decision stands (audit only)"
+        );
+        return Ok(());
+    };
+    if instance.state != InstanceState::Running {
+        return Ok(());
+    }
+    let token_active = instance.tokens.iter().any(|t| {
+        t.id == record.token_id
+            && t.node_id == record.node_id
+            && !matches!(t.status, TokenStatus::Completed | TokenStatus::Terminated)
+    });
+    if !token_active {
+        return Ok(());
+    }
+    // Idempotency: a task for this token (any state) proves the grant
+    // effect already created one — e.g. a crash between the task insert and
+    // mark_effect_applied. Do not create a second task.
+    if state
+        .storage
+        .external_task_store
+        .get_by_token(&record.token_id)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let Ok(Some(def)) = state.storage.def_store.load(&instance.process_def_id).await else {
+        warn!(
+            instance_id = %instance.id,
+            approval_id = %record.id,
+            "approval granted but the process definition is gone; no task created \
+             (effect recorded as applied — data loss is not transient)"
+        );
+        return Ok(());
+    };
+    let Some(node) = def.nodes.get(record.node_id.as_str()) else {
+        return Ok(());
+    };
+    let NodeType::ExternalTask {
+        task_type,
+        retries,
+        timeout_secs,
+    } = &node.node_type
+    else {
+        return Ok(());
+    };
+    // Engine truth wins: the reserved approval variable is (over)written by
+    // the engine, not the variable channel (ADR-008 §3).
+    let mut variables = instance.variables.clone();
+    variables.insert(
+        bpm_engine_core::APPROVAL_VARIABLE.to_string(),
+        "true".to_string(),
+    );
+    // PROPAGATES (F1/blocker): a swallowed error here would leave the
+    // approval granted with no task ever created.
+    state
+        .storage
+        .external_task_store
+        .create(
+            &record.token_id,
+            &record.instance_id,
+            task_type,
+            *retries,
+            *timeout_secs,
+            variables,
+        )
+        .await?;
+    Ok(())
+}
+
+/// Effect of a rejection: dead-letter the step, terminate the token, emit
+/// `TokenFailed` (and `ProcessTerminated` when nothing else is active) —
+/// the same family as the permanent-failure path (E3-2).
+///
+/// F2 (review): called UNDER `instance_lifecycle_lock` (by
+/// [`drive_approval_effect`]) with the PRE-lock observation `observed` and
+/// a FRESH instance load INSIDE the lock, so a concurrent cancel
+/// (Terminated, saved under the same lock) can never be overwritten back
+/// to Running by this path's save. When the freshly loaded instance is
+/// terminal, the effect is recorded as APPLIED-WITH-NO-INSTANCE-MUTATION:
+/// the dead-letter entry (and the `ApprovalRejected` history entry written
+/// by the decide route or healed by the re-drive) record the rejection;
+/// the terminated instance is never resurrected.
+async fn apply_approval_rejected(
+    state: &AppState,
+    record: &bpm_engine_core::ApprovalRecord,
+    identity: Option<&Identity>,
+    observed: Option<&ProcessInstance>,
+) -> anyhow::Result<()> {
+    let occurred_at = occurred_at_now();
+    // The pre-lock observation drives the defensive version tripwire below
+    // and the tenant resolution (the deciding identity's tenant on the
+    // decide path; the instance's tenant on the startup-sweep path).
+    let observed_version = observed.map(|i| i.version);
+    let tenant_id = identity
+        .and_then(tenant_from_identity)
+        .or_else(|| observed.and_then(|i| i.tenant_id.clone()));
+    // The lifecycle mutex (held by the caller) serializes this effect
+    // against pause/resume/cancel and any concurrent re-drive (single
+    // service): the check-then-act window and the instance save run under
+    // it, so a concurrent cancel's Terminated save can never be overwritten
+    // by a stale copy loaded before the lock.
+    let instance = state
+        .storage
+        .process_store
+        .load(&record.instance_id)
+        .await?;
+    let Some(mut instance) = instance else {
+        // The instance is gone: record the rejection (the dead-letter entry
+        // and the approval history entry explain it) — nothing to mutate.
+        warn!(
+            instance_id = %record.instance_id,
+            approval_id = %record.id,
+            "approval reject effect on a missing instance; the rejection is recorded"
+        );
+        insert_rejection_dead_letter(state, record, tenant_id, HashMap::new(), &occurred_at)
+            .await?;
+        return Ok(());
+    };
+    // Under the process mutex a fresh in-lock load is authoritative (every
+    // lifecycle-family instance mutation is serialized by this lock — the
+    // single-service boundary of ADR-008 §7). The version check is a
+    // defensive tripwire against out-of-band writers: the fresh version
+    // must never be OLDER than the pre-lock observation.
+    if let Some(observed_version) = observed_version {
+        if instance.version < observed_version {
+            warn!(
+                instance_id = %instance.id,
+                observed_version = observed_version,
+                loaded_version = instance.version,
+                "instance version regression detected before the reject effect's save"
+            );
+            debug_assert!(
+                instance.version >= observed_version,
+                "instance {} version regressed ({} < {} observed) inside the lifecycle lock",
+                instance.id,
+                instance.version,
+                observed_version
+            );
+        }
+    }
+    if instance.state != InstanceState::Running {
+        // F2: a terminal instance (e.g. cancel won the race, or an earlier
+        // cancel terminated it before the decision) — record the rejection
+        // as applied-with-no-instance-mutation: the dead-letter entry
+        // records the rejected step, the ApprovalRejected history entry
+        // (written by the decide route) explains it, and the terminal
+        // instance is NOT resurrected.
+        warn!(
+            instance_id = %instance.id,
+            approval_id = %record.id,
+            state = %status_str(instance.state),
+            "approval reject effect on a terminal instance; recorded without mutation"
+        );
+        insert_rejection_dead_letter(
+            state,
+            record,
+            tenant_id,
+            instance.variables.clone(),
+            &occurred_at,
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Dead letter the step (idempotent: deterministic entry id).
+    insert_rejection_dead_letter(
+        state,
+        record,
+        tenant_id.clone(),
+        instance.variables.clone(),
+        &occurred_at,
+    )
+    .await?;
+
+    // Terminate the token (operator-forced transition, E5-2 core state
+    // machine). The INSTANCE keeps its current state — exactly the E3-2
+    // permanent-failure pattern: a dead step leaves the instance running
+    // its remaining branches, and the DLQ entry is the operator's lever.
+    // Conditional (idempotent): a token already Terminated by a prior
+    // partial application of this effect is left alone, and the save and
+    // the TokenFailed event below only run when THIS application performed
+    // the transition (a re-drive must not duplicate them).
+    let mut terminated_now = false;
+    if let Some(token) = instance.tokens.iter_mut().find(|t| t.id == record.token_id) {
+        if !matches!(
+            token.status,
+            TokenStatus::Completed | TokenStatus::Terminated
+        ) {
+            token.status = TokenStatus::Terminated;
+            token.version += 1;
+            token.updated_at = Some(occurred_at.clone());
+            terminated_now = true;
+        }
+    }
+    if terminated_now {
+        instance.version += 1;
+        state.storage.process_store.save(&instance).await?;
+        // TokenFailed is recorded by the history handler — the history
+        // explains the dead step (who rejected it, why it is dead-lettered).
+        let mut ctx = build_ctx(state, tenant_id);
+        state
+            .engine
+            .run_async(
+                EngineEvent::TokenFailed(payloads::TokenFailed {
+                    instance_id: record.instance_id.clone(),
+                    token_id: record.token_id.clone(),
+                    node_id: record.node_id.clone(),
+                    reason: rejection_reason(record),
+                }),
+                &mut ctx,
+            )
+            .await;
+    }
+    Ok(())
+}
+
+/// The dead-letter message of a rejected approval step (names the actor).
+fn rejection_reason(record: &bpm_engine_core::ApprovalRecord) -> String {
+    match &record.note {
+        Some(note) => format!(
+            "approval rejected by {}: {}",
+            record.decided_by.as_deref().unwrap_or("?"),
+            note
+        ),
+        None => format!(
+            "approval rejected by {}",
+            record.decided_by.as_deref().unwrap_or("?")
+        ),
+    }
+}
+
+/// Insert the dead-letter entry of a rejected approval step (the reject
+/// effect's durable record).
+///
+/// The entry id is DETERMINISTIC (`approval:<record id>`) so the insert is
+/// idempotent: memory replaces by id, Postgres uses ON CONFLICT (id) DO
+/// NOTHING — a re-drive of the effect never duplicates the entry. `task_id`
+/// carries the APPROVAL record id — this step never had an external task
+/// row (approval happens before creation). A DLQ requeue is the operator's
+/// explicit override; the requeued task does NOT carry `__approval`, so the
+/// worker-side gate stays fail-closed.
+///
+/// `variables` is the instance variable snapshot (empty when the instance
+/// is gone).
+async fn insert_rejection_dead_letter(
+    state: &AppState,
+    record: &bpm_engine_core::ApprovalRecord,
+    tenant_id: Option<String>,
+    variables: HashMap<String, String>,
+    occurred_at: &str,
+) -> anyhow::Result<()> {
+    let dl_entry = bpm_engine_storage::DeadLetterEntry {
+        id: format!("approval:{}", record.id),
+        task_id: record.id.clone(),
+        token_id: record.token_id.clone(),
+        process_instance_id: record.instance_id.clone(),
+        task_type: record.task_type.clone(),
+        error_message: rejection_reason(record),
+        variables: serde_json::to_string(&variables).unwrap_or_default(),
+        tenant_id,
+        created_at: occurred_at.to_string(),
+    };
+    state.storage.dead_letter_store.insert(&dl_entry).await?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+pub struct InstanceLifecycleResponse {
+    pub instance_id: String,
+    /// `RUNNING` | `COMPLETED` | `TERMINATED`.
+    pub status: String,
+    /// Whether the instance currently has Suspended (paused) tokens.
+    pub paused: bool,
+}
+
+fn lifecycle_response(instance: &ProcessInstance) -> InstanceLifecycleResponse {
+    InstanceLifecycleResponse {
+        instance_id: instance.id.clone(),
+        status: status_str(instance.state).to_string(),
+        paused: instance
+            .tokens
+            .iter()
+            .any(|t| t.status == TokenStatus::Suspended),
+    }
+}
+
+/// POST /api/v1/process-instances/:id/pause — suspend every non-terminal
+/// token of the instance (operator, E5-2 / ADR-008 §5).
+///
+/// Idempotent: pausing an already-paused instance replays 200 without a
+/// second `InstancePaused` history event; a terminal instance answers 409
+/// `instance_not_pausable`. In-flight external-task leases are NOT
+/// revoked — complete/fail are refused with 409 `instance_paused` until
+/// resume (see `instance_task_op_gate`).
+pub async fn pause_instance(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    Path(id): Path<String>,
+) -> Result<Json<InstanceLifecycleResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // The lifecycle mutex serializes pause/resume/cancel (single service):
+    // check-then-act windows cannot interleave, so a concurrent double
+    // pause/cancel produces exactly one effect (ADR-008 §7).
+    let _guard = state.instance_lifecycle_lock.lock().await;
+    let inst = state
+        .storage
+        .process_store
+        .load(&id)
+        .await
+        .map_err(internal_error_tuple)?;
+    let Some(mut inst) = inst else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found(format!(
+                "process instance not found: {}",
+                id
+            ))),
+        ));
+    };
+    if tenant_denied(&identity, &inst) {
+        return Err(tenant_gate_not_found(&id));
+    }
+    if inst.state != InstanceState::Running {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::with_code(
+                format!(
+                    "process instance {} is {} and cannot be paused",
+                    id,
+                    status_str(inst.state)
+                ),
+                error_codes::INSTANCE_NOT_PAUSABLE,
+            )),
+        ));
+    }
+    if inst
+        .tokens
+        .iter()
+        .any(|t| t.status == TokenStatus::Suspended)
+    {
+        // Idempotent replay: already paused, no second history event.
+        return Ok(Json(lifecycle_response(&inst)));
+    }
+    let occurred_at = occurred_at_now();
+    let suspended = suspend_tokens(&mut inst, &occurred_at);
+    if suspended == 0 {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::with_code(
+                format!("process instance {} has no active tokens to pause", id),
+                error_codes::INSTANCE_NOT_PAUSABLE,
+            )),
+        ));
+    }
+    inst.version += 1;
+    state
+        .storage
+        .process_store
+        .save(&inst)
+        .await
+        .map_err(internal_error_tuple)?;
+    let payload = serde_json::json!({
+        "instance_id": inst.id,
+        "actor": identity.actor(),
+        "suspended_tokens": suspended,
+    });
+    let _ = HistoryRepo::append(
+        state.storage.history_repo.as_ref(),
+        &id,
+        "InstancePaused",
+        &payload,
+        &occurred_at,
+    )
+    .await;
+    info!(
+        instance_id = %id,
+        actor = identity.actor(),
+        suspended = suspended,
+        "process instance paused"
+    );
+    Ok(Json(lifecycle_response(&inst)))
+}
+
+/// Suspend every non-terminal token (operator-forced pause transition);
+/// returns how many tokens were suspended.
+fn suspend_tokens(inst: &mut ProcessInstance, occurred_at: &str) -> usize {
+    let mut n = 0;
+    for token in inst.tokens.iter_mut() {
+        if matches!(
+            token.status,
+            TokenStatus::Created
+                | TokenStatus::Ready
+                | TokenStatus::Waiting
+                | TokenStatus::Executing
+        ) {
+            token.status = TokenStatus::Suspended;
+            token.version += 1;
+            token.updated_at = Some(occurred_at.to_string());
+            n += 1;
+        }
+    }
+    n
+}
+
+/// POST /api/v1/process-instances/:id/resume — resume Suspended tokens
+/// (operator, E5-2 / ADR-008 §5).
+///
+/// Resume restores the PRE-PAUSE semantics per node kind: tokens at
+/// Waiting-steady-state nodes (timer/message/signal intermediate catch,
+/// user task, external task, boundary event, call activity) return to
+/// `Waiting` (the sanctioned `Suspended → Waiting` transition — without it
+/// a resumed catch token could never fire, since the catch advance handlers
+/// match Waiting); every other token flips to `Ready` (the sanctioned
+/// `Suspended → Ready` transition).
+///
+/// Idempotent: resuming an unpaused instance is a 200 no-op; a terminal
+/// instance answers 409 `instance_not_pausable`.
+pub async fn resume_instance(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    Path(id): Path<String>,
+) -> Result<Json<InstanceLifecycleResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let _guard = state.instance_lifecycle_lock.lock().await;
+    let inst = state
+        .storage
+        .process_store
+        .load(&id)
+        .await
+        .map_err(internal_error_tuple)?;
+    let Some(mut inst) = inst else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found(format!(
+                "process instance not found: {}",
+                id
+            ))),
+        ));
+    };
+    if tenant_denied(&identity, &inst) {
+        return Err(tenant_gate_not_found(&id));
+    }
+    if inst.state != InstanceState::Running {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::with_code(
+                format!(
+                    "process instance {} is {} and cannot be resumed",
+                    id,
+                    status_str(inst.state)
+                ),
+                error_codes::INSTANCE_NOT_PAUSABLE,
+            )),
+        ));
+    }
+    let occurred_at = occurred_at_now();
+    // Definition for the per-node-kind resume semantics: WAITING-steady-
+    // state nodes restore Waiting (their pre-pause status); everything else
+    // resumes to Ready. A missing definition falls back to Ready (the
+    // pre-E5.3 behavior — see ADR-008 §5).
+    let def = state
+        .storage
+        .def_store
+        .load(&inst.process_def_id)
+        .await
+        .ok()
+        .flatten();
+    let mut resumed = 0;
+    for token in inst.tokens.iter_mut() {
+        if token.status == TokenStatus::Suspended {
+            // The sanctioned resume transition (version-bumped), per node
+            // kind (ADR-008 §5): a token whose node's steady state is
+            // Waiting (timer/message/signal intermediate catch, user task,
+            // external task, boundary event, call activity) was Waiting
+            // before the pause — resume restores EXACTLY that, or its catch
+            // could never advance (the catch/handlers match Waiting). All
+            // other tokens resume to Ready (the engine claims Ready
+            // tokens, and their queued arrival processing continues).
+            let restores_waiting = def.as_ref().is_some_and(|d| {
+                d.nodes.get(token.node_id.as_str()).is_some_and(|n| {
+                    matches!(
+                        n.node_type,
+                        NodeType::TimerIntermediateCatch { .. }
+                            | NodeType::MessageIntermediateCatch { .. }
+                            | NodeType::SignalIntermediateCatch { .. }
+                            | NodeType::UserTask { .. }
+                            | NodeType::ExternalTask { .. }
+                            | NodeType::BoundaryTimer { .. }
+                            | NodeType::BoundaryError { .. }
+                            | NodeType::CallActivity { .. }
+                    )
+                })
+            });
+            token.status = if restores_waiting {
+                TokenStatus::Waiting
+            } else {
+                TokenStatus::Ready
+            };
+            token.version += 1;
+            token.updated_at = Some(occurred_at.to_string());
+            resumed += 1;
+        }
+    }
+    if resumed == 0 {
+        // Idempotent no-op: nothing suspended (never paused, or already
+        // resumed) — replay the current state.
+        return Ok(Json(lifecycle_response(&inst)));
+    }
+    inst.version += 1;
+    state
+        .storage
+        .process_store
+        .save(&inst)
+        .await
+        .map_err(internal_error_tuple)?;
+    let payload = serde_json::json!({
+        "instance_id": inst.id,
+        "actor": identity.actor(),
+        "resumed_tokens": resumed,
+    });
+    let _ = HistoryRepo::append(
+        state.storage.history_repo.as_ref(),
+        &id,
+        "InstanceResumed",
+        &payload,
+        &occurred_at,
+    )
+    .await;
+    info!(instance_id = %id, actor = identity.actor(), resumed = resumed, "process instance resumed");
+    Ok(Json(lifecycle_response(&inst)))
+}
+
+/// POST /api/v1/process-instances/:id/cancel — terminate the instance and
+/// all its tokens (operator, E5-2 / ADR-008 §6), reusing the TerminateEnd
+/// semantics: tokens → Terminated, instance → Terminated, a
+/// `ProcessTerminated` engine event, and an `InstanceCancelled` history
+/// entry with the actor.
+///
+/// Only-once: cancelling a Terminated instance replays 200 with the
+/// terminal state (no second effect); a Completed instance replays 200
+/// (no-op). Task operations on a cancelled instance are rejected with 409
+/// `instance_cancelled`.
+pub async fn cancel_instance(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    Path(id): Path<String>,
+) -> Result<Json<InstanceLifecycleResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let _guard = state.instance_lifecycle_lock.lock().await;
+    let inst = state
+        .storage
+        .process_store
+        .load(&id)
+        .await
+        .map_err(internal_error_tuple)?;
+    let Some(mut inst) = inst else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found(format!(
+                "process instance not found: {}",
+                id
+            ))),
+        ));
+    };
+    if tenant_denied(&identity, &inst) {
+        return Err(tenant_gate_not_found(&id));
+    }
+    // Only-once / no-op replay for terminal states.
+    if inst.state == InstanceState::Terminated || inst.state == InstanceState::Completed {
+        info!(instance_id = %id, actor = identity.actor(), state = %status_str(inst.state), "cancel replayed (terminal state)");
+        return Ok(Json(lifecycle_response(&inst)));
+    }
+    let occurred_at = occurred_at_now();
+    let mut terminated = 0;
+    for token in inst.tokens.iter_mut() {
+        if !matches!(
+            token.status,
+            TokenStatus::Completed | TokenStatus::Terminated
+        ) {
+            token.status = TokenStatus::Terminated;
+            token.version += 1;
+            token.updated_at = Some(occurred_at.to_string());
+            terminated += 1;
+        }
+    }
+    inst.state = InstanceState::Terminated;
+    inst.version += 1;
+    state
+        .storage
+        .process_store
+        .save(&inst)
+        .await
+        .map_err(internal_error_tuple)?;
+    let payload = serde_json::json!({
+        "instance_id": inst.id,
+        "actor": identity.actor(),
+        "terminated_tokens": terminated,
+    });
+    let _ = HistoryRepo::append(
+        state.storage.history_repo.as_ref(),
+        &id,
+        "InstanceCancelled",
+        &payload,
+        &occurred_at,
+    )
+    .await;
+    info!(
+        instance_id = %id,
+        actor = identity.actor(),
+        terminated = terminated,
+        "process instance cancelled"
+    );
+    // Reuse the TerminateEnd engine path: the ProcessTerminated event is
+    // recorded by the history handler.
+    let tenant_id = tenant_from_identity(&identity);
+    let mut ctx = build_ctx(state.as_ref(), tenant_id);
+    state
+        .engine
+        .run_async(
+            EngineEvent::ProcessTerminated(payloads::ProcessTerminated {
+                instance_id: id.clone(),
+            }),
+            &mut ctx,
+        )
+        .await;
+    Ok(Json(lifecycle_response(&inst)))
 }
 
 // --- Replay API (docs_replay_rest_api.md) ---
@@ -3711,6 +4943,32 @@ fn api_v1_router(
         "/external-tasks/:task_id/extend-lock",
         external_task_extend_lock
     );
+    // Approval & instance lifecycle (E5-2, ADR-008).
+    let router = api_route!(
+        router,
+        GET,
+        "/process-instances/:id/approvals",
+        list_instance_approvals
+    );
+    let router = api_route!(
+        router,
+        POST,
+        "/approvals/:approval_id/decide",
+        approval_decide
+    );
+    let router = api_route!(router, POST, "/process-instances/:id/pause", pause_instance);
+    let router = api_route!(
+        router,
+        POST,
+        "/process-instances/:id/resume",
+        resume_instance
+    );
+    let router = api_route!(
+        router,
+        POST,
+        "/process-instances/:id/cancel",
+        cancel_instance
+    );
     let router = api_route!(router, POST, "/process-definitions/deploy", deploy_bpmn);
     let router = api_route!(
         router,
@@ -3783,6 +5041,11 @@ mod tests {
             error_codes::LOCK_EXPIRED,
             error_codes::INVARIANT_VIOLATION,
             error_codes::LOCK_CONFLICT,
+            error_codes::APPROVAL_NOT_FOUND,
+            error_codes::APPROVAL_ALREADY_DECIDED,
+            error_codes::INSTANCE_PAUSED,
+            error_codes::INSTANCE_CANCELLED,
+            error_codes::INSTANCE_NOT_PAUSABLE,
         ] {
             assert!(
                 error_codes::ERROR_CODES.contains(&code),

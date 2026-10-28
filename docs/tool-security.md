@@ -86,11 +86,11 @@ approval input:
 
 > tool 'payment_charge' must not execute before approval: it has side
 > effects and this task is not approved. Grant approval via the task input
-> variable `__approval` = "true" (set through task variables today; the
-> engine-side persistent approval flow, E5-2, will set it automatically in a
-> future release)
+> variable `__approval` = "true" — for approval-required task types
+> (E5-2) the engine sets it from the persisted approval decision; for
+> other types it still arrives through task variables
 
-### 3.1 The `__approval` input variable (v1 contract)
+### 3.1 The `__approval` input variable (E5-2: engine-written truth)
 
 | | |
 |---|---|
@@ -98,8 +98,8 @@ approval input:
 | form | plain legacy string, exactly `"true"` or `"false"` |
 | absent | not approved |
 | read | `TaskInput::approval_granted()` — fail-closed: `"TRUE"`, `" true"`, `"1"`, `__var:…` envelope forms → **not** approved |
-| who sets it today | a human approver, through task variables (the same channel as every other task input) |
-| who will set it | the engine-side persistent approval flow (E5-2): approvals as engine state with audit trail, setting this variable automatically |
+| who sets it (approval-required task types, E5-2) | **the engine**: an operator approves the persisted `ApprovalRecord` (`POST /api/v1/approvals/:id/decide`) and the engine creates the fetchable task with `__approval=true` injected — task-creation-after-approval means workers never see unapproved work at all |
+| who sets it (other task types) | a human approver, through task variables (the pre-E5-2 convention — unchanged) |
 
 Workers derive the gate input from the task, never from their own opinion:
 
@@ -109,11 +109,14 @@ let tool_ctx = ToolContext::new(&task.task_id, ctx.worker_id())
     .approved(input.approval_granted());   // <- the only sanctioned source
 ```
 
-v1 honesty: `__approval` is a worker-side convention, not engine-reserved
-state — the engine persists and redelivers it like any plain variable. A
-compromised task-variable writer could forge it. Making approval an
-engine-owned, non-forgeable artifact (approval records, signed tokens,
-`__task_envelope`-style reserved keys) is exactly the E5-2 scope.
+The pre-E5-2 forgeability caveat is **resolved for approval-required
+types**: the engine overwrites any client-supplied `__approval` with its
+own truth when it creates the gated task (engine truth wins, ADR-008 §3),
+and until approval the task does not exist. Residual boundary (honest):
+task types NOT in `engine.approval_required_task_types` still rely on the
+worker-side convention — a task-variable writer can still set
+`__approval` for them. Move a type into the config set to put it behind
+the engine gate. Full semantics: `docs/approval-semantics.md`.
 
 The SDK enforces the DECLARED flags only — it cannot observe a tool's real
 effects. A worker author who mislabels a side-effectful tool as
@@ -263,9 +266,12 @@ impl TaskHandler for ChargeHandler {
 ## 10. Out of scope (v1)
 
 - **No tool implementations ship in the SDK** — the boundary only.
-- No engine-side approval state, signature or reserved `__approval` key
-  (E5-2; §3.1 documents the forgeability caveat).
 - No regex redaction (§6), no non-env credential sources (vault/secret
   files), no per-tool output-limit overrides (the `ToolContext` limits apply
   to every tool output of the task).
+- The engine-side approval flow (E5-2) ships at the ENGINE layer —
+  persisted approval records, task-creation-after-approval, and the
+  engine-written `__approval` for gated task types (see §3.1 and
+  `docs/approval-semantics.md`); the SDK keeps reading the task variable,
+  unchanged.
 - Retry behavior is unchanged by tool error codes (E3-2).

@@ -27,6 +27,7 @@
 //! [`migrations`]). [`migrate`] is a backward-compatible thin wrapper around
 //! [`migrations::run_migrations`].
 
+pub mod approval_store;
 pub mod compensation;
 pub mod dead_letter_store;
 pub mod event_store;
@@ -40,6 +41,7 @@ pub mod process_store;
 pub mod timer_store;
 pub mod token_store;
 
+pub use approval_store::PostgresApprovalStore;
 pub use compensation::PostgresCompensationRepo;
 pub use dead_letter_store::PostgresDeadLetterStore;
 pub use event_store::PostgresOutboxRepo;

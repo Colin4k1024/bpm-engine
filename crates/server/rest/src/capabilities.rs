@@ -92,6 +92,10 @@ const RESPONSE_CODES: &[(&str, &[&str])] = &[
     ("Forbidden", &["forbidden"]),
     ("NotFound", &["not_found"]),
     ("LockConflict", &["lock_conflict"]),
+    // E5-2 (ADR-008) approval & instance lifecycle rejections.
+    ("ApprovalNotFound", &["approval_not_found"]),
+    ("ApprovalConflict", &["approval_already_decided"]),
+    ("InstanceNotPausable", &["instance_not_pausable"]),
     ("RateLimited", &["rate_limited"]),
     ("InternalError", &["internal"]),
     ("DeployFailed", &["deploy_failed"]),
@@ -151,6 +155,32 @@ const SIDE_EFFECT_NOTES: &[(&str, &str)] = &[
     (
         "extendExternalTaskLock",
         "Extends the persisted lease deadline of the locked task.",
+    ),
+    (
+        "decideApproval",
+        "Persists the decision on the approval record (exactly once, with \
+         the actor and note) and takes effect: approve creates the \
+         fetchable external task with the engine-written __approval \
+         variable; reject dead-letters the step and fails the token. Both \
+         append ApprovalGranted/Rejected history.",
+    ),
+    (
+        "pauseInstance",
+        "Suspends every non-terminal token of the instance (persisted, \
+         version-bumped) and records an InstancePaused history event; \
+         in-flight task completions are refused until resume.",
+    ),
+    (
+        "resumeInstance",
+        "Flips Suspended tokens back to Ready (persisted, version-bumped) \
+         and records an InstanceResumed history event.",
+    ),
+    (
+        "cancelInstance",
+        "Terminates every non-terminal token and the instance itself \
+         (persisted), records an InstanceCancelled history event and a \
+         ProcessTerminated engine event; task operations on the instance \
+         are rejected afterwards.",
     ),
     (
         "requeueDeadLetter",
@@ -321,6 +351,36 @@ const ERROR_EXAMPLES: &[(&str, u16, &str)] = &[
         "lock_conflict",
         409,
         "task not found, not locked, or owned by different worker",
+    ),
+    (
+        "approval_not_found",
+        404,
+        "approval not found: 00000000-0000-4000-8000-000000000000",
+    ),
+    (
+        "approval_already_decided",
+        409,
+        "approval 00000000-0000-4000-8000-000000000000 is already decided \
+         (Approved); a conflicting decision is rejected and the original \
+         outcome stands",
+    ),
+    (
+        "instance_paused",
+        409,
+        "process instance 00000000-0000-4000-8000-000000000000 is paused; \
+         the task operation is refused until the instance is resumed",
+    ),
+    (
+        "instance_cancelled",
+        409,
+        "process instance 00000000-0000-4000-8000-000000000000 was \
+         cancelled; task operations on it are rejected",
+    ),
+    (
+        "instance_not_pausable",
+        409,
+        "process instance 00000000-0000-4000-8000-000000000000 is COMPLETED \
+         and cannot be paused",
     ),
 ];
 

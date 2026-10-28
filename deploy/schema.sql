@@ -6,9 +6,9 @@
 -- applied by the engine's migration runner at startup; see ADR-005 and
 -- docs/database-schema.md). Do not hand-edit this file to change the schema —
 -- add a new migration under migrations/ instead, then regenerate/refresh this
--- reference. This file reflects migrations 0001 + 0002. The migration
--- runner additionally maintains a `schema_migrations` bookkeeping table
--- (version, name, applied_at) — a database initialized from this file is
+-- reference. This file reflects migrations 0001 + 0002 + 0003 + 0004. The
+-- migration runner additionally maintains a `schema_migrations` bookkeeping
+-- table (version, name, applied_at) — a database initialized from this file is
 -- recognized by the runner as a pre-versioning schema and baseline-stamped.
 --
 -- Run: psql $DATABASE_URL -f deploy/schema.sql
@@ -168,3 +168,33 @@ CREATE TABLE IF NOT EXISTS idempotency_key (
     PRIMARY KEY (key, tenant_id)
 );
 CREATE INDEX IF NOT EXISTS idx_idempotency_key_instance ON idempotency_key(instance_id);
+
+-- Engine-owned approval records (E5-2, ADR-008, migration 0004).
+-- One row per approval-required step visit, subject-unique on
+-- (instance_id, node_id, token_id). status: 'Pending' | 'Approved' |
+-- 'Rejected' (the decision, flipped exactly once by decide); effect:
+-- 'Pending' | 'Applied' (whether the decision's EFFECT — task creation on
+-- grant, dead letter + token-terminal on reject — has been applied; the
+-- re-drivable unit of ADR-008 §7.1: a pending effect on a decided row is
+-- re-driven by a retried same-decision decide and by the startup sweep).
+CREATE TABLE IF NOT EXISTS approval_record (
+    id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    token_id TEXT NOT NULL,
+    task_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'Pending',
+    effect TEXT NOT NULL DEFAULT 'Pending',
+    decided_by TEXT,
+    decided_at TEXT,
+    note TEXT,
+    created_at TEXT,
+    CONSTRAINT fk_approval_instance FOREIGN KEY (instance_id)
+        REFERENCES process_instance(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_subject
+ON approval_record(instance_id, node_id, token_id);
+CREATE INDEX IF NOT EXISTS idx_approval_instance
+ON approval_record(instance_id);
+CREATE INDEX IF NOT EXISTS idx_approval_pending_effect
+ON approval_record(effect) WHERE effect = 'Pending';

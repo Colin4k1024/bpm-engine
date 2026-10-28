@@ -50,6 +50,18 @@ pub struct AppState {
     /// Redaction policy applied to variable values written into event
     /// history (built from `engine.history_variable_max_bytes`).
     pub history_redaction_policy: HistoryRedactionPolicy,
+    /// Task types whose external tasks are approval-required (E5-2,
+    /// `engine.approval_required_task_types`): the engine arrival gate
+    /// creates a persisted approval record and defers task creation
+    /// until an operator approves (ADR-008).
+    pub approval_required_task_types: Arc<std::collections::HashSet<String>>,
+    /// Serializes the instance-level lifecycle operations pause/resume/
+    /// cancel (E5-2): their check-then-act windows run under this
+    /// process-wide async mutex, so concurrent lifecycle calls on the same
+    /// instance cannot interleave — only-once within the single service.
+    /// (Multi-replica deployment needs DB-level conditional updates;
+    /// out of scope for v1, see ADR-008 §7.)
+    pub instance_lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
     /// Ephemeral replay sessions (session_id -> ReplaySession). Not persisted.
     pub replay_sessions: Arc<ReplaySessions>,
     /// Cancellation token for the timer scheduler and timer event drain task.
