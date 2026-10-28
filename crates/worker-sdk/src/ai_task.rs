@@ -134,6 +134,20 @@ impl TaskInput {
     pub fn envelope(&self) -> Option<Result<AiTaskEnvelope, AiTaskEnvelopeError>> {
         AiTaskEnvelope::from_variables(&self.variables)
     }
+
+    /// Whether this task carries approval for side-effect tools (E3-3):
+    /// the task input variable [`APPROVAL_VARIABLE`](crate::tools::APPROVAL_VARIABLE)
+    /// (`__approval`) holding the exact plain string `"true"`.
+    ///
+    /// Fail-closed: absent, `"false"`, any other value, or a non-plain form
+    /// (envelope, ciphertext) → `false`. Workers derive
+    /// [`ToolContext::approved`](crate::tools::ToolContext::approved) from
+    /// this — today an approver sets the variable through task variables;
+    /// the engine-side persistent approval flow (E5-2) will set it
+    /// automatically in a future release.
+    pub fn approval_granted(&self) -> bool {
+        self.plain(crate::tools::APPROVAL_VARIABLE) == Some("true")
+    }
 }
 
 /// Builder for the variables a worker submits on `complete`, with the
