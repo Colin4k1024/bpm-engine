@@ -49,6 +49,13 @@ pub struct FlowOptions {
     pub poll_interval: Duration,
     /// Worker poll interval (task fetch).
     pub worker_poll_interval: Duration,
+    /// Lease duration the worker's fetch-and-lock requests
+    /// (`WorkerConfig::lock_duration`). Short leases make lease-expiry
+    /// redelivery observable quickly — the E6-3 regression eval
+    /// ([`crate::eval`]) runs with 2 s; the default keeps the historical
+    /// 30 s. It is also the lease the crash-injection hook sleeps past
+    /// (see `Injection::CrashAndRedeliver` in `crate::eval`).
+    pub lock_duration: Duration,
     /// Env var the reference tool's credential is injected from
     /// (`BPM_REFERENCE_LEDGER_KEY` by default; tests use unique names).
     pub tool_env_var: String,
@@ -68,6 +75,7 @@ impl Default for FlowOptions {
             timeout: DEFAULT_FLOW_TIMEOUT,
             poll_interval: Duration::from_millis(100),
             worker_poll_interval: Duration::from_millis(50),
+            lock_duration: Duration::from_secs(30),
             tool_env_var: "BPM_REFERENCE_LEDGER_KEY".to_string(),
             pricing: ProviderConfig::mock(),
             model_timeout: Duration::from_secs(30),
@@ -86,6 +94,13 @@ impl FlowOptions {
     /// Builder: override the tool credential env var.
     pub fn tool_env_var(mut self, env_var: impl Into<String>) -> Self {
         self.tool_env_var = env_var.into();
+        self
+    }
+
+    /// Builder: override the worker lease duration (short leases make
+    /// lease-expiry redelivery observable quickly; see the field docs).
+    pub fn lock_duration(mut self, lock_duration: Duration) -> Self {
+        self.lock_duration = lock_duration;
         self
     }
 
@@ -255,7 +270,7 @@ pub async fn run_flow_with(
     let deps = Arc::new(HandlerDeps::new(provider, &options));
     let worker_config = WorkerConfig::new(options.worker_id.clone())
         .poll_interval(options.worker_poll_interval)
-        .lock_duration(Duration::from_secs(30))
+        .lock_duration(options.lock_duration)
         .fetch_retry_max(0)
         .shutdown_grace(options.shutdown_grace);
     let mut builder = Worker::builder().client(client).config(worker_config);
@@ -336,7 +351,7 @@ async fn drive(rest: &Rest, flow: &FlowSpec, options: &FlowOptions) -> anyhow::R
 }
 
 /// Snapshot the final state, variables and step timeline.
-async fn build_outcome(
+pub(crate) async fn build_outcome(
     rest: &Rest,
     flow_name: &str,
     instance_id: &str,
@@ -438,20 +453,25 @@ fn string_array(value: Option<&Value>) -> Vec<String> {
 
 /// Minimal engine-REST client for the runner's instance lifecycle calls
 /// (task calls go through the SDK's [`EngineClient`]).
-struct Rest {
+///
+/// Crate-visible: the E6-3 regression eval
+/// (`crate::eval`) reuses the same plumbing for its case driver (start
+/// instance, poll, submit user-task decisions, snapshot the outcome) plus
+/// the dead-letter check that lets blocked cases stop waiting early.
+pub(crate) struct Rest {
     http: reqwest::Client,
     base: String,
 }
 
 impl Rest {
-    fn new(server_url: &str) -> Self {
+    pub(crate) fn new(server_url: &str) -> Self {
         Self {
             http: reqwest::Client::new(),
             base: server_url.trim_end_matches('/').to_string(),
         }
     }
 
-    async fn start_instance(
+    pub(crate) async fn start_instance(
         &self,
         process_def_id: &str,
         variables: &HashMap<String, String>,
@@ -487,17 +507,37 @@ impl Rest {
             .ok_or_else(|| anyhow!("start-instance response missing instance_id: {body}"))
     }
 
-    async fn get_instance(&self, instance_id: &str) -> anyhow::Result<Value> {
+    pub(crate) async fn get_instance(&self, instance_id: &str) -> anyhow::Result<Value> {
         let url = format!("{}/api/v1/process-instances/{instance_id}", self.base);
         self.get_json(&url).await
     }
 
-    async fn get_steps(&self, instance_id: &str) -> anyhow::Result<Value> {
+    pub(crate) async fn get_steps(&self, instance_id: &str) -> anyhow::Result<Value> {
         let url = format!("{}/api/v1/process-instances/{instance_id}/steps", self.base);
         self.get_json(&url).await
     }
 
-    async fn complete_user_task(
+    /// Whether a dead-letter entry exists for `instance_id` (E6-3): in this
+    /// engine a DLQ'd task means the instance is terminally blocked — its
+    /// token stays at the failed node — so the eval driver treats a DLQ
+    /// hit as the case's terminal outcome instead of waiting for the run
+    /// timeout.
+    pub(crate) async fn has_dead_letter(&self, instance_id: &str) -> anyhow::Result<bool> {
+        let url = format!("{}/api/v1/dead-letters", self.base);
+        let body = self.get_json(&url).await?;
+        let hit = body
+            .get("entries")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries.iter().any(|entry| {
+                    entry.get("process_instance_id").and_then(Value::as_str) == Some(instance_id)
+                })
+            })
+            .unwrap_or(false);
+        Ok(hit)
+    }
+
+    pub(crate) async fn complete_user_task(
         &self,
         instance_id: &str,
         node_id: &str,
@@ -529,7 +569,7 @@ impl Rest {
         Ok(())
     }
 
-    async fn get_json(&self, url: &str) -> anyhow::Result<Value> {
+    pub(crate) async fn get_json(&self, url: &str) -> anyhow::Result<Value> {
         let response = self
             .http
             .get(url)
@@ -563,10 +603,14 @@ mod tests {
         assert_eq!(options.timeout, DEFAULT_FLOW_TIMEOUT);
         assert_eq!(options.tool_env_var, "BPM_REFERENCE_LEDGER_KEY");
         assert_eq!(options.pricing, ProviderConfig::mock());
+        // The historical 30 s lease is the default; the eval profile
+        // overrides it to 2 s.
+        assert_eq!(options.lock_duration, Duration::from_secs(30));
         // Builders.
         let options = FlowOptions::default()
             .timeout(Duration::from_secs(3))
             .tool_env_var("OTHER")
+            .lock_duration(Duration::from_secs(1))
             .pricing(
                 ProviderConfig::mock().with_model(bpm_engine_core::ModelRef {
                     provider: "p".to_string(),
@@ -576,6 +620,7 @@ mod tests {
             );
         assert_eq!(options.timeout, Duration::from_secs(3));
         assert_eq!(options.tool_env_var, "OTHER");
+        assert_eq!(options.lock_duration, Duration::from_secs(1));
         assert_eq!(options.pricing.model.name, "m");
     }
 

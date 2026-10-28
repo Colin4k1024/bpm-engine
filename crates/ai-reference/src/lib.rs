@@ -27,6 +27,17 @@
 //! - The compensation flow models the engine's saga shape and ships
 //!   [`SagaCoordinator`], the application-side compensation loop over the
 //!   engine's [`CompensationRecordRepo`](bpm_engine_storage::CompensationRecordRepo).
+//! - The **offline regression evaluation harness** (E6-3, [`eval`]) runs a
+//!   fixed case set — the five flows plus deliberate variants and failure
+//!   injections — against two definition *fixture versions* (v1 as-is vs a
+//!   modified v2) and produces a serde-serializable
+//!   [`eval::RegressionReport`] with success-rate,
+//!   recovery-correctness, human-intervention, latency and cost metrics.
+//!   Statistical output is REPORTED, never asserted: the deterministic
+//!   invariants live in ordinary tests (`tests/regression_eval.rs`), the
+//!   comparative report in the runnable
+//!   `examples/regression_eval.rs` harness — see
+//!   `docs/regression-eval.md`.
 //!
 //! # Example
 //!
@@ -59,6 +70,7 @@
 
 #![warn(missing_docs)]
 
+pub mod eval;
 pub mod flows;
 pub mod handler;
 pub mod provider;
@@ -69,6 +81,13 @@ pub mod tools;
 #[cfg(feature = "http")]
 pub mod openai;
 
+pub use eval::{
+    eval_flow_options, fixed_case_set, fixture_version_selector, run_regression,
+    run_regression_with, CaseDelta, CaseExpectations, CaseRun, Injection, RecoveryVerdict,
+    RegressionCase, RegressionReport, Version, VersionComparison, VersionSelector, VersionSummary,
+    APPROVAL_V2_DSL, COMPENSATION_V2_DSL, INFERENCE_V2_DSL, INJECTED_PERMANENT_FAILURE,
+    INJECTED_TRANSIENT_FAILURE, RETRIEVAL_V2_DSL, TOOL_V2_DSL,
+};
 pub use flows::{
     approval_flow, compensation_flow, compile_flow, deploy_flow, inference_flow, retrieval_flow,
     tool_flow, FlowSpec, UserTaskDecision, APPROVAL_DSL, COMPENSATION_DSL, INFERENCE_DSL,

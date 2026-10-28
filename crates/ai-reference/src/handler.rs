@@ -26,7 +26,8 @@
 //!   boundary (allowlist + approval gate + masking), record the tool in
 //!   the envelope.
 //! - **Plain tasks** (`ref-retrieve`, the inference branch confirmations,
-//!   the saga steps): deterministic variable outputs.
+//!   the saga steps, and the E6-3 `ref-validate` fixture step): deterministic
+//!   variable outputs.
 //!
 //! Tool errors map to [`TaskResult::Fail`] through the SDK's `From` impl:
 //! `tool_not_allowed` / `tool_requires_approval` / `credential_missing`
@@ -81,6 +82,10 @@ pub mod task_type {
     pub const SAGA_COMPENSATE: &str = "ref-saga-compensate";
     /// Compensation flow: happy-path shipping step.
     pub const SAGA_SHIP: &str = "ref-saga-ship";
+    /// Validation step of the E6-3 regression-eval v2 fixture flows
+    /// (added definition-change steps): a plain task recording that the
+    /// extra check ran.
+    pub const VALIDATE: &str = "ref-validate";
 }
 
 /// Documents the `retrieve` task returns (deterministic).
@@ -321,6 +326,9 @@ impl TaskHandler for ReferenceHandler {
                 }
                 task_type::SAGA_COMPENSATE => self.handle_compensate(),
                 task_type::SAGA_SHIP => self.handle_plain(vec![("shipped", "true")]),
+                // E6-3 fixture step: the v2 definition variants insert this
+                // plain validation task (no model, no tool, no envelope).
+                task_type::VALIDATE => self.handle_plain(vec![("validated", "true")]),
                 unknown => TaskResult::Fail {
                     error: format!("unknown_task_type: reference worker cannot handle '{unknown}'"),
                     retry_after: None,
@@ -546,6 +554,21 @@ mod tests {
             Some(REFERENCE_DOCUMENTS)
         );
         // Plain (non-AI) tasks carry no envelope.
+        assert!(TaskInput::from_task_variables(&variables)
+            .envelope()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn validate_task_emits_its_marker_variable() {
+        // The E6-3 v2 fixture step: plain, deterministic, no envelope.
+        let handler = ReferenceHandler::new(task_type::VALIDATE, deps(&FlowOptions::default()));
+        let task = external_task(task_type::VALIDATE, &[]);
+        let result = handler.handle(task, dead_ctx("task-x")).await;
+        let TaskResult::Complete { variables } = result else {
+            panic!("validate must complete, got {result:?}")
+        };
+        assert_eq!(variables.get("validated").map(String::as_str), Some("true"));
         assert!(TaskInput::from_task_variables(&variables)
             .envelope()
             .is_none());
