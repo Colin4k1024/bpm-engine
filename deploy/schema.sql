@@ -1,6 +1,15 @@
 -- BPM engine schema for PostgreSQL.
--- This file is the canonical schema reference, aligned with migrate() in
--- crates/adapters/postgres/src/lib.rs.
+--
+-- REFERENCE ARTIFACT (generated, kept in sync with the migration scripts).
+-- The source of truth for schema changes is
+-- crates/adapters/postgres/migrations/ (versioned, forward-only SQL files
+-- applied by the engine's migration runner at startup; see ADR-005 and
+-- docs/database-schema.md). Do not hand-edit this file to change the schema —
+-- add a new migration under migrations/ instead, then regenerate/refresh this
+-- reference. This file reflects migrations 0001 + 0002. The migration
+-- runner additionally maintains a `schema_migrations` bookkeeping table
+-- (version, name, applied_at) — a database initialized from this file is
+-- recognized by the runner as a pre-versioning schema and baseline-stamped.
 --
 -- Run: psql $DATABASE_URL -f deploy/schema.sql
 
@@ -28,6 +37,8 @@ CREATE TABLE IF NOT EXISTS process_instance (
     created_at TEXT,
     updated_at TEXT
 );
+-- Added in migration 0002 (hot-path query index: list_running scans)
+CREATE INDEX IF NOT EXISTS idx_process_instance_state ON process_instance (state);
 
 -- Tokens (execution unit, concurrency boundary)
 CREATE TABLE IF NOT EXISTS token (
@@ -47,6 +58,8 @@ CREATE TABLE IF NOT EXISTS token (
 );
 CREATE INDEX IF NOT EXISTS idx_token_state_updated ON token(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_token_parallel_group ON token(parallel_group_id);
+-- Added in migration 0002 (hot-path query index: load_by_instance / save deletes)
+CREATE INDEX IF NOT EXISTS idx_token_instance ON token(instance_id);
 
 -- External tasks (fetch-and-lock, lease)
 CREATE TABLE IF NOT EXISTS external_task (

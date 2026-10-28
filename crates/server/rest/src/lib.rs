@@ -158,9 +158,11 @@ fn validate_storage_config(config: &BpmConfig) -> anyhow::Result<()> {
 /// Assemble the storage bundle for the configured driver.
 ///
 /// Memory mode pre-registers the bootstrap definitions (`minimal`,
-/// `payment-flow`). Postgres mode runs migrations and returns pool readiness
-/// checks for `/ready`; programmatic definitions cannot be persisted there,
-/// so definitions must be deployed via the REST API.
+/// `payment-flow`). Postgres mode applies (or, when
+/// `database.migrate_on_start` is `false`, validates — failing startup on
+/// pending migrations) the versioned SQL migrations and returns pool
+/// readiness checks for `/ready`; programmatic definitions cannot be
+/// persisted there, so definitions must be deployed via the REST API.
 async fn build_storage(config: &BpmConfig) -> anyhow::Result<(Storage, Option<ExtraHealthChecks>)> {
     match config.database.driver.as_str() {
         "memory" => {
@@ -176,12 +178,16 @@ async fn build_storage(config: &BpmConfig) -> anyhow::Result<(Storage, Option<Ex
         "postgres" => {
             #[cfg(feature = "postgres")]
             {
-                let (storage, checks) =
-                    Storage::postgres(&config.database.url, config.database.max_connections)
-                        .await?;
+                let (storage, checks) = Storage::postgres(
+                    &config.database.url,
+                    config.database.max_connections,
+                    config.database.migrate_on_start,
+                )
+                .await?;
                 info!(
                     driver = "postgres",
                     max_connections = config.database.max_connections,
+                    migrate_on_start = config.database.migrate_on_start,
                     "storage backend: postgres (deploy definitions via the REST API; \
                      programmatic bootstrap definitions are not persisted)"
                 );
@@ -204,9 +210,10 @@ async fn build_storage(config: &BpmConfig) -> anyhow::Result<(Storage, Option<Ex
 
 /// Build the full application (state + background tasks + router) from config.
 ///
-/// This validates the storage driver, assembles the storage bundle (running
-/// Postgres migrations when configured), starts the timer scheduler and the
-/// timer event drain task, and returns the wired router.
+/// This validates the storage driver, assembles the storage bundle (applying
+/// or, when `database.migrate_on_start` is `false`, validating Postgres
+/// migrations), starts the timer scheduler and the timer event drain task,
+/// and returns the wired router.
 ///
 /// The caller is responsible for serving `AppHandle::router` and for
 /// cancelling `AppHandle::timer_cancel` on shutdown.

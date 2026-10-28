@@ -7,6 +7,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Versioned SQL Migrations (E1-2)**: The PostgreSQL schema is now managed by forward-only versioned migrations in `crates/adapters/postgres/migrations/` (embedded at compile time), applied by a new runner in the adapter: `run_migrations` (per-migration transactions, idempotent), `migration_status` (applied/latest/pending for health and validation), and baseline stamping that upgrades pre-versioning (inline-migrate era) databases without re-executing 0001 or losing data. `migrate()` remains as a thin backward-compatible wrapper. Migration 0002 adds hot-path indexes (`process_instance(state)`, `token(instance_id)`); strategy and rollback policy are recorded in ADR-005 (forward-only; rollback = restore from backup/PITR). CI gains a `migrations` job validating empty-database and legacy-upgrade paths against a postgres:16 service container (tests run dual-mode: testcontainers locally, `BPM_TEST_DATABASE_URL` in CI, isolated database per test).
+- **Migration Deployment Contract**: New `database.migrate_on_start` config (default `true`, env `BPM_DATABASE__MIGRATE_ON_START`, TOML `[database] migrate_on_start`). When disabled, the server validates the schema at startup and fails fast naming any pending migrations instead of running against a stale schema. `/ready` now reports `db_migrations` (`ok`/pending-degraded) and `db_schema_version` in postgres mode.
 - **Storage Backend Configuration**: REST server selects memory or PostgreSQL via `database.driver` (default `memory`, env `BPM_DATABASE__DRIVER`). Postgres mode creates a pool (`database.max_connections`), runs idempotent migrations on start, and wires all 10 stores via the new `Storage` bundle; state (instances, tokens, definitions) survives restarts. `/ready` gains `db_pool*` checks in postgres mode. The server crate is now lib + bin (`build_app`/`serve`) and routes depend only on storage traits.
 - **Storage Trait Extensions**: `ProcessInstanceStore::list_all` (all states, tenant-filtered), `ProcessDefinitionStore::list_all` (every version), new `DefinitionDeployer` trait (persist BPMN XML source), and a backend-agnostic `StoreInvariantChecker` in `bpm-engine-storage`. All adapters implement them.
 - **Storage Mode Integration Tests**: Memory-mode HTTP round-trip (bootstrap defs, deploy, start, invariants) and a Docker-based PostgreSQL restart acceptance test (instance/token/definition survive a full server restart), plus config-validation tests.
@@ -22,6 +24,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Schema Management**: The inline `CREATE TABLE IF NOT EXISTS` DDL in the Postgres adapter's `migrate()` was replaced by the versioned migration runner (ADR-005); `deploy/schema.sql` is now a reference artifact kept in sync with the migration files (0001 + 0002) rather than the schema source of truth.
 - **EngineContext**: Fields changed from `Option<Arc<dyn T>>` to `Arc<dyn T>` with `EngineContextBuilder`. Eliminates runtime `unwrap()` risk.
 - **Schema Timestamps**: Unified to TEXT (ISO 8601 UTC) across `deploy/schema.sql` and Postgres adapter `migrate()`.
 - **Postgres Adapter**: All 10 store traits implemented (was 7/10). Added `ProcessDefinitionStore` with `deploy()`.

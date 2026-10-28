@@ -61,6 +61,7 @@ updated_at
 Indexes:
 - (state, updated_at)
 - (parallel_group_id)
+- (instance_id) — added in migration 0002
 
 ---
 
@@ -200,6 +201,7 @@ selected via configuration (defaults < TOML file < `BPM__`-prefixed env vars):
 | `database.driver` | `"memory"` | `memory` \| `postgres` | `BPM_DATABASE__DRIVER` |
 | `database.url` | *(empty)* | e.g. `postgres://user:pass@host:5432/bpm` | `BPM_DATABASE__URL` |
 | `database.max_connections` | `10` | postgres pool size | `BPM_DATABASE__MAX_CONNECTIONS` |
+| `database.migrate_on_start` | `true` | auto-apply pending migrations on startup | `BPM_DATABASE__MIGRATE_ON_START` |
 
 **memory** (default): everything lives in process memory. The bootstrap
 definitions `minimal` and `payment-flow` are registered at startup. State is
@@ -210,12 +212,18 @@ definitions, dead letters) is persisted through the store traits in
 `bpm-engine-adapter-postgres`. On startup the server:
 
 1. creates a deadpool connection pool (`max_connections`),
-2. runs `migrate()` — idempotent `CREATE TABLE IF NOT EXISTS` DDL, safe on every start,
-3. wires every store over the shared pool and adds `db_pool*` readiness checks to `/ready`.
+2. applies the versioned SQL migrations (see section 12) — when
+   `database.migrate_on_start` is `true` (default) it applies pending
+   migrations; when `false` it validates the schema and refuses to start if
+   migrations are pending (the deployment contract for change-managed
+   environments),
+3. wires every store over the shared pool and adds `db_pool*`,
+   `db_migrations`, and `db_schema_version` readiness checks to `/ready`.
 
 Restart semantics: starting a second server process against the same URL
-re-runs migrations and resumes from persisted state — running instances,
-waiting tokens, and deployed definitions are all still queryable. Programmatic
+re-runs migrations (a no-op when current) and resumes from persisted state —
+running instances, waiting tokens, and deployed definitions are all still
+queryable. Programmatic
 bootstrap definitions are NOT persisted in postgres mode; deploy definitions
 via `POST /api/v1/process-definitions/deploy` (the BPMN XML source is stored
 and recompiled on load).
@@ -226,11 +234,93 @@ default; build with `--no-default-features` for a memory-only binary.
 
 ---
 
-## 12. Relationship to Other Docs
+## 12. Migrations
+
+The PostgreSQL schema is managed by **versioned, forward-only SQL migrations**.
+Strategy and rationale are recorded in
+`docs/adr/ADR-005-forward-only-sql-migrations.md` (forward-only; rollback =
+restore from backup / PITR, never automatic down-migrations).
+
+### File layout
+
+```
+crates/adapters/postgres/migrations/
+├── 0001_init.sql             # initial schema (exact inline-migrate-era DDL)
+└── 0002_query_indexes.sql    # hot-path indexes (process_instance.state, token.instance_id)
+```
+
+Rules:
+
+- One migration per version, filename `NNNN_description.sql`, versions
+  strictly ascending.
+- Files are embedded at compile time (`include_str!`) — the binary has no
+  runtime file dependency.
+- Migrations are append-only: never edit an already-released file; add a new
+  version instead.
+- Keep each migration runnable in a transaction (no `CREATE INDEX
+  CONCURRENTLY`, no `CREATE DATABASE`).
+
+### Runner
+
+`bpm_engine_adapter_postgres::migrations`:
+
+- `run_migrations(pool) -> Vec<u32>` — applies pending migrations in version
+  order, **each in its own transaction together with its bookkeeping row**,
+  so a migration is either fully applied or not applied at all. Returns the
+  versions applied by this call; a second run is a no-op (empty `Vec`).
+- `migration_status(pool) -> MigrationStatus` — reports `applied`,
+  `latest`, and `pending` versions without applying anything.
+- `validate_up_to_date(&status)` — the startup contract for
+  `migrate_on_start = false`: errors with the pending versions and how to
+  enable auto-migration.
+- `migrate(pool)` — backward-compatible thin wrapper around
+  `run_migrations`.
+
+The source of truth for what has been applied is the `schema_migrations`
+table:
+
+```
+schema_migrations
+-----------------------------
+version (pk)      -- migration version number
+name              -- e.g. "0002_query_indexes"
+applied_at        -- ISO 8601 UTC timestamp
+```
+
+### Baseline stamping (upgrading pre-versioning databases)
+
+Databases created by the legacy inline `migrate()` (E1-1 and earlier) contain
+the v1 schema but no `schema_migrations` rows. When the runner finds that
+shape — v1 tables present, no recorded versions — it **stamps** 0001 as
+applied (recording it, not re-executing it) and continues with 0002+. An
+empty database has every migration applied from scratch. Both paths are
+covered by CI (the `migrations` job) and by the dual-mode tests in
+`crates/adapters/postgres/tests/migrations.rs` (testcontainers locally,
+`BPM_TEST_DATABASE_URL` service container in CI, isolated database per test).
+
+### Health checks
+
+`/ready` reports, in postgres mode:
+
+- `db_migrations: "ok"` (or `degraded` with pending versions — should not
+  happen, since startup validation rejects pending migrations),
+- `db_schema_version: <latest applied version>` (e.g. `2`).
+
+### deploy/schema.sql
+
+`deploy/schema.sql` is now a **reference artifact** kept in sync with
+migrations 0001 + 0002 (it no longer drives schema creation). A database
+initialized from it is recognized by the runner as a pre-versioning schema
+and baseline-stamped, converging to the same versioned state.
+
+---
+
+## 13. Relationship to Other Docs
 
 - Execution semantics: `execution-model.md`
 - Saga & compensation: `saga.md`
 - Recovery behavior: `recovery.md`
+- Migration strategy (ADR): `adr/ADR-005-forward-only-sql-migrations.md`
 
 ---
 
