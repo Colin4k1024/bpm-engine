@@ -107,9 +107,9 @@ The **Rust Worker SDK** lets you implement external-task workers that poll the e
 
 ## Quick start
 
-1. Start the engine: `cargo run -p bpm-server-rest`
+1. Start the engine: `cargo run -p bpm-engine-server-rest`
 2. Deploy or use a process that has an ExternalTask node (e.g. `task_type = "payment"`).
-3. Run the worker: `cargo run -p bpm-worker-sdk --example payment`
+3. Run the worker: `cargo run -p bpm-engine-worker-sdk --example payment`
 
 ---
 
@@ -203,7 +203,7 @@ Long-running or fault-tolerant handlers should also look at the execution-contex
 Add to your `Cargo.toml`:
 
 ```toml
-bpm-worker-sdk = { path = "../crates/worker-sdk" }
+bpm-engine-worker-sdk = { path = "../crates/worker-sdk" }
 # or from the workspace root
 ```
 

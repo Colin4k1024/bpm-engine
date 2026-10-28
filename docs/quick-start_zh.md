@@ -24,7 +24,7 @@ cargo build
 ## 步骤 2：启动引擎服务器
 
 ```bash
-cargo run -p bpm-server-rest
+cargo run -p bpm-engine-server-rest
 ```
 
 服务器将在 **http://127.0.0.1:3000** 启动。
@@ -68,7 +68,7 @@ curl -X POST http://127.0.0.1:3000/api/v1/process-instances \
 打开第三个终端：
 
 ```bash
-cargo run -p bpm-worker-sdk --example payment
+cargo run -p bpm-engine-worker-sdk --example payment
 ```
 
 Worker 将：

@@ -24,7 +24,7 @@ cargo clippy --workspace --all-targets
 ## Run the REST server
 
 ```bash
-cargo run -p bpm-server-rest
+cargo run -p bpm-engine-server-rest
 ```
 
 Server: **http://127.0.0.1:3000**
@@ -59,7 +59,7 @@ curl http://127.0.0.1:3000/api/v1/process-instances/<instance_id>
 
 ## Run a process with external task (payment)
 
-**Terminal 1:** `cargo run -p bpm-server-rest`  
+**Terminal 1:** `cargo run -p bpm-engine-server-rest`  
 **Terminal 2:** start instance:
 
 ```bash
@@ -71,7 +71,7 @@ curl -X POST http://127.0.0.1:3000/api/v1/process-instances \
 **Terminal 3:** run the payment worker:
 
 ```bash
-cargo run -p bpm-worker-sdk --example payment
+cargo run -p bpm-engine-worker-sdk --example payment
 ```
 
 ---

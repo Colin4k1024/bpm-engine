@@ -257,7 +257,13 @@ impl BpmConfig {
             info!(path = %config_path, "config file not found, using defaults");
         }
 
-        // Environment variable overrides: BPM_SERVER__PORT, BPM_LOG__LEVEL, etc.
+        // Environment variable overrides: BPM__SERVER__PORT, BPM__LOG__LEVEL,
+        // BPM__DATABASE__DRIVER, etc. NOTE the DOUBLE underscore after the
+        // prefix: `with_prefix("BPM").separator("__")` strips the prefix as
+        // `BPM__`, so the single-underscore form BPM_SERVER__PORT is silently
+        // ignored. (`BPM_JWT_SECRET` / `BPM_API_KEY` work single-underscore
+        // because the auth middleware reads them directly, not through this
+        // layer.) See docs/troubleshooting.md §6.
         builder = builder.add_source(
             config::Environment::with_prefix("BPM")
                 .separator("__")

@@ -12,6 +12,10 @@ members = [
     "crates/ai-reference",
     "crates/mcp-server",
 ]
+# Copyable starter templates (E4-4): a standalone package with its own
+# lockfile, built independently (the CI quickstart job compiles the worker
+# template; a dsl workspace test compiles the flow templates).
+exclude = ["templates/ai-worker"]
 resolver = "2"
 
 [workspace.package]
