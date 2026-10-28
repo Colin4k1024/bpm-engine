@@ -1877,6 +1877,222 @@ pub async fn deploy_bpmn(
     ))
 }
 
+// --- Static validation & dry-run (E2-2, issue #12) --------------------------
+
+/// Source format discriminator for validate / dry-run requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceFormat {
+    /// BPMN 2.0 XML.
+    Bpmn,
+    /// JSON DSL (E2-1).
+    Dsl,
+}
+
+impl SourceFormat {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "bpmn" => Some(Self::Bpmn),
+            "dsl" => Some(Self::Dsl),
+            _ => None,
+        }
+    }
+}
+
+/// Request envelope for validate / dry-run: a definition source document
+/// plus its format discriminator. `variables` is used by dry-run only.
+#[derive(Deserialize)]
+pub struct ValidateSourceRequest {
+    /// Source format: `"bpmn"` (BPMN 2.0 XML) or `"dsl"` (JSON DSL, E2-1).
+    pub format: String,
+    /// Full source document as a string (XML or JSON, per `format`).
+    pub source: String,
+    /// Hypothetical start variables for the dry-run walk (validate ignores
+    /// this field).
+    #[serde(default)]
+    pub variables: HashMap<String, String>,
+}
+
+/// Compile-phase failures, returned as DATA with HTTP 200 so agents can read
+/// and fix them. Shapes reuse the public DTOs of each compiler verbatim:
+/// BPMN parse errors serialize as `{ "error": "..." }` (same shape as the
+/// deploy endpoint), BPMN semantic errors and DSL errors as arrays.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum CompileErrorsView {
+    /// BPMN XML parse failure (single message object).
+    Parse {
+        /// Parse error message.
+        error: String,
+    },
+    /// BPMN semantic compile errors.
+    Bpmn(Vec<bpm_engine_bpmn::CompilerError>),
+    /// DSL structural/semantic compile errors (stable snake_case codes and
+    /// JSON-pointer paths, see `docs/dsl-guide.md`).
+    Dsl(Vec<bpm_engine_dsl::DslError>),
+}
+
+/// Response of `POST /api/v1/process-definitions/validate`: either the
+/// compile-phase errors (`valid: false`, `compile_errors`) or the static
+/// findings (`findings`; `valid` = no Critical finding).
+#[derive(Serialize)]
+pub struct ValidateResponse {
+    /// False when compilation failed or a Critical finding exists.
+    pub valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compile_errors: Option<CompileErrorsView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub findings: Option<Vec<bpm_engine_bpmn::ValidationFinding>>,
+}
+
+/// Response of `POST /api/v1/process-definitions/dry-run`: validate plus the
+/// side-effect-free walk report.
+#[derive(Serialize)]
+pub struct DryRunResponse {
+    /// False when compilation failed or a Critical finding exists.
+    pub valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compile_errors: Option<CompileErrorsView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub findings: Option<Vec<bpm_engine_bpmn::ValidationFinding>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bpm_engine_bpmn::DryRunReport>,
+}
+
+/// Build a 400 response with a stable machine-readable code for a malformed
+/// request envelope (bad format value, empty source, unparseable body).
+fn bad_request_envelope(code: &str, message: String) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse::with_code(message, code)),
+    )
+}
+
+/// Deserialize and envelope-check a validate / dry-run request. 4xx is
+/// reserved for malformed envelopes; compile failures are 200 data.
+fn parse_validate_request(
+    body: &str,
+) -> Result<(SourceFormat, ValidateSourceRequest), (StatusCode, Json<ErrorResponse>)> {
+    let req: ValidateSourceRequest = serde_json::from_str(body).map_err(|e| {
+        bad_request_envelope(
+            "invalid_request_body",
+            format!("invalid request body: {}", e),
+        )
+    })?;
+    let format = SourceFormat::parse(&req.format).ok_or_else(|| {
+        bad_request_envelope(
+            "invalid_format",
+            format!("format must be \"bpmn\" or \"dsl\", got {:?}", req.format),
+        )
+    })?;
+    if req.source.trim().is_empty() {
+        return Err(bad_request_envelope(
+            "empty_source",
+            "source must be a non-empty document string".to_string(),
+        ));
+    }
+    Ok((format, req))
+}
+
+/// Compile a source document for validation / dry-run. Never persists
+/// anything; compile failures are returned as data.
+fn compile_for_validation(
+    format: SourceFormat,
+    source: &str,
+) -> Result<ProcessDefinition, CompileErrorsView> {
+    match format {
+        SourceFormat::Bpmn => match bpm_engine_bpmn::parse_and_compile(source) {
+            Ok(def) => Ok(def),
+            Err(bpm_engine_bpmn::CompileError::Parse(e)) => Err(CompileErrorsView::Parse {
+                error: e.to_string(),
+            }),
+            Err(bpm_engine_bpmn::CompileError::Compile(ce)) => Err(CompileErrorsView::Bpmn(ce.0)),
+        },
+        SourceFormat::Dsl => match bpm_engine_dsl::compile(source) {
+            Ok(def) => Ok(def),
+            Err(report) => Err(CompileErrorsView::Dsl(report.errors)),
+        },
+    }
+}
+
+/// POST /api/v1/process-definitions/validate — compile and statically
+/// validate a definition WITHOUT deploying it (the E2-2 pre-deploy gate).
+///
+/// Takes no state on purpose: the handler is structurally side-effect-free.
+/// Compile errors come back with HTTP 200 (`valid: false` +
+/// `compile_errors`); a successful compile reports the findings of
+/// `bpm_engine_bpmn::validate_definition`, and `valid` is true when no
+/// finding is Critical (warnings/info included in the response).
+pub async fn validate_process_definition(
+    body: String,
+) -> Result<Json<ValidateResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let (format, req) = parse_validate_request(&body)?;
+    match compile_for_validation(format, &req.source) {
+        Err(compile_errors) => Ok(Json(ValidateResponse {
+            valid: false,
+            compile_errors: Some(compile_errors),
+            findings: None,
+        })),
+        Ok(def) => {
+            let findings = bpm_engine_bpmn::validate_definition(&def);
+            let valid = !findings
+                .iter()
+                .any(|f| f.severity == bpm_engine_bpmn::Severity::Critical);
+            info!(
+                definition_id = %def.id,
+                valid,
+                findings = findings.len(),
+                "process definition validated (pre-deploy, no persistence)"
+            );
+            Ok(Json(ValidateResponse {
+                valid,
+                compile_errors: None,
+                findings: Some(findings),
+            }))
+        }
+    }
+}
+
+/// POST /api/v1/process-definitions/dry-run — compile, validate and
+/// side-effect-free simulate a definition with hypothetical start variables.
+///
+/// MUST NOT deploy and MUST NOT create any instance, task, timer or history
+/// record (acceptance: dry-run 不产生实例). Same response contract as
+/// validate plus a `dry_run` walk report.
+pub async fn dry_run_process_definition(
+    body: String,
+) -> Result<Json<DryRunResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let (format, req) = parse_validate_request(&body)?;
+    match compile_for_validation(format, &req.source) {
+        Err(compile_errors) => Ok(Json(DryRunResponse {
+            valid: false,
+            compile_errors: Some(compile_errors),
+            findings: None,
+            dry_run: None,
+        })),
+        Ok(def) => {
+            let findings = bpm_engine_bpmn::validate_definition(&def);
+            let valid = !findings
+                .iter()
+                .any(|f| f.severity == bpm_engine_bpmn::Severity::Critical);
+            // Pure function over the compiled definition: no stores touched.
+            let report =
+                bpm_engine_bpmn::dry_run(&def, &req.variables, bpm_engine_bpmn::DEFAULT_MAX_STEPS);
+            info!(
+                definition_id = %def.id,
+                valid,
+                steps = report.steps.len(),
+                "process definition dry-run (no persistence)"
+            );
+            Ok(Json(DryRunResponse {
+                valid,
+                compile_errors: None,
+                findings: Some(findings),
+                dry_run: Some(report),
+            }))
+        }
+    }
+}
+
 // --- Process Definition Version Management ---
 
 #[derive(Serialize)]
@@ -2212,6 +2428,14 @@ pub fn router(state: Arc<AppState>, rate_limit_rpm: u64) -> Router {
                     post(external_task_extend_lock),
                 )
                 .route("/process-definitions/deploy", post(deploy_bpmn))
+                .route(
+                    "/process-definitions/validate",
+                    post(validate_process_definition),
+                )
+                .route(
+                    "/process-definitions/dry-run",
+                    post(dry_run_process_definition),
+                )
                 .route("/dead-letters", get(list_dead_letters))
                 .route("/dead-letters/:id", get(get_dead_letter))
                 .route("/dead-letters/:id/requeue", post(requeue_dead_letter))

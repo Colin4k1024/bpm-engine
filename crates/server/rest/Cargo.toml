@@ -20,6 +20,7 @@ bpm-engine-storage = { path = "../../storage", version = "0.2.0" }
 bpm-engine-adapter-memory = { path = "../../adapters/memory", version = "0.2.0" }
 bpm-engine-adapter-postgres = { path = "../../adapters/postgres", version = "0.2.0", optional = true }
 bpm-engine-bpmn = { path = "../../bpmn", version = "0.2.0" }
+bpm-engine-dsl = { path = "../../dsl", version = "0.2.0" }
 anyhow = { workspace = true }
 axum = "0.7"
 tracing = "0.1"
