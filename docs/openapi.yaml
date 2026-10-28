@@ -43,6 +43,16 @@ info:
 
     - All management/integration endpoints live under `/api/v1`; the
       health endpoints (`/health`, `/ready`) live at the root.
+    - Auth (E5-1): `BearerAuth` (JWT) or `ApiKeyAuth`, either satisfies
+      the security requirement at runtime. JWT mode (server configured
+      with `auth.jwt_secret`) derives actor/tenant/role from the VERIFIED
+      claims, enforces the role→permission matrix (403 `forbidden`), and
+      scopes all reads/writes to the claim tenant (cross-tenant access
+      answers 404 `not_found`, indistinguishable from unknown ids; a
+      conflicting `X-Tenant-Id` header answers 403 `forbidden` — the
+      header is deprecated in this mode). The API key is the legacy admin
+      bootstrap credential with full access; without either credential
+      the server runs in open mode (PoC). See `docs/rbac.md`.
     - Errors use the `ErrorResponse` schema: `error` (human-readable
       message), `code` (stable machine-readable identifier, see the enum
       in components.responses.ErrorResponse), and `invariant_violation`
@@ -57,7 +67,8 @@ info:
     - Idempotency: `POST /api/v1/process-instances` accepts an optional
       `Idempotency-Key` header (1-128 printable ASCII bytes). A known key
       replays the recorded instance with 200 instead of creating a new
-      one (201). Keys are scoped by `X-Tenant-Id`; when a key is
+      one (201). Keys are scoped by the request tenant (the JWT `tenant`
+      claim under JWT auth, else the `X-Tenant-Id` header); when a key is
       supplied, the tenant id is bounded to 128 printable ASCII bytes
       (400 `invalid_request` beyond that — the pair co-forms the
       idempotency primary key). The check-then-create sequence is
@@ -73,6 +84,7 @@ servers:
   - url: http://127.0.0.1:3000
     description: "Local development server (config: server.host / server.port)"
 security:
+  - BearerAuth: []
   - ApiKeyAuth: []
 tags:
   - name: Health
@@ -179,6 +191,7 @@ paths:
                 $ref: "#/components/schemas/InstanceListResponse"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
     post:
@@ -221,6 +234,7 @@ paths:
                 $ref: "#/components/schemas/StartInstanceResponse"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/InvalidJson" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -242,6 +256,7 @@ paths:
                 $ref: "#/components/schemas/InstanceStateResponse"
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -265,6 +280,7 @@ paths:
                 $ref: "#/components/schemas/TraceResponse"
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -304,6 +320,7 @@ paths:
                 $ref: "#/components/schemas/HistoryResponse"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -345,6 +362,7 @@ paths:
                 $ref: "#/components/schemas/StepsResponse"
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -369,6 +387,7 @@ paths:
                 $ref: "#/components/schemas/ReplayCreateResponse"
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -389,6 +408,7 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -415,6 +435,7 @@ paths:
                 $ref: "#/components/schemas/ReplaySeekResponse"
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/InvalidJson" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -435,6 +456,7 @@ paths:
                 $ref: "#/components/schemas/ReplaySnapshotResponse"
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -449,6 +471,7 @@ paths:
         "204":
           description: Session destroyed (unknown ids are a no-op 204).
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -465,6 +488,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/DefinitionListResponse"
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -484,6 +508,7 @@ paths:
                 $ref: "#/components/schemas/ProcessDefinitionView"
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -502,6 +527,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/VersionListResponse"
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -521,6 +547,7 @@ paths:
                 $ref: "#/components/schemas/DefinitionVersionView"
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -557,6 +584,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/DeployError"
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/DeployFailed" }
 
@@ -587,6 +615,7 @@ paths:
                 $ref: "#/components/schemas/ValidateResponse"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/InvalidJson" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
@@ -615,6 +644,7 @@ paths:
                 $ref: "#/components/schemas/DryRunResponse"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/InvalidJson" }
         "429": { $ref: "#/components/responses/RateLimited" }
 
@@ -633,6 +663,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ActivateResponse"
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -651,6 +682,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ActivateResponse"
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -685,6 +717,7 @@ paths:
                   $ref: "#/components/schemas/TaskListItem"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -706,6 +739,7 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -737,6 +771,7 @@ paths:
                 $ref: "#/components/schemas/CompleteTaskResponse"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/InvalidJson" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -767,6 +802,7 @@ paths:
                   $ref: "#/components/schemas/ExternalTaskResponse"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/InvalidJson" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -806,6 +842,7 @@ paths:
                 $ref: "#/components/schemas/CompleteTaskResponse"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/InvalidJson" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -843,6 +880,7 @@ paths:
                 $ref: "#/components/schemas/CompleteTaskResponse"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/InvalidJson" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -872,6 +910,7 @@ paths:
                 $ref: "#/components/schemas/LockExtensionResponse"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/LockConflict" }
         "422": { $ref: "#/components/responses/InvalidJson" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -904,6 +943,7 @@ paths:
                 $ref: "#/components/schemas/DeadLetterListResponse"
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -923,6 +963,7 @@ paths:
                 $ref: "#/components/schemas/DeadLetterEntryResponse"
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
     delete:
@@ -934,6 +975,7 @@ paths:
       responses:
         "204": { description: Entry deleted. }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -953,6 +995,7 @@ paths:
                 $ref: "#/components/schemas/RequeueResponse"
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
@@ -973,27 +1016,58 @@ paths:
               schema:
                 $ref: "#/components/schemas/InvariantCheckResult"
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
 components:
   securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT bearer authentication (E5-1). Enforced only when the server is
+        configured with a JWT secret (`auth.jwt_secret` /
+        `BPM_AUTH__JWT_SECRET`): then every `/api/v1` request must carry
+        `Authorization: Bearer <jwt>`, an HS256 token with the claims
+        `{ sub: actor, tenant: tenant_id, role: "deployer" | "operator" |
+        "worker" | "auditor", exp: unix-seconds }`. Signature, expiry
+        (zero leeway), and claims are verified; failures answer 401
+        `invalid_token`. The verified claims drive tenancy (the tenant
+        comes FROM the claim; a conflicting `X-Tenant-Id` header answers
+        403 `forbidden`) and role-based authorization (403 `forbidden`
+        when the role lacks the permission — see the roles matrix in
+        `docs/rbac.md`). Mint tokens with
+        `cargo run -p bpm-engine-server-rest --example mint_jwt`.
     ApiKeyAuth:
       type: apiKey
       in: header
       name: X-API-Key
       description: |
-        Enforced only when the server is configured with an API key
-        (`auth.api_key` / `BPM_API_KEY`); without a configured key the
-        server runs in PoC mode and accepts all requests. Missing or
-        invalid keys are rejected with 401 `unauthorized`.
+        Legacy admin API key (bootstrap path). Enforced only when the
+        server is configured with a key (`auth.api_key` / `BPM_API_KEY`);
+        a valid key grants FULL access (no role checks) and `X-Tenant-Id`
+        is honored as untrusted client input. Missing or invalid keys are
+        rejected with 401 `unauthorized`. When a JWT secret is ALSO
+        configured, a presented bearer token takes precedence over this
+        key. Without either credential the server runs in open mode
+        (PoC: every request accepted, `X-Tenant-Id` remains a dev-mode
+        affordance).
 
   parameters:
     TenantId:
       name: X-Tenant-Id
       in: header
       schema: { type: string }
-      description: Tenant scope for the request (optional).
+      description: |
+        Tenant scope for the request (optional). DEPRECATED for
+        JWT-authenticated requests (E5-1): the tenant comes from the
+        verified `tenant` claim, an absent or agreeing header is accepted,
+        and a CONFLICTING header is rejected with 403 `forbidden`. In open
+        and API-key modes the header keeps its pre-E5-1 meaning: untrusted
+        client input that scopes listings and instance starts (dev-mode
+        affordance).
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -1080,7 +1154,20 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     Unauthorized:
-      description: Missing or invalid API key (401, code `unauthorized`).
+      description: |
+        Authentication failure (401). Code `unauthorized` (missing or
+        invalid API key on the API-key path) or `invalid_token`
+        (missing/malformed/rejected JWT when JWT auth is configured:
+        signature, expiry, or claim validation failed — E5-1).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: |
+        Authorization failure (403, E5-1). Code `forbidden`: the verified
+        role lacks permission for the operation (RBAC), or the
+        `X-Tenant-Id` header conflicts with the token's tenant claim.
       content:
         application/json:
           schema:
@@ -1141,6 +1228,8 @@ components:
           enum:
             - not_found
             - unauthorized
+            - invalid_token
+            - forbidden
             - rate_limited
             - invalid_request
             - invalid_json
@@ -2360,25 +2449,40 @@ components:
       properties:
         type:
           type: string
-          enum: [apiKey]
+          enum: [apiKey, http]
+          description: "Primary scheme type: http (bearer JWT, E5-1) or apiKey."
         in:
           type: string
           enum: [header]
         name:
           type: string
-          description: "X-API-Key."
+          description: "Authorization (the JWT bearer header)."
         required:
           type: boolean
           description: |
-            false — the server enforces the key only when one is
-            configured (PoC mode accepts all requests); see notes.
+            false — the server enforces the bearer token only when a JWT
+            secret is configured (open/API-key modes accept other
+            credentials); see notes.
+        scheme:
+          type: string
+          enum: [bearer]
+          description: OpenAPI `scheme` of the primary (JWT) scheme.
+        bearer_format:
+          type: string
+          enum: [JWT]
+          description: Token format of the primary (JWT) scheme.
+        schemes:
+          type: array
+          items: { type: string }
+          description: "Every security scheme the spec defines (BearerAuth, ApiKeyAuth)."
         notes:
           type: string
-          description: Current auth semantics (incl. the optional X-Tenant-Id header).
+          description: |
+            Auth modes, precedence, and tenancy (E5-1): see docs/rbac.md.
 
     AgentToolsConventions:
       type: object
-      required: [classification, error_shape, pagination, idempotency]
+      required: [classification, error_shape, pagination, idempotency, roles]
       properties:
         classification:
           type: string
@@ -2392,6 +2496,11 @@ components:
         idempotency:
           type: string
           description: Idempotency-Key semantics on start-instance.
+        roles:
+          type: string
+          description: |
+            The E5-1 role→permission matrix (deployer / operator / worker /
+            auditor) enforced in JWT mode; see docs/rbac.md.
 
     AgentToolsErrorExample:
       type: object
@@ -2435,8 +2544,10 @@ components:
         auth_required:
           type: boolean
           description: |
-            Whether the request passes the X-API-Key layer when the
-            server has one configured (root routes do not).
+            Whether the request passes the auth layer when the server has
+            credentials configured (root routes do not): a JWT bearer
+            token (role-checked) or, on the fallback path, the admin
+            X-API-Key.
         parameters:
           type: array
           items:

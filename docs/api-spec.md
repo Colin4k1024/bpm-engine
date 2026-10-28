@@ -394,8 +394,10 @@ code is a breaking change**):
 
 | Code | HTTP | Meaning |
 |------|------|---------|
-| `not_found` | 404 | Unknown instance / definition / task / dead-letter / replay-session id |
+| `not_found` | 404 | Unknown instance / definition / task / dead-letter / replay-session id (and, under JWT auth, an id of ANOTHER tenant — E5-1) |
 | `unauthorized` | 401 | Missing or invalid API key |
+| `invalid_token` | 401 | Missing/malformed/rejected JWT when JWT auth is configured (E5-1) |
+| `forbidden` | 403 | RBAC: the verified role lacks permission, or the `X-Tenant-Id` header conflicts with the token's tenant claim (E5-1) |
 | `rate_limited` | 429 | Request rate above the configured window |
 | `invalid_request` | 400 | Generic client error (malformed path ids, bad query params, invalid idempotency key) |
 | `invalid_json` | 400/422 | Request body is not valid JSON for the endpoint (syntax/content-type → 400; type mismatch → 422) |
