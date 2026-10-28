@@ -129,7 +129,7 @@ cargo build
     <div class="tab-content" id="start">
 {% highlight bash %}
 # Start the REST server (http://127.0.0.1:3000)
-cargo run -p bpm-server-rest
+cargo run -p bpm-engine-server-rest
 {% endhighlight %}
 <p class="code-note">
   Built-in process definitions: <code>minimal</code> (Start → End), <code>payment-flow</code> (Start → ExternalTask → End)
@@ -254,35 +254,35 @@ worker.start().await;
       </thead>
       <tbody>
         <tr>
-          <td><code>bpm-core</code></td>
+          <td><code>bpm-engine-core</code></td>
           <td>ProcessDefinition, NodeType, Token, EngineEvent, Saga. Pure logic, no I/O.</td>
         </tr>
         <tr>
-          <td><code>bpm-storage</code></td>
+          <td><code>bpm-engine-storage</code></td>
           <td>Async persistence traits (ProcessInstanceStore, TokenStore, ExternalTaskStore, TimerStore)</td>
         </tr>
         <tr>
-          <td><code>bpm-runtime</code></td>
+          <td><code>bpm-engine-runtime</code></td>
           <td>BpmEngine event loop, EngineContext, event handlers, gateway evaluation</td>
         </tr>
         <tr>
-          <td><code>bpm-adapter-memory</code></td>
+          <td><code>bpm-engine-adapter-memory</code></td>
           <td>In-memory implementations. Default for development/testing</td>
         </tr>
         <tr>
-          <td><code>bpm-adapter-postgres</code></td>
+          <td><code>bpm-engine-adapter-postgres</code></td>
           <td>PostgreSQL implementation. Production-ready persistence</td>
         </tr>
         <tr>
-          <td><code>bpm-bpmn</code></td>
+          <td><code>bpm-engine-bpmn</code></td>
           <td>BPMN 2.0 XML parser → ProcessDefinition compiler</td>
         </tr>
         <tr>
-          <td><code>bpm-server-rest</code></td>
+          <td><code>bpm-engine-server-rest</code></td>
           <td>HTTP API server (axum). Wires EngineContext with storage adapter</td>
         </tr>
         <tr>
-          <td><code>bpm-worker-sdk</code></td>
+          <td><code>bpm-engine-worker-sdk</code></td>
           <td>EngineClient, Worker, TaskHandler. Workers are stateless and horizontally scalable</td>
         </tr>
       </tbody>

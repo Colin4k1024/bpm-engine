@@ -4,6 +4,8 @@
 
 本项目专注于**执行语义、持久化正确性和 crash 安全**，而非 UI 或 low-code 特性。它被设计为一个** token 驱动、持久化优先的 BPM 引擎**，具有形式化定义的不变式。
 
+> **第一次接触？** 跟着 [15 分钟快速开始](docs/quickstart_zh.md)（英文版：[15-minute quickstart](docs/quickstart.md)）端到端跑通你的第一个工作流——引擎、部署、真实 worker、一个 `COMPLETED` 实例。可复制的起点在 [templates/](templates/)；遇到问题见 [docs/troubleshooting.md](docs/troubleshooting.md)。
+
 ---
 
 ## 这是什么？
@@ -159,7 +161,7 @@ cargo build
 **1. 启动引擎**
 
 ```bash
-cargo run -p bpm-server-rest
+cargo run -p bpm-engine-server-rest
 ```
 
 服务器监听 **http://127.0.0.1:3000**。内置流程定义：`minimal`（Start → End）、`payment-flow`（Start → ExternalTask `payment` → End）。
@@ -194,7 +196,7 @@ curl -X POST http://127.0.0.1:3000/api/v1/process-instances \
 运行 payment worker（在第三个终端）：
 
 ```bash
-cargo run -p bpm-worker-sdk --example payment
+cargo run -p bpm-engine-worker-sdk --example payment
 ```
 
 Worker 轮询引擎，锁定 `payment` 任务，运行处理器，然后完成；流程继续到 End。
