@@ -14,7 +14,7 @@ use bpm_engine_core::{
 };
 use bpm_engine_runtime::EngineContext;
 use bpm_engine_storage::{
-    CompensationRecordRepo, ExternalTaskStore, HistoryRepo, InvariantChecker, ParallelJoinRepo,
+    CompensationRecordRepo, ExternalTaskStore, HistoryRepo, ParallelJoinRepo,
     ProcessDefinitionStore, ProcessInstanceStore, TimerStore, TokenStore,
 };
 use serde::{Deserialize, Serialize};
@@ -171,7 +171,21 @@ fn current_nodes(inst: &ProcessInstance) -> Vec<String> {
 }
 
 fn build_ctx(state: &AppState, tenant_id: Option<String>) -> EngineContext {
-    build_ctx_with_repo(Arc::clone(&state.repo), &state.def_store, tenant_id)
+    let s = &state.storage;
+    let mut builder = EngineContext::builder(
+        Arc::clone(&s.process_store),
+        Arc::clone(&s.token_store),
+        Arc::clone(&s.def_store),
+    )
+    .parallel_join_repo(Arc::clone(&s.parallel_join_repo))
+    .timer_store(Arc::clone(&s.timer_store))
+    .compensation_repo(Arc::clone(&s.compensation_repo))
+    .external_task_store(Arc::clone(&s.external_task_store))
+    .history_repo(Arc::clone(&s.history_repo));
+    if let Some(id) = tenant_id {
+        builder = builder.tenant_id(id);
+    }
+    builder.build()
 }
 
 /// Build engine context for timer event processing (no tenant).
@@ -180,22 +194,24 @@ pub fn build_ctx_for_timer(state: &AppState) -> EngineContext {
 }
 
 /// Build engine context with a specific repo (e.g. replay temporary repo).
+///
+/// `repo` is the ephemeral replay shadow store (always a fresh `MemoryRepo`);
+/// `def_store` is the application's definition store (memory or Postgres).
 fn build_ctx_with_repo(
     repo: Arc<MemoryRepo>,
-    def_store: &Arc<bpm_engine_adapter_memory::ProcessDefStore>,
+    def_store: Arc<dyn ProcessDefinitionStore>,
     tenant_id: Option<String>,
 ) -> EngineContext {
-    let def_store = Arc::clone(def_store);
     let mut builder = EngineContext::builder(
         repo.clone() as Arc<dyn ProcessInstanceStore>,
         repo.clone() as Arc<dyn TokenStore>,
-        def_store as Arc<dyn ProcessDefinitionStore>,
+        def_store,
     )
     .parallel_join_repo(repo.clone() as Arc<dyn ParallelJoinRepo>)
     .timer_store(repo.clone() as Arc<dyn TimerStore>)
     .compensation_repo(repo.clone() as Arc<dyn CompensationRecordRepo>)
     .external_task_store(repo.clone() as Arc<dyn ExternalTaskStore>)
-    .history_repo(repo.clone() as Arc<dyn HistoryRepo>);
+    .history_repo(repo as Arc<dyn HistoryRepo>);
     if let Some(id) = tenant_id {
         builder = builder.tenant_id(id);
     }
@@ -489,9 +505,18 @@ pub async fn list_process_instances(
     headers: HeaderMap,
 ) -> Result<Json<InstanceListResponse>, (StatusCode, Json<ErrorResponse>)> {
     let tenant_id = tenant_from_headers(&headers);
-    let instances = state.repo.list_all_instances(tenant_id.as_deref());
-    let mut responses = Vec::with_capacity(instances.len());
-    for instance in instances {
+    let instance_ids = state
+        .storage
+        .process_store
+        .list_all(tenant_id.as_deref())
+        .await
+        .map_err(internal_error_tuple)?;
+    let mut responses = Vec::with_capacity(instance_ids.len());
+    for id in instance_ids {
+        // Instance may have been removed between list and load; skip it.
+        let Ok(Some(instance)) = state.storage.process_store.load(&id).await else {
+            continue;
+        };
         let mut variables = instance.variables.clone();
         let _ = decrypt_instance_variables(&mut variables);
         let current_nodes = current_nodes(&instance);
@@ -517,8 +542,8 @@ pub async fn get_instance(
 ) -> Result<Json<InstanceStateResponse>, (StatusCode, Json<ErrorResponse>)> {
     let tenant_id = tenant_from_headers(&headers);
     let _ctx = build_ctx(state.as_ref(), tenant_id);
-    let repo = Arc::clone(&state.repo);
-    let inst = repo.load(&id).await.ok().flatten();
+    let process_store = Arc::clone(&state.storage.process_store);
+    let inst = process_store.load(&id).await.ok().flatten();
     match inst {
         Some(inst) => {
             let mut vars = inst.variables.clone();
@@ -623,8 +648,8 @@ pub async fn get_instance_trace(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<TraceResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let repo = Arc::clone(&state.repo);
-    let inst = repo.load(&id).await.ok().flatten().ok_or((
+    let process_store = Arc::clone(&state.storage.process_store);
+    let inst = process_store.load(&id).await.ok().flatten().ok_or((
         StatusCode::NOT_FOUND,
         Json(ErrorResponse::new(format!(
             "process instance not found: {}",
@@ -641,9 +666,10 @@ pub async fn get_instance_trace(
         tokens: inst.tokens.clone(),
         variables: Some(vars),
     };
-    let events = HistoryRepo::list_by_instance(state.repo.as_ref(), &id, None, None)
-        .await
-        .map_err(internal_error_tuple)?;
+    let events =
+        HistoryRepo::list_by_instance(state.storage.history_repo.as_ref(), &id, None, None)
+            .await
+            .map_err(internal_error_tuple)?;
     let token_ids_in_instance: std::collections::HashMap<
         String,
         (String, bpm_engine_core::TokenStatus),
@@ -770,13 +796,20 @@ pub async fn get_process_definition(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<ProcessDefinitionView>, (StatusCode, Json<ErrorResponse>)> {
-    let def = state.def_store.load(&id).await.ok().flatten().ok_or((
-        StatusCode::NOT_FOUND,
-        Json(ErrorResponse::new(format!(
-            "process definition not found: {}",
-            id
-        ))),
-    ))?;
+    let def = state
+        .storage
+        .def_store
+        .load(&id)
+        .await
+        .ok()
+        .flatten()
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!(
+                "process definition not found: {}",
+                id
+            ))),
+        ))?;
     Ok(Json(process_definition_to_view(&def)))
 }
 
@@ -789,9 +822,14 @@ pub async fn get_instance_history(
 ) -> Result<Json<HistoryResponse>, (StatusCode, Json<ErrorResponse>)> {
     let token_id = params.get("token_id").map(String::as_str);
     let event_type = params.get("event_type").map(String::as_str);
-    let mut events = HistoryRepo::list_by_instance(state.repo.as_ref(), &id, token_id, event_type)
-        .await
-        .map_err(internal_error_tuple)?;
+    let mut events = HistoryRepo::list_by_instance(
+        state.storage.history_repo.as_ref(),
+        &id,
+        token_id,
+        event_type,
+    )
+    .await
+    .map_err(internal_error_tuple)?;
     events.sort_by(|a, b| {
         a.occurred_at
             .cmp(&b.occurred_at)
@@ -822,16 +860,16 @@ pub async fn list_tasks(
     Query(params): Query<HashMap<String, String>>,
 ) -> Json<Vec<TaskListItem>> {
     let tenant_id = tenant_from_headers(&headers);
-    let repo = Arc::clone(&state.repo);
-    let def_store = Arc::clone(&state.def_store);
-    let running_ids = repo
+    let process_store = Arc::clone(&state.storage.process_store);
+    let def_store = Arc::clone(&state.storage.def_store);
+    let running_ids = process_store
         .list_running(tenant_id.as_deref())
         .await
         .unwrap_or_default();
     let type_filter = params.get("type").map(String::as_str);
     let mut out = Vec::new();
     for instance_id in running_ids {
-        let Ok(Some(instance)) = repo.load(&instance_id).await else {
+        let Ok(Some(instance)) = process_store.load(&instance_id).await else {
             continue;
         };
         let Ok(Some(def)) = def_store.load(&instance.process_def_id).await else {
@@ -895,9 +933,9 @@ pub async fn get_task_form(
         StatusCode::BAD_REQUEST,
         Json(ErrorResponse::new(format!("invalid task_id: {}", task_id))),
     ))?;
-    let repo = Arc::clone(&state.repo);
-    let def_store = Arc::clone(&state.def_store);
-    let instance = repo
+    let process_store = Arc::clone(&state.storage.process_store);
+    let def_store = Arc::clone(&state.storage.def_store);
+    let instance = process_store
         .load(&instance_id)
         .await
         .map_err(internal_error_tuple)?
@@ -956,9 +994,9 @@ pub async fn complete_task_by_id(
     ))?;
 
     // Validate required form fields if the user task has a form definition
-    let repo = Arc::clone(&state.repo);
-    let def_store = Arc::clone(&state.def_store);
-    if let Ok(Some(instance)) = repo.load(&instance_id).await {
+    let process_store = Arc::clone(&state.storage.process_store);
+    let def_store = Arc::clone(&state.storage.def_store);
+    if let Ok(Some(instance)) = process_store.load(&instance_id).await {
         if let Ok(Some(def)) = def_store.load(&instance.process_def_id).await {
             if let Some(node) = def.nodes.get(node_id.as_str()) {
                 if let NodeType::UserTask {
@@ -1010,14 +1048,14 @@ pub async fn external_task_fetch_and_lock(
     State(state): State<Arc<AppState>>,
     Json(body): Json<FetchAndLockRequest>,
 ) -> Result<Json<Vec<ExternalTaskResponse>>, (StatusCode, Json<ErrorResponse>)> {
-    let repo = Arc::clone(&state.repo);
-    let _ = repo
+    let external_task_store = Arc::clone(&state.storage.external_task_store);
+    let _ = external_task_store
         .reclaim_expired_locks()
         .await
         .map_err(internal_error_tuple)?;
     let lock_duration = Duration::from_millis(body.lock_duration_ms);
     let max_tasks = body.max_tasks as usize;
-    let tasks = repo
+    let tasks = external_task_store
         .fetch_and_lock(&body.worker_id, &body.task_types, max_tasks, lock_duration)
         .await
         .map_err(internal_error_tuple)?;
@@ -1031,7 +1069,7 @@ pub async fn external_task_fetch_and_lock(
             "retries": t.retries,
         });
         let _ = HistoryRepo::append(
-            state.repo.as_ref(),
+            state.storage.history_repo.as_ref(),
             &t.process_instance_id,
             "ExternalTaskLocked",
             &payload,
@@ -1065,11 +1103,12 @@ pub async fn external_task_complete(
     Path(task_id): Path<String>,
     Json(body): Json<ExternalTaskCompleteRequest>,
 ) -> Result<Json<CompleteTaskResponse>, Response> {
-    let repo = Arc::clone(&state.repo);
-    repo.complete(&task_id, &body.worker_id, body.variables.clone())
+    let external_task_store = Arc::clone(&state.storage.external_task_store);
+    external_task_store
+        .complete(&task_id, &body.worker_id, body.variables.clone())
         .await
         .map_err(external_task_error_response)?;
-    let task = repo
+    let task = external_task_store
         .get(&task_id)
         .await
         .map_err(internal_error)?
@@ -1147,9 +1186,9 @@ pub async fn external_task_extend_lock(
     Path(task_id): Path<String>,
     Json(body): Json<ExtendLockRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let repo = Arc::clone(&state.repo);
+    let external_task_store = Arc::clone(&state.storage.external_task_store);
     let extension = Duration::from_millis(body.extension_ms);
-    let ok = repo
+    let ok = external_task_store
         .extend_lock(&task_id, &body.worker_id, extension)
         .await
         .map_err(internal_error_tuple)?;
@@ -1170,14 +1209,15 @@ pub async fn external_task_fail(
     Path(task_id): Path<String>,
     Json(body): Json<ExternalTaskFailRequest>,
 ) -> Result<Json<CompleteTaskResponse>, Response> {
-    let repo = Arc::clone(&state.repo);
+    let external_task_store = Arc::clone(&state.storage.external_task_store);
     let retry_after = body.retry_after_ms.map(Duration::from_millis);
-    repo.fail(&task_id, &body.worker_id, body.error.clone(), retry_after)
+    external_task_store
+        .fail(&task_id, &body.worker_id, body.error.clone(), retry_after)
         .await
         .map_err(external_task_error_response)?;
     let worker_id_for_log = body.worker_id.clone();
     let error_for_log = body.error.clone();
-    let task = repo
+    let task = external_task_store
         .get(&task_id)
         .await
         .map_err(internal_error)?
@@ -1201,7 +1241,7 @@ pub async fn external_task_fail(
         "error_message": error_for_log,
     });
     let _ = HistoryRepo::append(
-        state.repo.as_ref(),
+        state.storage.history_repo.as_ref(),
         &task.process_instance_id,
         "ExternalTaskFailed",
         &payload,
@@ -1229,12 +1269,13 @@ pub async fn external_task_fail(
             tenant_id: None,
             created_at: occurred_at.clone(),
         };
-        let _ = state.dead_letter_store.insert(&dl_entry).await;
+        let _ = state.storage.dead_letter_store.insert(&dl_entry).await;
 
         let tenant_id = None::<String>;
         let mut ctx = build_ctx(state.as_ref(), tenant_id);
         let inst = state
-            .repo
+            .storage
+            .process_store
             .load(&task.process_instance_id)
             .await
             .ok()
@@ -1342,16 +1383,24 @@ pub async fn create_replay(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<ReplayCreateResponse>), (StatusCode, Json<ErrorResponse>)> {
-    let _inst = state.repo.load(&id).await.ok().flatten().ok_or((
-        StatusCode::NOT_FOUND,
-        Json(ErrorResponse::new(format!(
-            "process instance not found: {}",
-            id
-        ))),
-    ))?;
-    let events = HistoryRepo::list_by_instance(state.repo.as_ref(), &id, None, None)
+    let _inst = state
+        .storage
+        .process_store
+        .load(&id)
         .await
-        .map_err(internal_error_tuple)?;
+        .ok()
+        .flatten()
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(format!(
+                "process instance not found: {}",
+                id
+            ))),
+        ))?;
+    let events =
+        HistoryRepo::list_by_instance(state.storage.history_repo.as_ref(), &id, None, None)
+            .await
+            .map_err(internal_error_tuple)?;
     let session_id = uuid::Uuid::new_v4().to_string();
     let session = ReplaySession::new(id.clone(), events);
     let total_events = session.total_events();
@@ -1378,7 +1427,7 @@ pub async fn create_replay(
 /// Apply one event to a temporary repo and return new snapshot.
 async fn replay_apply_one(
     engine: &bpm_engine_runtime::BpmEngine,
-    def_store: &Arc<bpm_engine_adapter_memory::ProcessDefStore>,
+    def_store: &Arc<dyn ProcessDefinitionStore>,
     snapshot: Option<&ProcessInstance>,
     ev: &bpm_engine_storage::HistoryEvent,
 ) -> Option<ProcessInstance> {
@@ -1388,7 +1437,7 @@ async fn replay_apply_one(
     if let Some(inst) = snapshot {
         let _ = replay_repo.save(inst).await;
     }
-    let mut ctx = build_ctx_with_repo(replay_repo.clone(), def_store, None);
+    let mut ctx = build_ctx_with_repo(replay_repo.clone(), Arc::clone(def_store), None);
     engine.run_async(engine_ev, &mut ctx).await;
     replay_repo.load(&instance_id).await.ok().flatten()
 }
@@ -1419,7 +1468,7 @@ pub async fn replay_step(
     };
     let new_snapshot = replay_apply_one(
         &state.engine,
-        &state.def_store,
+        &state.storage.def_store,
         snapshot_clone.as_ref(),
         &ev_clone,
     )
@@ -1495,8 +1544,13 @@ pub async fn replay_seek(
     let cursor = events_to_apply.len();
     let mut snapshot: Option<ProcessInstance> = None;
     for ev in &events_to_apply {
-        if let Some(inst) =
-            replay_apply_one(&state.engine, &state.def_store, snapshot.as_ref(), ev).await
+        if let Some(inst) = replay_apply_one(
+            &state.engine,
+            &state.storage.def_store,
+            snapshot.as_ref(),
+            ev,
+        )
+        .await
         {
             snapshot = Some(inst);
         }
@@ -1594,7 +1648,15 @@ pub async fn deploy_bpmn(
         }
     };
     let process_definition_id = def.id.to_string();
-    state.def_store.register(def);
+    if let Err(e) = state.storage.deployer.deploy(&def, &body).await {
+        tracing::error!(error = %e, "process definition deploy failed");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(DeployErrorResponse::Parse {
+                error: format!("failed to persist process definition: {}", e),
+            }),
+        ));
+    }
     Ok((
         StatusCode::CREATED,
         Json(DeployResponse {
@@ -1635,7 +1697,12 @@ pub struct DefinitionListResponse {
 pub async fn list_process_definitions(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<DefinitionListResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let records = state.def_store.list_all_records();
+    let records = state
+        .storage
+        .def_store
+        .list_all()
+        .await
+        .map_err(internal_error_tuple)?;
     Ok(Json(DefinitionListResponse {
         definitions: records
             .into_iter()
@@ -1655,8 +1722,8 @@ pub async fn list_definition_versions(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
 ) -> Result<Json<VersionListResponse>, (StatusCode, Json<ErrorResponse>)> {
-    use bpm_engine_storage::ProcessDefinitionStore;
     let versions = state
+        .storage
         .def_store
         .list_versions(&key)
         .await
@@ -1681,8 +1748,8 @@ pub async fn get_active_definition(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
 ) -> Result<Json<DefinitionVersionView>, (StatusCode, Json<ErrorResponse>)> {
-    use bpm_engine_storage::ProcessDefinitionStore;
     let record = state
+        .storage
         .def_store
         .get_active(&key)
         .await
@@ -1708,8 +1775,8 @@ pub async fn activate_definition(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<ActivateResponse>, (StatusCode, Json<ErrorResponse>)> {
-    use bpm_engine_storage::ProcessDefinitionStore;
     state
+        .storage
         .def_store
         .activate(&id)
         .await
@@ -1726,8 +1793,8 @@ pub async fn deprecate_definition(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<ActivateResponse>, (StatusCode, Json<ErrorResponse>)> {
-    use bpm_engine_storage::ProcessDefinitionStore;
     state
+        .storage
         .def_store
         .deprecate(&id)
         .await
@@ -1748,7 +1815,7 @@ pub async fn health() -> Json<super::state::HealthResponse> {
     })
 }
 
-/// GET /ready - readiness probe. Checks engine availability and in-memory store.
+/// GET /ready - readiness probe. Checks engine availability and the storage backend.
 pub async fn readiness(
     State(state): State<Arc<AppState>>,
 ) -> Json<super::state::ReadinessResponse> {
@@ -1757,19 +1824,23 @@ pub async fn readiness(
     // Check engine is accessible (always ok in current impl)
     checks.insert("engine".to_string(), "ok".to_string());
 
-    // Check in-memory repo is accessible by attempting a lightweight operation
-    let repo_ok = state.repo.list_running(None).await.is_ok();
+    // Check the storage backend is accessible by attempting a lightweight operation
+    let store_ok = state.storage.process_store.list_running(None).await.is_ok();
     checks.insert(
         "database".to_string(),
-        if repo_ok { "ok" } else { "unavailable" }.to_string(),
+        if store_ok { "ok" } else { "unavailable" }.to_string(),
     );
 
-    // Merge extra health checks (e.g. connection pool status)
+    // Merge extra health checks (e.g. postgres pool status)
     if let Some(ref extra) = state.extra_health_checks {
         checks.extend(extra());
     }
 
-    let all_ok = checks.values().all(|v| v == "ok");
+    // Informational metrics (e.g. db_pool_active) are numeric; they report
+    // state, not pass/fail, and do not affect the overall status.
+    let all_ok = checks
+        .values()
+        .all(|v| v == "ok" || v.parse::<u64>().is_ok());
     let status = if all_ok { "ok" } else { "degraded" }.to_string();
 
     Json(super::state::ReadinessResponse { status, checks })
@@ -1786,6 +1857,7 @@ async fn list_dead_letters(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let tenant_id = tenant_from_headers(&headers);
     let entries = state
+        .storage
         .dead_letter_store
         .list(tenant_id.as_deref(), 100)
         .await
@@ -1799,6 +1871,7 @@ async fn get_dead_letter(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let entry = state
+        .storage
         .dead_letter_store
         .get(&id)
         .await
@@ -1818,6 +1891,7 @@ async fn requeue_dead_letter(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let task_id = state
+        .storage
         .dead_letter_store
         .requeue(&id)
         .await
@@ -1839,6 +1913,7 @@ async fn delete_dead_letter(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     state
+        .storage
         .dead_letter_store
         .delete(&id)
         .await
@@ -1853,6 +1928,7 @@ async fn invariant_check(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<bpm_engine_storage::InvariantCheckResult>, (StatusCode, Json<ErrorResponse>)> {
     state
+        .storage
         .invariant_checker
         .check_all()
         .await

@@ -48,18 +48,8 @@ use deadpool_postgres::Pool;
 use tokio_postgres::NoTls;
 use url::Url;
 
-/// Create a PostgreSQL connection pool.
-///
-/// # Arguments
-///
-/// * `url` - PostgreSQL connection string (e.g., `postgres://user:pass@localhost/bpm`)
-///
-/// # Example
-///
-/// ```ignore
-/// let pool = create_pool("postgres://user:pass@localhost/bpm")?;
-/// ```
-pub fn create_pool(url: &str) -> anyhow::Result<Pool> {
+/// Parse a PostgreSQL connection URL into a deadpool configuration.
+fn pool_config_from_url(url: &str) -> anyhow::Result<deadpool_postgres::Config> {
     let url = Url::parse(url)?;
     let mut cfg = deadpool_postgres::Config::new();
     cfg.host = Some(url.host_str().unwrap_or("localhost").to_string());
@@ -75,9 +65,42 @@ pub fn create_pool(url: &str) -> anyhow::Result<Pool> {
         .path_segments()
         .and_then(|mut s| s.next_back())
         .map(|s| s.to_string());
+    Ok(cfg)
+}
 
+/// Create a PostgreSQL connection pool with deadpool's default max size.
+///
+/// # Arguments
+///
+/// * `url` - PostgreSQL connection string (e.g., `postgres://user:pass@localhost/bpm`)
+///
+/// # Example
+///
+/// ```ignore
+/// let pool = create_pool("postgres://user:pass@localhost/bpm")?;
+/// ```
+pub fn create_pool(url: &str) -> anyhow::Result<Pool> {
+    let cfg = pool_config_from_url(url)?;
     let pool = cfg.create_pool(Some(deadpool_postgres::Runtime::Tokio1), NoTls)?;
+    Ok(pool)
+}
 
+/// Create a PostgreSQL connection pool with an explicit maximum pool size.
+///
+/// # Arguments
+///
+/// * `url` - PostgreSQL connection string (e.g., `postgres://user:pass@localhost/bpm`)
+/// * `max_size` - Maximum number of connections in the pool
+///
+/// # Example
+///
+/// ```ignore
+/// let pool = create_pool_with_max_size("postgres://user:pass@localhost/bpm", 5)?;
+/// ```
+pub fn create_pool_with_max_size(url: &str, max_size: u32) -> anyhow::Result<Pool> {
+    let mut cfg = pool_config_from_url(url)?;
+    cfg.pool = Some(deadpool_postgres::PoolConfig::new(max_size as usize));
+    let pool = cfg.create_pool(Some(deadpool_postgres::Runtime::Tokio1), NoTls)?;
     Ok(pool)
 }
 
@@ -169,11 +192,13 @@ pub async fn migrate(pool: &Pool) -> anyhow::Result<()> {
         .await?;
 
     // Create indexes for token table
+    // (the token status column is named `status`; the index is used for
+    // state-based scans such as reclaiming stale Executing tokens)
     client
         .execute(
             r#"
             CREATE INDEX IF NOT EXISTS idx_token_state_updated
-            ON token(state, updated_at)
+            ON token(status, updated_at)
             "#,
             &[],
         )

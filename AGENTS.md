@@ -56,7 +56,7 @@ cargo run -p bpm-worker-sdk --example payment
 | `crates/runtime` | BpmEngine event loop, EngineContext, event handlers, gateway evaluation. Depends on storage traits only. |
 | `crates/adapters/memory` | In-memory implementations of storage traits. Default for development/testing. |
 | `crates/bpmn` | BPMN 2.0 XML parser → ProcessDefinition compiler |
-| `crates/server/rest` | HTTP API server (axum). Wires EngineContext with memory adapter. |
+| `crates/server/rest` | HTTP API server (axum, lib + `api_server` bin). Wires EngineContext through the `Storage` bundle (memory or postgres driver). |
 | `crates/worker-sdk` | External task worker runtime: EngineClient, Worker, TaskHandler. Workers are stateless and horizontally scalable. |
 
 ## Core Abstractions
@@ -93,7 +93,7 @@ The engine enforces formal invariants (see `docs/invariants.md`):
 ## Important Constraints
 
 - `crates/core` is **pure logic** — no I/O, no async, no storage traits. Changing it casually affects all downstream crates.
-- The REST server uses the **memory adapter** by default (no database). For production, implement storage traits over PostgreSQL (see `docs/database-schema.md`).
+- The REST server defaults to the **memory adapter** (`database.driver = "memory"`); configure `database.driver = "postgres"` with `database.url` to run on PostgreSQL via `bpm-engine-adapter-postgres` (migrations run on start, state survives restarts — see `docs/database-schema.md`).
 - CI enforces: `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`
 
 ## Feature Flags

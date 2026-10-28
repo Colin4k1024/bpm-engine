@@ -153,6 +153,16 @@ impl ProcessInstanceStore for MemoryRepo {
             .collect();
         Ok(ids)
     }
+
+    async fn list_all(&self, tenant_id: Option<&str>) -> anyhow::Result<Vec<String>> {
+        // Delegate to list_all_instances to keep the same tenant filter and
+        // id ordering.
+        Ok(self
+            .list_all_instances(tenant_id)
+            .into_iter()
+            .map(|i| i.id)
+            .collect())
+    }
 }
 
 #[async_trait]
@@ -674,7 +684,48 @@ impl HistoryRepo for MemoryRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bpm_engine_core::ProcessInstance;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn list_all_includes_completed_instances_sorted_by_id() {
+        let repo = MemoryRepo::new();
+        let make_instance =
+            |id: &str, state: InstanceState, tenant: Option<&str>| ProcessInstance {
+                id: id.to_string(),
+                process_def_id: "def-1".to_string(),
+                tenant_id: tenant.map(String::from),
+                tokens: vec![],
+                variables: HashMap::new(),
+                state,
+                version: 1,
+                parent_instance_id: None,
+                parent_token_id: None,
+            };
+        repo.save(&make_instance("inst-b", InstanceState::Completed, None))
+            .await
+            .unwrap();
+        repo.save(&make_instance("inst-a", InstanceState::Running, Some("t1")))
+            .await
+            .unwrap();
+        repo.save(&make_instance("inst-c", InstanceState::Terminated, None))
+            .await
+            .unwrap();
+
+        // All states included, sorted by id
+        let all = repo.list_all(None).await.unwrap();
+        assert_eq!(all, vec!["inst-a", "inst-b", "inst-c"]);
+
+        // list_running only includes the running one
+        let running = repo.list_running(None).await.unwrap();
+        assert_eq!(running, vec!["inst-a"]);
+
+        // Tenant filter applies to list_all as well
+        let tenant = repo.list_all(Some("t1")).await.unwrap();
+        assert_eq!(tenant, vec!["inst-a"]);
+        let other = repo.list_all(Some("t2")).await.unwrap();
+        assert!(other.is_empty());
+    }
 
     #[tokio::test]
     async fn external_task_store_create_fetch_lock_complete() {

@@ -1,9 +1,8 @@
 //! Shared app state for REST API.
 
 use crate::replay::ReplaySessions;
-use bpm_engine_adapter_memory::{MemoryInvariantChecker, MemoryRepo, ProcessDefStore};
+use crate::storage::Storage;
 use bpm_engine_runtime::BpmEngine;
-use bpm_engine_storage::DeadLetterStore;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -18,15 +17,13 @@ pub type ExtraHealthChecks =
 /// Shared app state. Pass Arc<AppState> to router.
 pub struct AppState {
     pub engine: BpmEngine,
-    pub repo: Arc<MemoryRepo>,
-    pub def_store: Arc<ProcessDefStore>,
-    pub dead_letter_store: Arc<dyn DeadLetterStore>,
-    /// Invariant checker for storage consistency verification.
-    pub invariant_checker: MemoryInvariantChecker,
+    /// Storage bundle: trait objects for every store, memory or Postgres
+    /// depending on `database.driver` configuration.
+    pub storage: Storage,
     /// Ephemeral replay sessions (session_id -> ReplaySession). Not persisted.
     pub replay_sessions: Arc<ReplaySessions>,
-    /// Cancellation token for the timer scheduler. Used during graceful shutdown.
-    #[allow(dead_code)]
+    /// Cancellation token for the timer scheduler and timer event drain task.
+    /// Used during graceful shutdown.
     pub timer_cancel: CancellationToken,
     /// Optional extra health checks (e.g. database pool status).
     pub extra_health_checks: Option<ExtraHealthChecks>,

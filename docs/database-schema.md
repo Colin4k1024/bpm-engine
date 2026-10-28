@@ -190,7 +190,43 @@ WHERE parallel_group_id = ?
 
 ---
 
-## 11. Relationship to Other Docs
+## 11. Storage Backend Configuration
+
+The REST server (`bpm-engine-server-rest`) supports two storage backends,
+selected via configuration (defaults < TOML file < `BPM__`-prefixed env vars):
+
+| Key | Default | Values | Env var |
+|-----|---------|--------|---------|
+| `database.driver` | `"memory"` | `memory` \| `postgres` | `BPM_DATABASE__DRIVER` |
+| `database.url` | *(empty)* | e.g. `postgres://user:pass@host:5432/bpm` | `BPM_DATABASE__URL` |
+| `database.max_connections` | `10` | postgres pool size | `BPM_DATABASE__MAX_CONNECTIONS` |
+
+**memory** (default): everything lives in process memory. The bootstrap
+definitions `minimal` and `payment-flow` are registered at startup. State is
+lost on restart — suitable for development and testing.
+
+**postgres**: all state (instances, tokens, timers, external tasks, history,
+definitions, dead letters) is persisted through the store traits in
+`bpm-engine-adapter-postgres`. On startup the server:
+
+1. creates a deadpool connection pool (`max_connections`),
+2. runs `migrate()` — idempotent `CREATE TABLE IF NOT EXISTS` DDL, safe on every start,
+3. wires every store over the shared pool and adds `db_pool*` readiness checks to `/ready`.
+
+Restart semantics: starting a second server process against the same URL
+re-runs migrations and resumes from persisted state — running instances,
+waiting tokens, and deployed definitions are all still queryable. Programmatic
+bootstrap definitions are NOT persisted in postgres mode; deploy definitions
+via `POST /api/v1/process-definitions/deploy` (the BPMN XML source is stored
+and recompiled on load).
+
+Routes only depend on the storage traits (`bpm-engine-storage`), so switching
+backends is a pure configuration change. The `postgres` feature is enabled by
+default; build with `--no-default-features` for a memory-only binary.
+
+---
+
+## 12. Relationship to Other Docs
 
 - Execution semantics: `execution-model.md`
 - Saga & compensation: `saga.md`

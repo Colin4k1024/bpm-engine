@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use bpm_engine_core::ProcessDefinition;
-use bpm_engine_storage::{DefinitionStatus, ProcessDefinitionRecord, ProcessDefinitionStore};
+use bpm_engine_storage::{
+    DefinitionDeployer, DefinitionStatus, ProcessDefinitionRecord, ProcessDefinitionStore,
+};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -127,6 +129,19 @@ impl ProcessDefinitionStore for ProcessDefStore {
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("process definition not found: {}", id))?;
         rec.status = DefinitionStatus::Deprecated;
+        Ok(())
+    }
+
+    async fn list_all(&self) -> anyhow::Result<Vec<ProcessDefinitionRecord>> {
+        Ok(self.list_all_records())
+    }
+}
+
+#[async_trait]
+impl DefinitionDeployer for ProcessDefStore {
+    async fn deploy(&self, def: &ProcessDefinition, _bpmn_xml: &str) -> anyhow::Result<()> {
+        // The memory store keeps the compiled graph; the XML source is not persisted.
+        self.register(def.clone());
         Ok(())
     }
 }
