@@ -906,3 +906,78 @@ async fn approval_store_only_once_and_subject_idempotent() {
         other => panic!("expected NotFound, got {other:?}"),
     }
 }
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn retention_delete_older_than_history_and_dead_letters() {
+    // E5-3: the retention deletes compare the TEXT unix-seconds columns
+    // NUMERICALLY (a text compare would keep "999" when deleting older
+    // than "1000", since "999" > "1000" as text), keep rows whose
+    // timestamp is not a unix-seconds number, and cover both history and
+    // dead letters.
+    use bpm_engine_adapter_postgres::{PostgresDeadLetterStore, PostgresHistoryRepo};
+    use bpm_engine_storage::{DeadLetterEntry, DeadLetterStore, HistoryRepo};
+
+    let (pool, _container) = setup_pool().await;
+    insert_test_instance(&pool, "inst-ret-1").await;
+
+    let history = PostgresHistoryRepo::new(pool.clone());
+    let marker = |m: &str| serde_json::json!({ "marker": m });
+    history
+        .append("inst-ret-1", "TokenArrived", &marker("old"), "999")
+        .await
+        .unwrap();
+    history
+        .append("inst-ret-1", "TokenArrived", &marker("mid"), "1000")
+        .await
+        .unwrap();
+    history
+        .append("inst-ret-1", "TokenArrived", &marker("new"), "2000")
+        .await
+        .unwrap();
+    history
+        .append("inst-ret-1", "TimerFired", &marker("weird"), "not-a-number")
+        .await
+        .unwrap();
+
+    // Cutoff "1000": strictly older rows only — "999" numerically, and
+    // ONLY "999" despite the text ordering ("999" > "1000" as text).
+    let deleted = history.delete_older_than("1000").await.unwrap();
+    assert_eq!(deleted, 1, "only the 999 row is strictly older");
+    let kept = history
+        .list_by_instance("inst-ret-1", None, None)
+        .await
+        .unwrap();
+    let mut markers: Vec<&str> = kept
+        .iter()
+        .map(|e| e.payload["marker"].as_str().unwrap())
+        .collect();
+    markers.sort_unstable();
+    assert_eq!(markers, vec!["mid", "new", "weird"]);
+
+    // A cutoff of 0 deletes nothing (nothing is older than the epoch);
+    // the non-numeric row is never touched.
+    assert_eq!(history.delete_older_than("0").await.unwrap(), 0);
+
+    // Dead letters: same rule on created_at.
+    let dl = PostgresDeadLetterStore::new(pool.clone());
+    let make = |id: &str, created_at: &str| DeadLetterEntry {
+        id: id.to_string(),
+        task_id: format!("task-{id}"),
+        token_id: "tok-1".to_string(),
+        process_instance_id: "inst-ret-1".to_string(),
+        task_type: "payment".to_string(),
+        error_message: "timeout".to_string(),
+        variables: "{}".to_string(),
+        tenant_id: None,
+        created_at: created_at.to_string(),
+    };
+    dl.insert(&make("dl-old", "999")).await.unwrap();
+    dl.insert(&make("dl-new", "2000")).await.unwrap();
+
+    let deleted = dl.delete_older_than("1000").await.unwrap();
+    assert_eq!(deleted, 1, "only the aged dead letter");
+    assert!(dl.get("dl-old").await.unwrap().is_none());
+    assert!(dl.get("dl-new").await.unwrap().is_some());
+    assert_eq!(dl.delete_older_than("0").await.unwrap(), 0);
+}

@@ -156,7 +156,10 @@ async fn postgres_mode_survives_restart() {
     );
     assert_eq!(body["checks"]["db_pool"], "ok");
     assert_eq!(body["checks"]["db_migrations"], "ok");
-    assert_eq!(body["checks"]["db_schema_version"], "3");
+    // 4 = 0001_init + 0002_query_indexes + 0003_idempotency_keys +
+    // 0004_approval_records (E5-2; the assertion previously pinned 3 and
+    // had drifted when 0004 landed).
+    assert_eq!(body["checks"]["db_schema_version"], "4");
 
     // --- Stop app 1 (cancel timer token, abort serve task, drop state) ------
     app1.stop().await;

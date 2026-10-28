@@ -123,4 +123,29 @@ impl HistoryRepo for PostgresHistoryRepo {
             })
             .collect())
     }
+
+    async fn delete_older_than(&self, cutoff: &str) -> anyhow::Result<u64> {
+        // E5-3 retention. occurred_at is stored as TEXT (unix-seconds
+        // strings everywhere the engine writes them), so the comparison
+        // casts to bigint — a plain text compare would misorder values of
+        // different digit counts ("999" > "1000"). The regex guard keeps
+        // rows whose occurred_at is not a unix-seconds number (never
+        // delete what cannot be age-assessed) and makes the cast safe.
+        // The cutoff binds as int8 (fail-safe no-op when unparseable, the
+        // same semantics as the memory adapter); SQL is parameter-bound.
+        let Ok(cutoff) = cutoff.parse::<i64>() else {
+            return Ok(0);
+        };
+        let client = self.pool.get().await?;
+        let n = client
+            .execute(
+                r#"
+                DELETE FROM history_event
+                WHERE occurred_at ~ '^[0-9]{1,19}$' AND occurred_at::bigint < $1
+                "#,
+                &[&cutoff],
+            )
+            .await?;
+        Ok(n)
+    }
 }

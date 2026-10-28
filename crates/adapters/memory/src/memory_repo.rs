@@ -800,6 +800,26 @@ impl HistoryRepo for MemoryRepo {
         out.sort_by(|a, b| a.occurred_at.cmp(&b.occurred_at));
         Ok(out)
     }
+
+    async fn delete_older_than(&self, cutoff: &str) -> anyhow::Result<u64> {
+        // Numeric comparison of unix-seconds strings (a plain text compare
+        // would misorder e.g. "999" vs "1000"). Rows whose occurred_at is
+        // not a unix-seconds number are KEPT: retention must never delete
+        // a row it cannot age-assess.
+        let cutoff: Option<u64> = cutoff.parse().ok();
+        let mut guard = self.history_events.write().unwrap();
+        let before = guard.len();
+        guard.retain(|r| {
+            match (cutoff, r.occurred_at.parse::<u64>().ok()) {
+                (Some(cutoff), Some(occurred)) => occurred >= cutoff,
+                // Unparseable cutoff: delete nothing (fail safe).
+                // Unparseable row: keep (never delete what cannot be aged).
+                _ => true,
+            }
+        });
+        let deleted = (before - guard.len()) as u64;
+        Ok(deleted)
+    }
 }
 
 #[async_trait]
@@ -1359,6 +1379,48 @@ mod tests {
             repo.get_by_token("tok-other").await.unwrap().is_none(),
             "another token has no task"
         );
+    }
+
+    #[tokio::test]
+    async fn history_delete_older_than_keeps_recent_and_unparseable() {
+        // E5-3 retention: strictly-older rows are deleted; recent rows,
+        // other instances' rows, and rows whose occurred_at is not a
+        // unix-seconds number are kept. Numeric comparison, not text.
+        let repo = MemoryRepo::new();
+        for (id, instance, occurred_at) in [
+            ("h-old", "inst-1", "1000"),
+            ("h-recent", "inst-1", "2000"),
+            ("h-other", "inst-2", "1000"),
+            ("h-weird", "inst-1", "not-a-number"),
+        ] {
+            HistoryRepo::append(
+                &repo,
+                instance,
+                "TokenArrived",
+                &serde_json::json!({ "id": id }),
+                occurred_at,
+            )
+            .await
+            .unwrap();
+        }
+
+        let deleted = repo.delete_older_than("1500").await.unwrap();
+        assert_eq!(deleted, 2, "h-old and h-other are strictly older");
+        let mut kept: Vec<String> = HistoryRepo::list_by_instance(&repo, "inst-1", None, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.payload["id"].as_str().unwrap().to_string())
+            .collect();
+        kept.sort();
+        assert_eq!(kept, vec!["h-recent".to_string(), "h-weird".to_string()]);
+
+        // Boundary: equal to the cutoff is KEPT (strictly-older deletion).
+        let deleted = repo.delete_older_than("2000").await.unwrap();
+        assert_eq!(deleted, 0, "the cutoff row itself is not old");
+        // An unparseable cutoff deletes nothing (fail safe).
+        let deleted = repo.delete_older_than("oops").await.unwrap();
+        assert_eq!(deleted, 0);
     }
 
     #[tokio::test]

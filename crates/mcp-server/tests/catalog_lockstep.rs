@@ -47,7 +47,8 @@ fn embedded_catalog_equals_the_server_crates_embed() {
 #[test]
 fn embedded_catalog_parses_and_covers_the_v1_surface() {
     let catalog = Catalog::embedded().expect("embedded catalog parses");
-    assert_eq!(catalog.tools.len(), 40);
+    // 35 (E4-1) → 40 (E5-2 approvals) → 41 (E5-3 audit view).
+    assert_eq!(catalog.tools.len(), 41);
     let names: Vec<&str> = catalog.tools.iter().map(|t| t.name.as_str()).collect();
     for name in bpm_engine_mcp_server::allowlist::V1_SURFACE {
         assert!(names.contains(name), "v1 surface tool {name} missing");

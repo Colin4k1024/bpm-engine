@@ -78,6 +78,21 @@ impl DeadLetterStore for DeadLetterRepo {
         self.entries.write().unwrap().remove(id);
         Ok(())
     }
+
+    async fn delete_older_than(&self, cutoff: &str) -> anyhow::Result<u64> {
+        // Numeric comparison of unix-seconds strings; unparseable rows (or
+        // an unparseable cutoff) are KEPT — retention never deletes what
+        // it cannot age-assess.
+        let cutoff: Option<u64> = cutoff.parse().ok();
+        let mut guard = self.entries.write().unwrap();
+        let before = guard.len();
+        guard.retain(|_, e| match (cutoff, e.created_at.parse::<u64>().ok()) {
+            (Some(cutoff), Some(created)) => created >= cutoff,
+            _ => true,
+        });
+        let deleted = (before - guard.len()) as u64;
+        Ok(deleted)
+    }
 }
 
 #[cfg(test)]
@@ -138,5 +153,33 @@ mod tests {
         let t1 = repo.list(Some("t1"), 100).await.unwrap();
         assert_eq!(t1.len(), 1);
         assert_eq!(t1[0].id, "dl-4");
+    }
+
+    #[tokio::test]
+    async fn delete_older_than_keeps_recent_and_unparseable() {
+        // E5-3 retention: strictly-older entries are deleted; recent ones
+        // and entries whose created_at is not a unix-seconds number are
+        // kept. Numeric comparison (999 < 1000 despite text order).
+        let repo = DeadLetterRepo::new();
+        for (id, created_at) in [
+            ("dl-old", "1000"),
+            ("dl-recent", "2000"),
+            ("dl-weird", "soon"),
+        ] {
+            let mut e = make_entry(id, "payment");
+            e.created_at = created_at.to_string();
+            repo.insert(&e).await.unwrap();
+        }
+
+        let deleted = repo.delete_older_than("1500").await.unwrap();
+        assert_eq!(deleted, 1, "only dl-old is strictly older");
+        assert!(repo.get("dl-old").await.unwrap().is_none());
+        assert!(repo.get("dl-recent").await.unwrap().is_some());
+        assert!(repo.get("dl-weird").await.unwrap().is_some());
+
+        // Boundary: equal to the cutoff is kept; unparseable cutoff is a
+        // no-op (fail safe).
+        assert_eq!(repo.delete_older_than("2000").await.unwrap(), 0);
+        assert_eq!(repo.delete_older_than("oops").await.unwrap(), 0);
     }
 }

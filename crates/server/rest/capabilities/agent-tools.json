@@ -2587,6 +2587,68 @@
       }
     },
     {
+      "name": "get_instance_audit",
+      "operation": "GET /api/v1/process-instances/{id}/audit",
+      "summary": "Audit view of a process instance (E5-3)",
+      "description": "The single place that answers \"who did what, against which\ndefinition version, with which decisions and artifact\nreferences\" (E5-3, issue #25). Read-only aggregation over the\ninstance, definition, and history stores — no new stores, no new\nwrites.\n\n- **events**: the full history timeline with `actor` attribution\n  on the ROUTE-LAYER boundary events (`InstanceStarted`,\n  `TaskCompleted`, `ExternalTaskLocked`, `ExternalTaskFailed`,\n  `InstancePaused`/`InstanceResumed`/`InstanceCancelled`,\n  `ApprovalGranted`/`ApprovalRejected`,\n  `DeadLetterRequeued`/`DeadLetterDeleted`). Engine-internal\n  transitions (`TokenArrived`, `TokenCompleted`, …) have no human\n  actor BY DESIGN and serialize without the field.\n- **definition**: the instance's versioned `process_def_id`\n  (`key:version`) plus the definition record's current status.\n- **decisions**: the approval decisions (approved/rejected) with\n  actor and note.\n- **artifacts**: artifact references parsed read-only from\n  `__var:1:` artifact envelopes in the history payloads and the\n  instance's variables (uri, sha256, size, media_type).\n\nSecrecy by construction: the endpoint NEVER decrypts —\n`__encrypted:` values appear as ciphertext exactly as history\nstored them, and oversized values appear as the E2-3\n`__truncated:` markers. Read operation (all roles); cross-tenant\naccess is rejected as 404 like every instance-scoped read.",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        },
+        {
+          "name": "X-Tenant-Id",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Tenant scope for the request (optional). DEPRECATED for\nJWT-authenticated requests (E5-1): the tenant comes from the\nverified `tenant` claim, an absent or agreeing header is accepted,\nand a CONFLICTING header is rejected with 403 `forbidden`. In open\nand API-key modes the header keeps its pre-E5-1 meaning: untrusted\nclient input that scopes listings and instance starts (dev-mode\naffordance)."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "The audit view of the instance.",
+          "schema": "AuditResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
       "name": "cancel_instance",
       "operation": "POST /api/v1/process-instances/{id}/cancel",
       "summary": "Cancel a process instance",
@@ -2643,7 +2705,7 @@
       "name": "get_instance_history",
       "operation": "GET /api/v1/process-instances/{id}/history",
       "summary": "Execution history (auditable timeline)",
-      "description": "Events in causal order (by `occurred_at`, then `id`) with\nzero-based `sequence` and `category` (`instance` | `token` |\n`external`). Optional filters `token_id` and `event_type`; the\noptional `limit` (1..=500, E2-4) truncates the returned list\nafter sorting. Absent parameters keep the pre-existing\nfull-history behavior.",
+      "description": "Events in causal order (by `occurred_at`, then `id`) with\nzero-based `sequence` and `category` (`instance` | `token` |\n`external` | `approval`). Optional filters `token_id` and\n`event_type`; the optional `limit` (1..=500, E2-4) truncates the\nreturned list after sorting. Absent parameters keep the\npre-existing full-history behavior. For the actor-attributed\naudit view use `/process-instances/{id}/audit` (E5-3).",
       "classification": "read_only",
       "side_effects": "none",
       "auth_required": true,

@@ -70,4 +70,15 @@ pub trait HistoryRepo: Send + Sync {
         token_id_filter: Option<&str>,
         event_type_filter: Option<&str>,
     ) -> anyhow::Result<Vec<HistoryEvent>>;
+
+    /// Delete history events that occurred strictly before `cutoff`
+    /// (E5-3 retention). `cutoff` is a unix-seconds string, compared
+    /// NUMERICALLY against `occurred_at` — rows whose `occurred_at` is not
+    /// a unix-seconds number are kept (never delete what cannot be
+    /// age-assessed). Applies across ALL instances and tenants: retention
+    /// is a global data-lifecycle policy, not a per-tenant query.
+    ///
+    /// Returns the number of deleted rows. Pure deletion of existing rows —
+    /// no schema change, no new table.
+    async fn delete_older_than(&self, cutoff: &str) -> anyhow::Result<u64>;
 }

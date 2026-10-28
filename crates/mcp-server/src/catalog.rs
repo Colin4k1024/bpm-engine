@@ -215,8 +215,8 @@ mod tests {
         assert_eq!(catalog.catalog_version, "1");
         // The catalog count is pinned so adding an engine operation without
         // regenerating the catalog fails loudly (E4-1 shipped 35; E5-2's
-        // approval endpoints took it to 40).
-        assert_eq!(catalog.tools.len(), 40);
+        // approval endpoints took it to 40; E5-3's audit endpoint to 41).
+        assert_eq!(catalog.tools.len(), 41);
     }
 
     #[test]

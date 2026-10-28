@@ -180,8 +180,9 @@ impl Identity {
         }
     }
 
-    /// The actor identity of the request (for logging; E5-3 will persist
-    /// it into the audit trail — not this issue's scope).
+    /// The actor identity of the request. Logged on every mutation and —
+    /// since E5-3 — persisted into the instance's history on the
+    /// route-layer boundary events (see `docs/audit-and-retention.md`).
     pub fn actor(&self) -> &str {
         match self {
             Identity::Principal { actor, .. } => actor.as_str(),
@@ -412,6 +413,9 @@ const PERMISSIONS: &[(&str, &[&str], &[Role])] = &[
     ("GET", &["process-instances", ANY, "trace"], ROLES),
     ("GET", &["process-instances", ANY, "history"], ROLES),
     ("GET", &["process-instances", ANY, "steps"], ROLES),
+    // E5-3: the audit view is a read (the auditor role's primary tool;
+    // every authenticated role may read).
+    ("GET", &["process-instances", ANY, "audit"], ROLES),
     // E5-2: the approval list of an instance is a read (operators use it
     // to discover pending approval ids; auditors inspect the records).
     ("GET", &["process-instances", ANY, "approvals"], ROLES),
@@ -742,6 +746,8 @@ mod tests {
             ("POST", "/process-instances/i/cancel", operator_only),
             // ...while the approval LIST is a read (all roles).
             ("GET", "/process-instances/i/approvals", all),
+            // E5-3: the audit view is a read (all roles).
+            ("GET", "/process-instances/i/audit", all),
             ("POST", "/replay/s/step", operator_only),
             ("DELETE", "/replay/s", operator_only),
             ("POST", "/tasks/t/complete", operator_only),

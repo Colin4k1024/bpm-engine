@@ -39,6 +39,20 @@ impl From<&crate::bpm_config::EngineConfig> for VariableContractLimits {
     }
 }
 
+/// Audit & data-retention runtime state (E5-3, issue #25).
+///
+/// `retention_days` mirrors `audit.retention_days` (0 = retention off,
+/// nothing is ever deleted). `last_sweep` records the most recent
+/// completed sweep for the `/ready` check and operator introspection;
+/// `None` before the first (enabled) sweep.
+#[derive(Debug)]
+pub struct RetentionState {
+    /// Configured retention window in days (0 = disabled).
+    pub retention_days: u64,
+    /// Outcome of the most recent enabled sweep.
+    pub last_sweep: std::sync::Mutex<Option<crate::audit::SweepOutcome>>,
+}
+
 /// Shared app state. Pass Arc<AppState> to router.
 pub struct AppState {
     pub engine: BpmEngine,
@@ -67,6 +81,9 @@ pub struct AppState {
     /// Cancellation token for the timer scheduler and timer event drain task.
     /// Used during graceful shutdown.
     pub timer_cancel: CancellationToken,
+    /// Audit & retention runtime (E5-3): the effective retention window
+    /// and the last sweep's outcome.
+    pub retention: RetentionState,
     /// Optional extra health checks (e.g. database pool status).
     pub extra_health_checks: Option<ExtraHealthChecks>,
     /// Prometheus metrics render function (only available with `observability` feature).
