@@ -31,7 +31,11 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatabaseConfig {
+    /// Storage backend driver: `"memory"` (default) or `"postgres"`.
+    pub driver: String,
+    /// Connection URL for the postgres driver (ignored by the memory driver).
     pub url: String,
+    /// Maximum number of postgres pool connections.
     pub max_connections: u32,
 }
 
@@ -76,6 +80,7 @@ impl Default for ServerConfig {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
+            driver: "memory".to_string(),
             url: String::new(),
             max_connections: 10,
         }
@@ -165,6 +170,7 @@ impl BpmConfig {
         info!(
             server.host = %self.server.host,
             server.port = self.server.port,
+            database.driver = %self.database.driver,
             database.url = %mask_secret(&self.database.url),
             database.max_connections = self.database.max_connections,
             auth.jwt_secret = %mask_secret(&self.auth.jwt_secret),
@@ -199,6 +205,8 @@ mod tests {
         let cfg = BpmConfig::default();
         assert_eq!(cfg.server.host, "0.0.0.0");
         assert_eq!(cfg.server.port, 3000);
+        assert_eq!(cfg.database.driver, "memory");
+        assert_eq!(cfg.database.max_connections, 10);
         assert_eq!(cfg.engine.timer_poll_interval_ms, 1000);
         assert_eq!(cfg.engine.timer_batch_size, 100);
         assert_eq!(cfg.log.level, "info");
@@ -261,5 +269,26 @@ timer_poll_interval_ms = 2000
         // Unset fields keep defaults
         assert_eq!(cfg.server.host, "0.0.0.0");
         assert_eq!(cfg.rate_limit.requests_per_minute, 100);
+        // Database driver defaults to memory
+        assert_eq!(cfg.database.driver, "memory");
+    }
+
+    #[test]
+    fn load_from_toml_string_with_postgres_driver() {
+        let toml_str = r#"
+[database]
+driver = "postgres"
+url = "postgres://user:secret@localhost:5432/bpm"
+max_connections = 5
+"#;
+        let cfg: BpmConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.database.driver, "postgres");
+        assert_eq!(
+            cfg.database.url,
+            "postgres://user:secret@localhost:5432/bpm"
+        );
+        assert_eq!(cfg.database.max_connections, 5);
+        // Other sections keep defaults
+        assert_eq!(cfg.server.port, 3000);
     }
 }

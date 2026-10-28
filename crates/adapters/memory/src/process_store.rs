@@ -55,4 +55,22 @@ impl ProcessInstanceStore for MemoryProcessStore {
             .collect();
         Ok(ids)
     }
+
+    async fn list_all(&self, tenant_id: Option<&str>) -> anyhow::Result<Vec<String>> {
+        let mut ids: Vec<String> = self
+            .instances
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(_, i)| match (tenant_id, &i.tenant_id) {
+                (None, _) => true,
+                (Some(t), Some(ti)) => t == ti.as_str(),
+                (Some(""), None) => true,
+                (Some(_), None) => false,
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort();
+        Ok(ids)
+    }
 }

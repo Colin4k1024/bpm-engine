@@ -3,7 +3,9 @@
 
 use async_trait::async_trait;
 use bpm_engine_core::ProcessDefinition;
-use bpm_engine_storage::{DefinitionStatus, ProcessDefinitionRecord, ProcessDefinitionStore};
+use bpm_engine_storage::{
+    DefinitionDeployer, DefinitionStatus, ProcessDefinitionRecord, ProcessDefinitionStore,
+};
 use deadpool_postgres::Pool;
 
 pub struct PostgresProcessDefStore {
@@ -161,5 +163,34 @@ impl ProcessDefinitionStore for PostgresProcessDefStore {
             return Err(anyhow::anyhow!("process definition not found: {}", id));
         }
         Ok(())
+    }
+
+    async fn list_all(&self) -> anyhow::Result<Vec<ProcessDefinitionRecord>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT id, def_key, version, status, created_at
+                 FROM process_definition ORDER BY def_key ASC, version DESC",
+                &[],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| ProcessDefinitionRecord {
+                id: row.get(0),
+                key: row.get(1),
+                version: row.get::<_, i32>(2) as u32,
+                status: parse_status(row.get(3)),
+                created_at: row.get(4),
+            })
+            .collect())
+    }
+}
+
+#[async_trait]
+impl DefinitionDeployer for PostgresProcessDefStore {
+    async fn deploy(&self, def: &ProcessDefinition, bpmn_xml: &str) -> anyhow::Result<()> {
+        // Reuse the inherent deploy SQL (id = def.id, xml = bpmn_xml).
+        PostgresProcessDefStore::deploy(self, def.id, bpmn_xml).await
     }
 }

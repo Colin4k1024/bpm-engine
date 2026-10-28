@@ -88,6 +88,13 @@ pub trait ProcessInstanceStore: Send + Sync {
 
     /// List ids of all running instances, optionally filtered by tenant.
     async fn list_running(&self, tenant_id: Option<&str>) -> anyhow::Result<Vec<String>>;
+
+    /// List ids of all instances regardless of state, optionally filtered by tenant.
+    ///
+    /// Unlike [`ProcessInstanceStore::list_running`], this includes completed
+    /// and terminated instances. Implementations must return ids in a
+    /// deterministic order (sorted by instance id).
+    async fn list_all(&self, tenant_id: Option<&str>) -> anyhow::Result<Vec<String>>;
 }
 
 /// Stores BPMN process definitions (loaded from XML at deploy time).
@@ -109,4 +116,22 @@ pub trait ProcessDefinitionStore: Send + Sync {
 
     /// Mark a version as deprecated.
     async fn deprecate(&self, id: &str) -> anyhow::Result<()>;
+
+    /// List every version of every process definition key.
+    ///
+    /// Ordered by key ascending, then version descending. Used by management
+    /// APIs that need a full inventory of deployed definitions.
+    async fn list_all(&self) -> anyhow::Result<Vec<ProcessDefinitionRecord>>;
+}
+
+/// Persists a process definition version at deploy time.
+///
+/// `def` is the already-compiled definition (used for validation/diagnostics
+/// by the caller); `bpmn_xml` is the source that backends persist so the
+/// definition can be recompiled after a restart.
+#[async_trait]
+pub trait DefinitionDeployer: Send + Sync {
+    /// Persist a definition version. `def` is the already-compiled definition
+    /// (used for validation/diagnostics by the caller); `bpmn_xml` is the source.
+    async fn deploy(&self, def: &ProcessDefinition, bpmn_xml: &str) -> anyhow::Result<()>;
 }

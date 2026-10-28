@@ -6,6 +6,7 @@
 use bpm_engine_adapter_postgres::{create_pool, migrate, PostgresTokenStore};
 use bpm_engine_core::{Token, TokenMode, TokenStatus};
 use bpm_engine_storage::TokenStore;
+use std::sync::Arc;
 use testcontainers::clients;
 use testcontainers_modules::postgres::Postgres;
 
@@ -203,6 +204,57 @@ async fn process_def_store_deploy_and_load() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn process_def_store_deployer_trait_and_list_all() {
+    use bpm_engine_adapter_postgres::PostgresProcessDefStore;
+    use bpm_engine_storage::{DefinitionDeployer, ProcessDefinitionStore};
+
+    let (pool, _container) = setup_pool().await;
+    let store = Arc::new(PostgresProcessDefStore::new(pool));
+
+    // The record id (and key/version) come from the compiled definition id,
+    // i.e. the BPMN process id — versioning is embedded there ("key:version").
+    let bpmn = |process_id: &str| {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL">
+  <process id="{}" isExecutable="true">
+    <startEvent id="start"/>
+    <endEvent id="end"/>
+    <sequenceFlow id="f1" sourceRef="start" targetRef="end"/>
+  </process>
+</definitions>"#,
+            process_id
+        )
+    };
+
+    let deployer: Arc<dyn DefinitionDeployer> = store.clone();
+    for id in ["deploy-probe:1", "deploy-probe:2", "other-probe:1"] {
+        let xml = bpmn(id);
+        let def = bpm_engine_bpmn::parse_and_compile(&xml).unwrap();
+        assert_eq!(def.id, id);
+        deployer.deploy(&def, &xml).await.unwrap();
+    }
+
+    // list_all: every version of every key, key asc then version desc.
+    let records = store.list_all().await.unwrap();
+    let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["deploy-probe:2", "deploy-probe:1", "other-probe:1"],
+        "list_all should order by key asc, version desc"
+    );
+
+    // Deploying v2 deprecated v1 for the same key.
+    assert_eq!(records[0].status.to_string(), "active");
+    assert_eq!(records[1].status.to_string(), "deprecated");
+
+    // Definitions round-trip through the XML source.
+    let def = store.load("deploy-probe:2").await.unwrap().unwrap();
+    assert_eq!(def.id, "deploy-probe:2");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn process_store_save_and_load() {
     use bpm_engine_adapter_postgres::PostgresProcessStore;
     use bpm_engine_core::{InstanceState, ProcessInstance};
@@ -236,6 +288,29 @@ async fn process_store_save_and_load() {
 
     let other_tenant = store.list_running(Some("tenant-b")).await.unwrap();
     assert!(other_tenant.is_empty());
+
+    // list_all includes completed instances and honors the tenant filter.
+    let completed = ProcessInstance {
+        id: "inst-ps-2".into(),
+        process_def_id: "def-1".into(),
+        tenant_id: None,
+        tokens: vec![],
+        variables: std::collections::HashMap::new(),
+        state: InstanceState::Completed,
+        version: 1,
+        parent_instance_id: None,
+        parent_token_id: None,
+    };
+    store.save(&completed).await.unwrap();
+
+    let all = store.list_all(None).await.unwrap();
+    assert!(
+        all.contains(&"inst-ps-1".to_string()) && all.contains(&"inst-ps-2".to_string()),
+        "list_all(None) should include running and completed instances: {:?}",
+        all
+    );
+    let tenant_all = store.list_all(Some("tenant-a")).await.unwrap();
+    assert_eq!(tenant_all, vec!["inst-ps-1".to_string()]);
 }
 
 #[tokio::test]
@@ -272,7 +347,10 @@ async fn timer_store_insert_and_list_due() {
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].id, "timer-1");
 
-    let not_due = store.list_due("999", 10).await.unwrap();
+    // due_at is TEXT unix-epoch seconds compared lexicographically (same as
+    // the memory adapter) — use equal-width epoch strings, which is what the
+    // engine always produces.
+    let not_due = store.list_due("0900", 10).await.unwrap();
     assert!(not_due.is_empty());
 
     store.mark_fired("timer-1").await.unwrap();
@@ -340,6 +418,7 @@ async fn external_task_store_create_fetch_complete() {
 #[ignore = "requires Docker"]
 async fn external_task_store_fail_and_reclaim() {
     use bpm_engine_adapter_postgres::PostgresExternalTaskStore;
+    use bpm_engine_core::ExternalTaskState;
     use bpm_engine_storage::ExternalTaskStore;
     use std::collections::HashMap;
 
@@ -347,11 +426,12 @@ async fn external_task_store_fail_and_reclaim() {
     insert_test_instance(&pool, "inst-et-2").await;
     let store = PostgresExternalTaskStore::new(pool);
 
-    store
+    let task_id = store
         .create("tok-et-2", "inst-et-2", "email", 3, 60, HashMap::new())
         .await
         .unwrap();
 
+    // Fail the task: retries decrement and the task returns to Ready.
     let tasks = store
         .fetch_and_lock(
             "worker-1",
@@ -363,7 +443,6 @@ async fn external_task_store_fail_and_reclaim() {
         .unwrap();
     assert_eq!(tasks.len(), 1);
 
-    // Fail the task (retries decrement)
     store
         .fail(
             &tasks[0].task_id,
@@ -374,10 +453,24 @@ async fn external_task_store_fail_and_reclaim() {
         .await
         .unwrap();
 
-    // Wait for lock to expire
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let task = store.get(&task_id).await.unwrap().unwrap();
+    assert_eq!(task.retries, 2, "fail should decrement retries");
+    assert_eq!(task.state, ExternalTaskState::Ready);
 
-    // Reclaim expired locks
+    // Re-lock, then wait past the lock expiry (lock_expire_at is TEXT unix
+    // epoch seconds, same granularity as the memory adapter) and reclaim.
+    let locked = store
+        .fetch_and_lock(
+            "worker-1",
+            &["email".to_string()],
+            10,
+            std::time::Duration::from_secs(0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(locked.len(), 1, "Ready task should be lockable again");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     let reclaimed = store.reclaim_expired_locks().await.unwrap();
     assert!(reclaimed >= 1, "expired lock should be reclaimed");
 }

@@ -39,11 +39,13 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
         let client = self.pool.get().await?;
         let task_id = uuid::Uuid::new_v4().to_string();
 
+        // lock_expire_at is TEXT unix-epoch seconds (same convention as the
+        // memory adapter and extend_lock below).
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
-            .as_secs() as i64;
-        let lock_expire_at = now + timeout_secs as i64;
+            .as_secs();
+        let lock_expire_at = now + timeout_secs;
 
         client
             .execute(
@@ -52,7 +54,7 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                     (id, token_id, process_instance_id, task_type, retries, timeout_secs,
                      variables, state, lock_expire_at, worker_id, error_message, created_at)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'Ready',
-                        to_timestamp($8), NULL, NULL, CURRENT_TIMESTAMP)
+                        $8, NULL, NULL, $9)
                 "#,
                 &[
                     &task_id,
@@ -60,9 +62,10 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                     &process_instance_id,
                     &task_type,
                     &retries,
-                    &(timeout_secs as i64),
+                    &(timeout_secs as i32),
                     &serde_json::to_string(&variables)?,
-                    &lock_expire_at,
+                    &lock_expire_at.to_string(),
+                    &now.to_string(),
                 ],
             )
             .await?;
@@ -80,23 +83,25 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
 
-        // Reclaim expired locks first
+        // Reclaim expired locks first (lock_expire_at is TEXT unix-epoch
+        // seconds; the comparison is lexicographic, which matches numeric
+        // order for the fixed-width epoch strings the engine produces).
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         tx.execute(
             r#"
             UPDATE external_task
             SET state = 'Ready', lock_expire_at = NULL, worker_id = NULL
-            WHERE state = 'Locked' AND lock_expire_at < CURRENT_TIMESTAMP
+            WHERE state = 'Locked' AND lock_expire_at < $1
             "#,
-            &[],
+            &[&now.to_string()],
         )
         .await?;
 
         // Fetch and lock tasks atomically
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        let lock_expire_at = now + lock_duration.as_secs() as i64;
+        let lock_expire_at = now + lock_duration.as_secs();
 
         let task_types_str: Vec<&str> = task_types.iter().map(|s| s.as_str()).collect();
         let rows = tx
@@ -105,7 +110,7 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                 UPDATE external_task
                 SET state = 'Locked',
                     worker_id = $1,
-                    lock_expire_at = to_timestamp($2),
+                    lock_expire_at = $2,
                     version = version + 1
                 WHERE id IN (
                     SELECT id FROM external_task
@@ -121,7 +126,7 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                 "#,
                 &[
                     &worker_id,
-                    &lock_expire_at,
+                    &lock_expire_at.to_string(),
                     &task_types_str,
                     &(max_tasks as i64),
                 ],
@@ -247,12 +252,12 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
         let retries: i32 = row.as_ref().map(|r| r.get("retries")).unwrap_or(0);
 
         if retries > 0 {
-            let lock_expire_epoch: Option<i64> = retry_after.map(|d| {
+            let lock_expire_epoch: Option<u64> = retry_after.map(|d| {
                 SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
                     .unwrap()
-                    .as_secs() as i64
-                    + d.as_secs() as i64
+                    .as_secs()
+                    + d.as_secs()
             });
 
             let result = if let Some(epoch) = lock_expire_epoch {
@@ -262,14 +267,14 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
                         UPDATE external_task
                         SET state = 'Ready',
                             retries = retries - 1,
-                            lock_expire_at = to_timestamp($4),
+                            lock_expire_at = $4,
                             worker_id = NULL,
                             error_message = $3,
                             updated_at = CURRENT_TIMESTAMP,
                             version = version + 1
                         WHERE id = $1 AND worker_id = $2 AND state = 'Locked'
                         "#,
-                        &[&task_id, &worker_id, &error, &(epoch as f64)],
+                        &[&task_id, &worker_id, &error, &epoch.to_string()],
                     )
                     .await
                     .map_err(|e| bpm_engine_storage::ExternalTaskError::Internal(e.to_string()))?
@@ -327,14 +332,18 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
 
     async fn reclaim_expired_locks(&self) -> anyhow::Result<usize> {
         let client = self.pool.get().await?;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let result = client
             .execute(
                 r#"
                 UPDATE external_task
                 SET state = 'Ready', lock_expire_at = NULL, worker_id = NULL
-                WHERE state = 'Locked' AND lock_expire_at < CURRENT_TIMESTAMP
+                WHERE state = 'Locked' AND lock_expire_at < $1
                 "#,
-                &[],
+                &[&now.to_string()],
             )
             .await?;
 
