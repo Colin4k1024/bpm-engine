@@ -1,11 +1,13 @@
 //! BPMN 2.0 XML parser and compiler to engine ProcessDefinition.
 //! Definition layer only; runtime is unchanged.
 
+pub mod builder;
 pub mod compiler;
 pub mod errors;
 pub mod model;
 pub mod parser;
 
+pub use builder::{FormFieldSpec, ProcessBuilder};
 pub use compiler::compile;
 pub use errors::{CompileError, CompileErrors, CompilerError, ErrorCode, ParseError};
 pub use model::{BpmnFlowNode, BpmnProcess, BpmnSequenceFlow, FlowAttach};

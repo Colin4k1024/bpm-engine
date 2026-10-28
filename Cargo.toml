@@ -43,6 +43,7 @@ bpm-engine-runtime = { path = "crates/runtime", version = "0.2.0" }
 bpm-engine-adapter-memory = { path = "crates/adapters/memory", version = "0.2.0" }
 bpm-engine-bpmn = { path = "crates/bpmn", version = "0.2.0" }
 bpm-engine-dsl = { path = "crates/dsl", version = "0.2.0" }
+bpm-engine-worker-sdk = { path = "crates/worker-sdk", version = "0.2.0", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
@@ -54,9 +55,13 @@ tokio = { version = "1", features = ["full"], optional = true }
 tower-http = { version = "0.5", features = ["cors"], optional = true }
 
 [features]
-default = []
+default = ["worker-sdk"]
 api = ["axum", "tokio", "tower-http"]
 observability = ["metrics", "metrics-exporter-prometheus", "bpm-engine-runtime/observability"]
+# Re-export of `bpm_engine_worker_sdk` (pulls its reqwest/tokio HTTP stack).
+# Default-on so the one-stop facade keeps working; opt out with
+# `default-features = false` when embedding the engine without workers.
+worker-sdk = ["bpm-engine-worker-sdk"]
 
 [dev-dependencies]
 reqwest = { version = "0.11", features = ["json"] }
