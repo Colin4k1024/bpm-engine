@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import type { DeadLetterEntry } from '../api/types'
 import { Card, EmptyState, Notice, PageHeader, Spinner } from '../components/Ui'
@@ -13,12 +13,21 @@ export function DeadLettersPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  // E6-2 deep link: `/dead-letters?instance_id=<id>` (from the diagnosis
+  // view of a terminally failed step) pre-filters the queue to that
+  // instance's entries; absent ⇒ the full queue.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const instanceFilter = searchParams.get('instance_id') ?? ''
 
   const load = useCallback(async () => {
     setBusy(true); setError('')
     try { setEntries(await api.listDeadLetters()) } catch (e) { setError(errorMessage(e)) } finally { setBusy(false) }
   }, [])
   useEffect(() => { void load() }, [load])
+  const filtered = useMemo(
+    () => instanceFilter ? entries.filter((entry) => entry.process_instance_id === instanceFilter) : entries,
+    [entries, instanceFilter],
+  )
 
   const select = async (entry: DeadLetterEntry) => {
     setBusy(true); setError('')
@@ -39,8 +48,12 @@ export function DeadLettersPage() {
     <PageHeader eyebrow={t('dead.eyebrow')} title={t('dead.title')} description={t('dead.description')} actions={<button className="button secondary" onClick={load}>{busy ? <Spinner /> : t('dead.refresh')}</button>} />
     {error && <Notice kind="error">{error}</Notice>}{notice && <Notice kind="success">{notice}</Notice>}
     <div className="split-workspace">
-      <Card title={t('dead.failed')} subtitle={t('dead.count', { count: entries.length })} className="list-card">
-        {entries.length === 0 ? <EmptyState title={t('dead.empty')} detail={t('dead.emptyHint')} /> : <div className="record-list">{entries.map((entry) => <button key={entry.id} className={selected?.id === entry.id ? 'selected' : ''} onClick={() => select(entry)}><span><strong>{entry.task_type}</strong><small>{entry.error_message}</small></span><span><small>{formatDate(entry.created_at)}</small></span></button>)}</div>}
+      <Card title={t('dead.failed')} subtitle={t('dead.count', { count: filtered.length })} className="list-card">
+        {instanceFilter && <div className="filter-chip">
+          <span>{t('dead.filteredByInstance', { id: instanceFilter.slice(0, 12) })}</span>
+          <button type="button" onClick={() => setSearchParams({}, { replace: true })}>{t('dead.clearFilter')}</button>
+        </div>}
+        {filtered.length === 0 ? <EmptyState title={t('dead.empty')} detail={t('dead.emptyHint')} /> : <div className="record-list">{filtered.map((entry) => <button key={entry.id} className={selected?.id === entry.id ? 'selected' : ''} onClick={() => select(entry)}><span><strong>{entry.task_type}</strong><small>{entry.error_message}</small></span><span><small>{formatDate(entry.created_at)}</small></span></button>)}</div>}
       </Card>
       <Card title={selected?.task_type ?? t('dead.detail')} subtitle={selected?.id ?? t('dead.select')} actions={selected && <div className="button-row"><button className="button danger" onClick={remove}>{t('common.delete')}</button><button className="button" onClick={requeue}>{t('dead.requeue')}</button></div>}>
         {!selected ? <EmptyState title={t('dead.noSelection')} detail={t('dead.noSelectionHint')} /> : <>

@@ -13,6 +13,7 @@ import type {
   ReplaySeekResponse,
   ReplaySnapshotResponse,
   ReplayStepResponse,
+  StepsResponse,
   TaskForm,
   TaskListItem,
   TraceResponse,
@@ -63,6 +64,8 @@ export const api = {
     }),
   getInstance: (id: string) => request<ProcessInstance>(`/process-instances/${encode(id)}`),
   getTrace: (id: string) => request<TraceResponse>(`/process-instances/${encode(id)}/trace`),
+  // E6-2 diagnosis view: the unified per-instance step timeline (E6-1).
+  getInstanceSteps: (id: string) => request<StepsResponse>(`/process-instances/${encode(id)}/steps`),
   getHistory: async (id: string, filters?: { token_id?: string; event_type?: string }) => {
     const query = new URLSearchParams()
     if (filters?.token_id) query.set('token_id', filters.token_id)
