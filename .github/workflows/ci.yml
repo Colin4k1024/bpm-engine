@@ -103,7 +103,7 @@ jobs:
 
       - name: Run REST recovery suites
         run: |
-          cargo test -p bpm-engine-server-rest --test storage_postgres_mode --test scheduler_workers_postgres --test recovery_postgres -- --ignored 2>&1 | tee recovery-test.log
+          cargo test -p bpm-engine-server-rest --test storage_postgres_mode --test scheduler_workers_postgres --test recovery_postgres --test variable_contract_postgres -- --ignored 2>&1 | tee recovery-test.log
 
       # On failure, preserve the event trail: the recovery suite writes
       # recovery-<test>-trail.log (instance state, tokens, full history) and

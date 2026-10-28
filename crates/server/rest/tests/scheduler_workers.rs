@@ -116,6 +116,7 @@ fn memory_config() -> BpmConfig {
         engine: EngineConfig {
             timer_poll_interval_ms: 200,
             timer_batch_size: 100,
+            ..Default::default()
         },
         // Poll loops make many requests; keep the rate limiter out of the way.
         rate_limit: RateLimitConfig {

@@ -24,6 +24,8 @@ pub mod saga;
 pub mod token;
 /// Process variable helpers.
 pub mod variable;
+/// Structured variable value contract: envelopes, artifact URIs, history redaction.
+pub mod variable_contract;
 
 pub use error::*;
 pub use event::*;
@@ -37,6 +39,7 @@ pub use process::{
 pub use saga::*;
 pub use token::*;
 pub use variable::*;
+pub use variable_contract::*;
 
 // ---------------------------------------------------------------------------
 // Token state machine

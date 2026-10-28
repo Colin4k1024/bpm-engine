@@ -29,6 +29,7 @@ id (pk)
 process_def_id
 status            -- Running | Completed | Failed
 version            -- optimistic lock
+variables          -- TEXT: JSON map {name: value-string}
 created_at
 updated_at
 ```
@@ -36,6 +37,24 @@ updated_at
 Notes:
 - Rarely updated after creation
 - Not used for execution locking
+
+### 2.1 `variables` column semantics (E2-3)
+
+The variables map is stored as **one TEXT column of JSON `{name: value}`**
+— the value for every name is a string in one of three forms, with no
+per-value metadata or extra columns:
+
+| Value form | Meaning |
+|------------|---------|
+| plain string | legacy string variable (forever valid) |
+| `__encrypted:<b64 nonce>:<b64 ciphertext>` | AES-256-GCM ciphertext |
+| `__var:1:<compact JSON>` | versioned envelope: JSON value or artifact reference |
+
+The same semantics apply to the `variables` columns on `external_task` and
+`dead_letter`. Envelope format, size caps, and the reserved `artifact://`
+scheme are specified in `docs/variables-and-artifacts.md` (contract) and
+`docs/adr/ADR-007-structured-variables-and-artifact-uris.md` (decision) —
+no schema change was needed for E2-3.
 
 ---
 
@@ -321,6 +340,7 @@ and baseline-stamped, converging to the same versioned state.
 - Saga & compensation: `saga.md`
 - Recovery behavior: `recovery.md`
 - Migration strategy (ADR): `adr/ADR-005-forward-only-sql-migrations.md`
+- Variable value contract (plain | `__encrypted:` | `__var:1:`): `variables-and-artifacts.md`
 
 ---
 

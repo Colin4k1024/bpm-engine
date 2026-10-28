@@ -9,8 +9,9 @@ use axum::{
     Json, Router,
 };
 use bpm_engine_core::{
-    payloads, AesGcmEncryptor, EngineEvent, ExternalTaskState, InstanceState, NodeType,
-    ProcessDefinition, ProcessInstance, TokenStatus, VariableEncryptor, ENCRYPTED_PREFIX,
+    parse_envelope, payloads, validate_artifact_uri, AesGcmEncryptor, EngineEvent,
+    ExternalTaskState, HistoryRedactionPolicy, InstanceState, NodeType, ProcessDefinition,
+    ProcessInstance, TokenStatus, VariableEncryptor, VariableEnvelope, ENCRYPTED_PREFIX,
 };
 use bpm_engine_runtime::EngineContext;
 use bpm_engine_storage::{
@@ -36,7 +37,7 @@ fn occurred_at_now() -> String {
 }
 
 use super::replay::ReplaySession;
-use super::state::AppState;
+use super::state::{AppState, VariableContractLimits};
 use bpm_engine_adapter_memory::MemoryRepo;
 
 // --- External task API (plan §6) ---
@@ -98,6 +99,7 @@ fn external_task_error_response(e: bpm_engine_storage::ExternalTaskError) -> Res
             let kind_str = inv.kind.to_string();
             let body = ErrorResponse {
                 error: e.to_string(),
+                code: None,
                 invariant_violation: Some(kind_str.clone()),
             };
             let mut res = (StatusCode::BAD_REQUEST, Json(body)).into_response();
@@ -181,7 +183,8 @@ fn build_ctx(state: &AppState, tenant_id: Option<String>) -> EngineContext {
     .timer_store(Arc::clone(&s.timer_store))
     .compensation_repo(Arc::clone(&s.compensation_repo))
     .external_task_store(Arc::clone(&s.external_task_store))
-    .history_repo(Arc::clone(&s.history_repo));
+    .history_repo(Arc::clone(&s.history_repo))
+    .history_redaction_policy(state.history_redaction_policy);
     if let Some(id) = tenant_id {
         builder = builder.tenant_id(id);
     }
@@ -200,6 +203,7 @@ pub fn build_ctx_for_timer(state: &AppState) -> EngineContext {
 fn build_ctx_with_repo(
     repo: Arc<MemoryRepo>,
     def_store: Arc<dyn ProcessDefinitionStore>,
+    history_redaction_policy: HistoryRedactionPolicy,
     tenant_id: Option<String>,
 ) -> EngineContext {
     let mut builder = EngineContext::builder(
@@ -211,7 +215,8 @@ fn build_ctx_with_repo(
     .timer_store(repo.clone() as Arc<dyn TimerStore>)
     .compensation_repo(repo.clone() as Arc<dyn CompensationRecordRepo>)
     .external_task_store(repo.clone() as Arc<dyn ExternalTaskStore>)
-    .history_repo(repo as Arc<dyn HistoryRepo>);
+    .history_repo(repo as Arc<dyn HistoryRepo>)
+    .history_redaction_policy(history_redaction_policy);
     if let Some(id) = tenant_id {
         builder = builder.tenant_id(id);
     }
@@ -249,6 +254,12 @@ pub struct StartInstanceRequest {
     /// List of variable names that should be encrypted before storage.
     #[serde(default)]
     pub encrypted: Vec<String>,
+    /// List of variable names declared sensitive: each must exist in the
+    /// submitted variables AND be listed in `encrypted` (sensitive ⇒ must be
+    /// encrypted, E2-3). Rationale: encrypted values are ciphertext at rest,
+    /// so history and logs never contain the plaintext.
+    #[serde(default)]
+    pub sensitive: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -295,6 +306,10 @@ pub struct TaskListItem {
 #[derive(Serialize)]
 pub struct ErrorResponse {
     pub error: String,
+    /// Stable machine-readable error code (E2-3 variable contract errors
+    /// and future typed 4xx errors); absent on legacy error responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invariant_violation: Option<String>,
 }
@@ -304,6 +319,16 @@ impl ErrorResponse {
     pub fn new(msg: impl Into<String>) -> Self {
         Self {
             error: msg.into(),
+            code: None,
+            invariant_violation: None,
+        }
+    }
+
+    /// Build error response carrying a stable machine-readable error code.
+    pub fn with_code(msg: impl Into<String>, code: impl Into<String>) -> Self {
+        Self {
+            error: msg.into(),
+            code: Some(code.into()),
             invariant_violation: None,
         }
     }
@@ -463,6 +488,166 @@ fn decrypt_instance_variables(
     Ok(())
 }
 
+// --- Variable value contract enforcement (E2-3) -----------------------------
+
+/// Hint returned with `variable_too_large` errors.
+const LARGE_PAYLOAD_HINT: &str =
+    "store large payloads externally and reference them via an artifact envelope";
+
+/// Enforce the variable value contract at a REST write boundary:
+/// every variable value must be a valid envelope (when it carries the
+/// envelope prefix), pass artifact URI validation (when it is an artifact
+/// envelope), and be within the `variable_max_bytes` cap (measured on the
+/// final stored string, envelope included).
+///
+/// Plain legacy strings and `__encrypted:` values are only size-checked:
+/// their semantics are unchanged.
+fn enforce_variable_contract(
+    variables: &HashMap<String, String>,
+    limits: &VariableContractLimits,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    for (name, value) in variables {
+        // Size limit FIRST: an oversized value is rejected before any
+        // envelope deserialization, so the cap also bounds parse cost.
+        if value.len() > limits.variable_max_bytes {
+            warn!(
+                variable = %name,
+                size = value.len(),
+                limit = limits.variable_max_bytes,
+                "rejecting oversized variable"
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_code(
+                    format!(
+                        "variable '{}' is {} bytes, exceeding the {} byte limit; {}",
+                        name,
+                        value.len(),
+                        limits.variable_max_bytes,
+                        LARGE_PAYLOAD_HINT
+                    ),
+                    "variable_too_large",
+                )),
+            ));
+        }
+        if let Some(parsed) = parse_envelope(value) {
+            match parsed {
+                Ok(envelope) => {
+                    if let VariableEnvelope::Artifact {
+                        uri, size, sha256, ..
+                    } = &envelope
+                    {
+                        if let Err(e) = validate_artifact_uri(uri, *size, sha256.as_deref()) {
+                            warn!(
+                                variable = %name,
+                                code = e.code(),
+                                "rejecting variable with invalid artifact URI"
+                            );
+                            return Err((
+                                StatusCode::BAD_REQUEST,
+                                Json(ErrorResponse::with_code(
+                                    format!("variable '{}': {}", name, e),
+                                    e.code(),
+                                )),
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    // The boundary code is stable: any parse failure
+                    // (malformed body OR unsupported version) is reported as
+                    // `variable_invalid_envelope`; the detailed reason (with
+                    // the version, when relevant) stays in the message.
+                    warn!(
+                        variable = %name,
+                        code = e.code(),
+                        "rejecting variable with invalid envelope"
+                    );
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse::with_code(
+                            format!("variable '{}': {}", name, e),
+                            "variable_invalid_envelope",
+                        )),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Size-only cap check for values produced by the server itself (encryption
+/// inflates the stored string, so the final stored value is re-checked).
+fn enforce_variable_size_limit(
+    variables: &HashMap<String, String>,
+    limits: &VariableContractLimits,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    for (name, value) in variables {
+        if value.len() > limits.variable_max_bytes {
+            warn!(
+                variable = %name,
+                size = value.len(),
+                limit = limits.variable_max_bytes,
+                "rejecting oversized variable after encryption"
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_code(
+                    format!(
+                        "variable '{}' is {} bytes after encryption, exceeding the {} byte limit; {}",
+                        name, value.len(), limits.variable_max_bytes, LARGE_PAYLOAD_HINT
+                    ),
+                    "variable_too_large",
+                )),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the `sensitive` list of a start-instance request: every
+/// sensitive name must exist in the submitted variables and be listed in
+/// `encrypted` (sensitive ⇒ must be encrypted).
+fn validate_sensitive_names(
+    sensitive: &Option<Vec<String>>,
+    variables: &HashMap<String, String>,
+    encrypted: &[String],
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let Some(sensitive) = sensitive.as_ref() else {
+        return Ok(());
+    };
+    for name in sensitive {
+        if !variables.contains_key(name) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_code(
+                    format!(
+                        "variable '{}' is marked sensitive but not present in the submitted variables",
+                        name
+                    ),
+                    "sensitive_requires_encryption",
+                )),
+            ));
+        }
+        if !encrypted.iter().any(|e| e == name) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::with_code(
+                    format!(
+                        "variable '{}' is marked sensitive but not listed in 'encrypted'; \
+                         sensitive variables must be encrypted \
+                         (BPM_VARIABLE_ENCRYPTION_KEY must be configured)",
+                        name
+                    ),
+                    "sensitive_requires_encryption",
+                )),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// POST /api/v1/process-instances — start a process instance.
 pub async fn start_instance(
     State(state): State<Arc<AppState>>,
@@ -473,7 +658,16 @@ pub async fn start_instance(
     let mut ctx = build_ctx(state.as_ref(), tenant_id);
     let instance_id = uuid::Uuid::new_v4().to_string();
     let mut variables = body.variables;
+    // E2-3 boundary enforcement, in order:
+    // 1. sensitive ⇒ must be encrypted (checked against the submitted map)
+    // 2. variable value contract: valid envelopes, valid artifact URIs,
+    //    size cap on the submitted value
+    // 3. encryption, then a final size check on the stored string (the
+    //    ciphertext may exceed the cap even when the plaintext did not)
+    validate_sensitive_names(&body.sensitive, &variables, &body.encrypted)?;
+    enforce_variable_contract(&variables, &state.variable_limits)?;
     encrypt_variables(&mut variables, &body.encrypted)?;
+    enforce_variable_size_limit(&variables, &state.variable_limits)?;
     let initial_variables = if variables.is_empty() {
         None
     } else {
@@ -993,6 +1187,11 @@ pub async fn complete_task_by_id(
         Json(ErrorResponse::new(format!("invalid task_id: {}", task_id))),
     ))?;
 
+    // E2-3: enforce the variable value contract at this write boundary
+    // (valid envelopes, valid artifact URIs, size cap) before the event
+    // enters the engine.
+    enforce_variable_contract(&body.variables, &state.variable_limits)?;
+
     // Validate required form fields if the user task has a form definition
     let process_store = Arc::clone(&state.storage.process_store);
     let def_store = Arc::clone(&state.storage.def_store);
@@ -1103,6 +1302,11 @@ pub async fn external_task_complete(
     Path(task_id): Path<String>,
     Json(body): Json<ExternalTaskCompleteRequest>,
 ) -> Result<Json<CompleteTaskResponse>, Response> {
+    // E2-3: enforce the variable value contract at this write boundary
+    // BEFORE the store mutates the task, so a rejected request leaves the
+    // task locked and completable with valid variables.
+    enforce_variable_contract(&body.variables, &state.variable_limits)
+        .map_err(|(status, json)| (status, json).into_response())?;
     let external_task_store = Arc::clone(&state.storage.external_task_store);
     external_task_store
         .complete(&task_id, &body.worker_id, body.variables.clone())
@@ -1428,6 +1632,7 @@ pub async fn create_replay(
 async fn replay_apply_one(
     engine: &bpm_engine_runtime::BpmEngine,
     def_store: &Arc<dyn ProcessDefinitionStore>,
+    history_redaction_policy: HistoryRedactionPolicy,
     snapshot: Option<&ProcessInstance>,
     ev: &bpm_engine_storage::HistoryEvent,
 ) -> Option<ProcessInstance> {
@@ -1437,7 +1642,12 @@ async fn replay_apply_one(
     if let Some(inst) = snapshot {
         let _ = replay_repo.save(inst).await;
     }
-    let mut ctx = build_ctx_with_repo(replay_repo.clone(), Arc::clone(def_store), None);
+    let mut ctx = build_ctx_with_repo(
+        replay_repo.clone(),
+        Arc::clone(def_store),
+        history_redaction_policy,
+        None,
+    );
     engine.run_async(engine_ev, &mut ctx).await;
     replay_repo.load(&instance_id).await.ok().flatten()
 }
@@ -1469,6 +1679,7 @@ pub async fn replay_step(
     let new_snapshot = replay_apply_one(
         &state.engine,
         &state.storage.def_store,
+        state.history_redaction_policy,
         snapshot_clone.as_ref(),
         &ev_clone,
     )
@@ -1547,6 +1758,7 @@ pub async fn replay_seek(
         if let Some(inst) = replay_apply_one(
             &state.engine,
             &state.storage.def_store,
+            state.history_redaction_policy,
             snapshot.as_ref(),
             ev,
         )
