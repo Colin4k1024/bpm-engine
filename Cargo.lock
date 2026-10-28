@@ -391,6 +391,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bpm-engine-mcp-server"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bpm-engine-server-rest",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "bpm-engine-runtime"
 version = "0.2.0"
 dependencies = [

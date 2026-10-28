@@ -206,3 +206,6 @@ equals the spec's `ErrorResponse.code` enum exactly.
 - `crates/server/rest/examples/dump_capabilities.rs` — the regeneration
   command (the DSL `dump_schema` pattern,
   `crates/dsl/tests/schema_lockstep.rs`).
+- [`docs/mcp-server.md`](mcp-server.md) — the E4-2 MCP server that turns
+  this catalog into Model Context Protocol tools over stdio (the same
+  committed artifact, embedded via a workspace-relative `include_str!`).
