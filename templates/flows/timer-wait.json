@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "process": { "id": "timer-wait", "name": "Timer Wait Flow" },
+  "nodes": [
+    { "id": "start", "type": "start" },
+    {
+      "id": "wait",
+      "name": "Wait for the timer to fire",
+      "type": "timerIntermediateCatch",
+      "timer": { "duration": "PT5S" }
+    },
+    { "id": "end", "type": "end" }
+  ],
+  "edges": [
+    { "source": "start", "target": "wait" },
+    { "source": "wait", "target": "end" }
+  ]
+}

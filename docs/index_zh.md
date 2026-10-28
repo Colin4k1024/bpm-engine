@@ -129,7 +129,7 @@ cargo build
     <div class="tab-content" id="start-zh">
 {% highlight bash %}
 # 启动 REST 服务器 (http://127.0.0.1:3000)
-cargo run -p bpm-server-rest
+cargo run -p bpm-engine-server-rest
 {% endhighlight %}
 <p class="code-note">
   内置流程定义：<code>minimal</code>（开始 → 结束），<code>payment-flow</code>（开始 → 外部任务 → 结束）
@@ -251,35 +251,35 @@ worker.start().await;
       </thead>
       <tbody>
         <tr>
-          <td><code>bpm-core</code></td>
+          <td><code>bpm-engine-core</code></td>
           <td>ProcessDefinition、NodeType、Token、EngineEvent、Saga。纯逻辑，无 I/O。</td>
         </tr>
         <tr>
-          <td><code>bpm-storage</code></td>
+          <td><code>bpm-engine-storage</code></td>
           <td>异步持久化 trait（ProcessInstanceStore、TokenStore、ExternalTaskStore、TimerStore）</td>
         </tr>
         <tr>
-          <td><code>bpm-runtime</code></td>
+          <td><code>bpm-engine-runtime</code></td>
           <td>BpmEngine 事件循环、EngineContext、事件处理器、网关评估</td>
         </tr>
         <tr>
-          <td><code>bpm-adapter-memory</code></td>
+          <td><code>bpm-engine-adapter-memory</code></td>
           <td>内存实现。默认用于开发/测试</td>
         </tr>
         <tr>
-          <td><code>bpm-adapter-postgres</code></td>
+          <td><code>bpm-engine-adapter-postgres</code></td>
           <td>PostgreSQL 实现。生产就绪的持久化</td>
         </tr>
         <tr>
-          <td><code>bpm-bpmn</code></td>
+          <td><code>bpm-engine-bpmn</code></td>
           <td>BPMN 2.0 XML 解析器 → ProcessDefinition 编译器</td>
         </tr>
         <tr>
-          <td><code>bpm-server-rest</code></td>
+          <td><code>bpm-engine-server-rest</code></td>
           <td>HTTP API 服务器（axum）。连接 EngineContext 与存储适配器</td>
         </tr>
         <tr>
-          <td><code>bpm-worker-sdk</code></td>
+          <td><code>bpm-engine-worker-sdk</code></td>
           <td>EngineClient、Worker、TaskHandler。工作者是无状态且可水平扩展的</td>
         </tr>
       </tbody>

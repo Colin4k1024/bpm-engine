@@ -10,6 +10,12 @@
 
 > **Documentation Site**: [https://fanjia1024.github.io/bpm-engine/](https://fanjia1024.github.io/bpm-engine/)
 
+> **New here?** Run your first workflow end to end in the
+> [15-minute quickstart](docs/quickstart.md) (中文版：[15 分钟快速开始](docs/quickstart_zh.md)) —
+> engine, deployment, a real worker, and a `COMPLETED` instance. Copyable
+> starting points live in [templates/](templates/); when something breaks, see
+> [docs/troubleshooting.md](docs/troubleshooting.md).
+
 This project focuses on **execution semantics, persistence correctness, and crash safety**, rather than UI or low-code features. It is designed as a **token-driven, persistence-first BPM engine** with formally defined invariants.
 
 ## 🎉 Latest Release: v0.2.0
@@ -177,7 +183,7 @@ cargo build
 **1. Start the engine**
 
 ```bash
-cargo run -p bpm-server-rest
+cargo run -p bpm-engine-server-rest
 ```
 
 Server listens on **http://127.0.0.1:3000**. Built-in process definitions: `minimal` (Start → End), `payment-flow` (Start → ExternalTask `payment` → End).
@@ -212,7 +218,7 @@ curl -X POST http://127.0.0.1:3000/api/v1/process-instances \
 Run the payment worker (in a third terminal):
 
 ```bash
-cargo run -p bpm-worker-sdk --example payment
+cargo run -p bpm-engine-worker-sdk --example payment
 ```
 
 The worker polls the engine, locks the `payment` task, runs the handler, then completes it; the process continues to End.

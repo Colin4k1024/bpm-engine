@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "bpm-engine": {
+      "command": "cargo",
+      "args": [
+        "run",
+        "--release",
+        "-p",
+        "bpm-engine-mcp-server"
+      ],
+      "env": {
+        "BPM_BASE_URL": "http://127.0.0.1:3000",
+        "BPM_MCP_TOKEN": "<minted JWT — replace, see templates/README.md>",
+        "BPM_MCP_ROLE": "operator",
+        "BPM_MCP_TIMEOUT_MS": "10000"
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+[package]
+name = "ai-worker-template"
+version = "0.1.0"
+edition = "2021"
+description = "Copyable external-task worker template for bpm-engine: worker SDK + tool security boundary + AI task envelope"
+license = "MIT"
+publish = false
+
+[dependencies]
+# Path dependency into the bpm-engine workspace checkout this template
+# lives in. When you copy the template OUT of the repo, replace this with a
+# version dependency (bpm-engine-worker-sdk = "0.2") or your vendored path.
+bpm-engine-worker-sdk = { path = "../../crates/worker-sdk" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

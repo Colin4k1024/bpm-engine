@@ -1,0 +1,5 @@
+# The template is a standalone package (excluded from the workspace):
+# build artifacts and the generated lockfile stay local. The lockfile
+# references the in-repo path dependency and is regenerated on first build.
+/target
+Cargo.lock

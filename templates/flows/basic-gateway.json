@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "process": { "id": "basic-gateway", "name": "Basic Gateway Flow" },
+  "nodes": [
+    { "id": "start", "type": "start" },
+    {
+      "id": "charge",
+      "name": "Charge Payment",
+      "type": "serviceTask",
+      "task_type": "payment",
+      "retries": 3,
+      "timeout_secs": 60
+    },
+    { "id": "decide", "type": "exclusiveGateway" },
+    { "id": "end-paid", "name": "Paid", "type": "end" },
+    { "id": "end-manual", "name": "Needs Manual Review", "type": "end" }
+  ],
+  "edges": [
+    { "source": "start", "target": "charge" },
+    { "source": "charge", "target": "decide" },
+    {
+      "source": "decide",
+      "target": "end-paid",
+      "condition": { "kind": "variableEq", "variable": "status", "value": "PAID" }
+    },
+    { "source": "decide", "target": "end-manual", "default": true }
+  ]
+}

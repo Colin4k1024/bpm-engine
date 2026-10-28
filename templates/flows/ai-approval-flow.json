@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "process": { "id": "ai-approval-flow", "name": "AI Approval Flow" },
+  "nodes": [
+    { "id": "start", "type": "start" },
+    {
+      "id": "propose",
+      "name": "Draft proposal with a model",
+      "type": "serviceTask",
+      "task_type": "ai-propose",
+      "retries": 3,
+      "timeout_secs": 60
+    },
+    {
+      "id": "approve",
+      "name": "Human approval",
+      "type": "userTask",
+      "form_key": "approval-form",
+      "form_fields": [
+        {
+          "id": "decision",
+          "label": "Decision",
+          "type": "enum",
+          "required": true,
+          "options": ["approved", "rejected"]
+        }
+      ]
+    },
+    { "id": "decide", "type": "exclusiveGateway" },
+    {
+      "id": "act",
+      "name": "Execute the approved action (side effects behind the approval gate)",
+      "type": "serviceTask",
+      "task_type": "ai-act"
+    },
+    { "id": "end-done", "name": "Executed", "type": "end" },
+    { "id": "end-rejected", "name": "Rejected", "type": "end" }
+  ],
+  "edges": [
+    { "source": "start", "target": "propose" },
+    { "source": "propose", "target": "approve" },
+    { "source": "approve", "target": "decide" },
+    {
+      "source": "decide",
+      "target": "act",
+      "condition": { "kind": "variableEq", "variable": "decision", "value": "approved" }
+    },
+    { "source": "decide", "target": "end-rejected", "default": true },
+    { "source": "act", "target": "end-done" }
+  ]
+}
