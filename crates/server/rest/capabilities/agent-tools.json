@@ -4,17 +4,24 @@
   "generated_from": "docs/openapi.yaml",
   "regenerate": "cargo run -p bpm-engine-server-rest --example dump_capabilities",
   "auth": {
-    "type": "apiKey",
+    "type": "http",
     "in": "header",
-    "name": "X-API-Key",
+    "name": "Authorization",
     "required": false,
-    "notes": "Optional at the protocol level: the server enforces the key only when one is configured (auth.api_key / BPM_API_KEY); without a configured key it accepts every request (PoC mode). When enforced, a missing or invalid key is rejected with 401 \"unauthorized\". Tools with auth_required=false (health, readiness, capabilities) sit outside the API-key layer entirely. An optional, untrusted X-Tenant-Id header scopes listings and instance starts to a tenant; there is no per-operation authorization in v1 (RBAC is future scope)."
+    "scheme": "bearer",
+    "bearer_format": "JWT",
+    "schemes": [
+      "ApiKeyAuth",
+      "BearerAuth"
+    ],
+    "notes": "Optional at the protocol level: the runtime mode depends on the server configuration (docs/rbac.md). JWT mode — when auth.jwt_secret / BPM_AUTH__JWT_SECRET is set, /api/v1 requests must carry \"Authorization: Bearer <jwt>\" (HS256, claims {sub: actor, tenant, role, exp}); signature/expiry/claims are verified, failures answer 401 \"invalid_token\", and the verified claims drive tenancy and the roles matrix (403 \"forbidden\"). The tenant comes FROM THE CLAIM — the X-Tenant-Id header is deprecated in this mode and a header conflicting with the claim is rejected with 403 \"forbidden\". API-key mode — X-API-Key (auth.api_key / BPM_API_KEY) is the legacy admin/bootstrap credential with FULL access (no role checks) and X-Tenant-Id honored as untrusted input; a missing or invalid key answers 401 \"unauthorized\". When both are configured, a presented JWT takes precedence (the API key is the fallback when no bearer token is sent). Open mode — with neither configured every request is accepted (PoC) and X-Tenant-Id remains a dev-mode affordance. Tools with auth_required=false (health, readiness, capabilities) sit outside the auth layer entirely. Mint tokens with: cargo run -p bpm-engine-server-rest --example mint_jwt -- --sub <actor> --tenant <tenant> --role <role>."
   },
   "conventions": {
     "classification": "read_only — GET operations, plus the two POST endpoints validate and dry-run: they compile/simulate in memory and persist nothing (no definition, instance, task, timer, or history record; E2-2), so an agent may call them freely while exploring. mutating — every other POST/PUT/DELETE; consult the tool's side_effects note before calling. Replay-session operations are mutating but ephemeral: sessions live in memory and expire on inactivity, and no engine state changes.",
     "error_shape": "Every 4xx/5xx response body is {\"error\": <human-readable message>, \"code\": <stable snake_case identifier>, \"invariant_violation\": <invariant kind>} — the last field appears only on invariant-violation rejections and is mirrored in the X-Invariant-Violation response header. Codes are stable identifiers: adding one is backward compatible, renaming or removing one is breaking. One exception: a 400 from deploy carries the DeployError shape ({\"error\": ...} on a parse failure, {\"errors\": [...]} on compile failures) without a code field. Each tool's errors array lists the codes the operation's referenced response components document (a superset of what a specific call can trigger — the 400 component lists every boundary code); error_examples maps every code to a realistic example body.",
     "pagination": "GET /api/v1/process-instances pushes limit (1..=500, default 50) and offset (>= 0, default 0) into the store (SQL LIMIT/OFFSET in postgres mode) and returns a pagination object {limit, offset, returned}; out-of-range values are rejected with 400 \"invalid_request\". GET /api/v1/tasks and GET /api/v1/dead-letters accept the same optional parameters but slice in memory (dead-letter pages cap at the 100 entries the store returns per request); GET /api/v1/process-instances/{id}/history accepts an optional limit (1..=500) applied after sorting.",
-    "idempotency": "POST /api/v1/process-instances accepts an optional Idempotency-Key header (1-128 printable ASCII bytes), scoped by X-Tenant-Id (bounded to 128 printable ASCII bytes when a key is supplied): a key already recorded for the tenant replays the recorded instance with 200 instead of creating a second one (201). The check-then-create sequence is single-service, not cross-process atomic — a key-recording failure after creation returns 500 \"internal\" with an explicit message, and retrying may create a second instance. No other operation consumes idempotency keys."
+    "idempotency": "POST /api/v1/process-instances accepts an optional Idempotency-Key header (1-128 printable ASCII bytes), scoped by X-Tenant-Id (bounded to 128 printable ASCII bytes when a key is supplied): a key already recorded for the tenant replays the recorded instance with 200 instead of creating a second one (201). The check-then-create sequence is single-service, not cross-process atomic — a key-recording failure after creation returns 500 \"internal\" with an explicit message, and retrying may create a second instance. No other operation consumes idempotency keys.",
+    "roles": "E5-1 role→permission matrix, enforced for JWT-authenticated requests only (the admin API key bypasses role checks; open mode has no credentials to authorize). Roles: deployer — deploy, activate, deprecate process definitions; operator — start instances, complete user tasks, replay sessions, requeue/delete dead letters; worker — external-task fetch-and-lock, complete, fail, extend-lock (worker ONLY: the lease lifecycle belongs to the worker role; operators administrate via the DLQ); auditor — the read-only role. READS (every GET, plus the side-effect-free POSTs validate and dry-run) are allowed for ALL authenticated roles — cross-tenant reads are rejected by tenancy (404 \"not_found\"), not by role. A role without permission for an operation answers 403 \"forbidden\". All store queries are scoped by the VERIFIED tenant claim: lists are filtered to the tenant, instance/task/DLQ access of another tenant answers 404 (indistinguishable from unknown ids), and worker fetch-and-lock delivers only the claim tenant's tasks. Definitions are engine-global in v1 (readable by every tenant; only deployers modify them). See docs/rbac.md."
   },
   "error_examples": {
     "deploy_failed": {
@@ -36,6 +43,13 @@
       "body": {
         "error": "BPM_VARIABLE_ENCRYPTION_KEY not configured; cannot encrypt variables",
         "code": "encryption_key_not_configured"
+      }
+    },
+    "forbidden": {
+      "status": 403,
+      "body": {
+        "error": "role 'auditor' is not allowed to POST /api/v1/process-instances",
+        "code": "forbidden"
       }
     },
     "internal": {
@@ -78,6 +92,13 @@
       "body": {
         "error": "category must be \"transient\" or \"permanent\", got \"sometimes\"",
         "code": "invalid_retry_category"
+      }
+    },
+    "invalid_token": {
+      "status": 401,
+      "body": {
+        "error": "invalid or missing JWT: token rejected: ExpiredSignature",
+        "code": "invalid_token"
       }
     },
     "invariant_violation": {
@@ -222,7 +243,7 @@
           "schema": {
             "type": "string"
           },
-          "description": "Tenant scope for the request (optional)."
+          "description": "Tenant scope for the request (optional). DEPRECATED for\nJWT-authenticated requests (E5-1): the tenant comes from the\nverified `tenant` claim, an absent or agreeing header is accepted,\nand a CONFLICTING header is rejected with 403 `forbidden`. In open\nand API-key modes the header keeps its pre-E5-1 meaning: untrusted\nclient input that scopes listings and instance starts (dev-mode\naffordance)."
         }
       ],
       "responses": {
@@ -302,7 +323,15 @@
           },
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 429,
@@ -342,7 +371,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 404,
@@ -385,7 +422,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 429,
@@ -425,7 +470,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 404,
@@ -559,7 +612,15 @@
           },
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 422,
@@ -601,7 +662,7 @@
           "schema": {
             "type": "string"
           },
-          "description": "Tenant scope for the request (optional)."
+          "description": "Tenant scope for the request (optional). DEPRECATED for\nJWT-authenticated requests (E5-1): the tenant comes from the\nverified `tenant` claim, an absent or agreeing header is accepted,\nand a CONFLICTING header is rejected with 403 `forbidden`. In open\nand API-key modes the header keeps its pre-E5-1 meaning: untrusted\nclient input that scopes listings and instance starts (dev-mode\naffordance)."
         },
         {
           "name": "body",
@@ -815,7 +876,15 @@
           },
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 422,
@@ -949,7 +1018,15 @@
           },
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 409,
@@ -1208,7 +1285,15 @@
           },
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 422,
@@ -1243,7 +1328,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 429,
@@ -1273,7 +1366,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 429,
@@ -1313,7 +1414,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 404,
@@ -1363,7 +1472,15 @@
           },
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 429,
@@ -1494,7 +1611,15 @@
           },
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 422,
@@ -1625,7 +1750,15 @@
           },
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 422,
@@ -1665,7 +1798,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 429,
@@ -1705,7 +1846,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 404,
@@ -1749,7 +1898,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 429,
@@ -1789,7 +1946,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 429,
@@ -1836,7 +2001,7 @@
           "schema": {
             "type": "string"
           },
-          "description": "Tenant scope for the request (optional)."
+          "description": "Tenant scope for the request (optional). DEPRECATED for\nJWT-authenticated requests (E5-1): the tenant comes from the\nverified `tenant` claim, an absent or agreeing header is accepted,\nand a CONFLICTING header is rejected with 403 `forbidden`. In open\nand API-key modes the header keeps its pre-E5-1 meaning: untrusted\nclient input that scopes listings and instance starts (dev-mode\naffordance)."
         }
       ],
       "responses": {
@@ -1916,7 +2081,15 @@
           },
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 429,
@@ -1954,7 +2127,7 @@
           "schema": {
             "type": "string"
           },
-          "description": "Tenant scope for the request (optional)."
+          "description": "Tenant scope for the request (optional). DEPRECATED for\nJWT-authenticated requests (E5-1): the tenant comes from the\nverified `tenant` claim, an absent or agreeing header is accepted,\nand a CONFLICTING header is rejected with 403 `forbidden`. In open\nand API-key modes the header keeps its pre-E5-1 meaning: untrusted\nclient input that scopes listings and instance starts (dev-mode\naffordance)."
         },
         {
           "name": "body",
@@ -2069,7 +2242,15 @@
           },
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 422,
@@ -2110,7 +2291,7 @@
           "schema": {
             "type": "string"
           },
-          "description": "Tenant scope for the request (optional)."
+          "description": "Tenant scope for the request (optional). DEPRECATED for\nJWT-authenticated requests (E5-1): the tenant comes from the\nverified `tenant` claim, an absent or agreeing header is accepted,\nand a CONFLICTING header is rejected with 403 `forbidden`. In open\nand API-key modes the header keeps its pre-E5-1 meaning: untrusted\nclient input that scopes listings and instance starts (dev-mode\naffordance)."
         }
       ],
       "responses": {
@@ -2122,7 +2303,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 404,
@@ -2262,7 +2451,15 @@
           },
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 429,
@@ -2303,7 +2500,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 404,
@@ -2348,7 +2553,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 404,
@@ -2393,7 +2606,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 404,
@@ -2436,7 +2657,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 429,
@@ -2494,7 +2723,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 404,
@@ -2542,7 +2779,15 @@
         "errors": [
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 404,
@@ -2654,7 +2899,15 @@
           },
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 404,
@@ -2718,7 +2971,7 @@
           "schema": {
             "type": "string"
           },
-          "description": "Tenant scope for the request (optional)."
+          "description": "Tenant scope for the request (optional). DEPRECATED for\nJWT-authenticated requests (E5-1): the tenant comes from the\nverified `tenant` claim, an absent or agreeing header is accepted,\nand a CONFLICTING header is rejected with 403 `forbidden`. In open\nand API-key modes the header keeps its pre-E5-1 meaning: untrusted\nclient input that scopes listings and instance starts (dev-mode\naffordance)."
         }
       ],
       "responses": {
@@ -2797,7 +3050,15 @@
           },
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 429,
@@ -2835,7 +3096,7 @@
           "schema": {
             "type": "string"
           },
-          "description": "Tenant scope for the request (optional)."
+          "description": "Tenant scope for the request (optional). DEPRECATED for\nJWT-authenticated requests (E5-1): the tenant comes from the\nverified `tenant` claim, an absent or agreeing header is accepted,\nand a CONFLICTING header is rejected with 403 `forbidden`. In open\nand API-key modes the header keeps its pre-E5-1 meaning: untrusted\nclient input that scopes listings and instance starts (dev-mode\naffordance)."
         },
         {
           "name": "body",
@@ -2932,7 +3193,15 @@
           },
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 422,
@@ -3045,7 +3314,15 @@
           },
           {
             "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
             "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
           },
           {
             "status": 404,

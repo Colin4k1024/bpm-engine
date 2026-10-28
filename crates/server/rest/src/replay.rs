@@ -32,6 +32,10 @@ const MAX_SESSIONS: usize = 100;
 pub struct ReplaySession {
     #[allow(dead_code)]
     pub instance_id: String,
+    /// Creating tenant (E5-1): `Some(tenant)` for a JWT-verified creator —
+    /// only that tenant's principals may use the session; `None` for
+    /// open/API-key creators (admin sessions, invisible to principals).
+    pub tenant: Option<String>,
     pub events: Vec<HistoryEvent>,
     pub cursor: usize,
     pub snapshot: Option<ProcessInstance>,
@@ -39,13 +43,14 @@ pub struct ReplaySession {
 }
 
 impl ReplaySession {
-    pub fn new(instance_id: String, events: Vec<HistoryEvent>) -> Self {
+    pub fn new(instance_id: String, events: Vec<HistoryEvent>, tenant: Option<String>) -> Self {
         let events: Vec<HistoryEvent> = events
             .into_iter()
             .filter(|e| is_replayable(e.event_type.as_str()))
             .collect();
         ReplaySession {
             instance_id,
+            tenant,
             events,
             cursor: 0,
             snapshot: None,

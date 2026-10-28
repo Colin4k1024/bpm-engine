@@ -2,7 +2,7 @@
 
 use axum::{
     async_trait,
-    extract::{rejection::JsonRejection, FromRequest, Path, Query, Request, State},
+    extract::{rejection::JsonRejection, Extension, FromRequest, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware as axum_mw,
     response::{IntoResponse, Response},
@@ -28,6 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
 use super::middleware;
+use super::middleware::Identity;
 use super::replay::evict_expired;
 
 fn occurred_at_now() -> String {
@@ -64,6 +65,13 @@ pub mod error_codes {
         "not_found",
         // `unauthorized`: 401 — missing or invalid API key.
         "unauthorized",
+        // `invalid_token`: 401 — missing, malformed, or rejected JWT
+        // (signature/expiry/claims) when JWT auth is configured (E5-1).
+        "invalid_token",
+        // `forbidden`: 403 — the verified role lacks permission for the
+        // operation (RBAC), or the X-Tenant-Id header conflicts with the
+        // token's tenant claim (E5-1).
+        "forbidden",
         // `rate_limited`: 429 — request rate above the configured window.
         "rate_limited",
         // `invalid_request`: 400 — generic client error (malformed path
@@ -126,6 +134,10 @@ pub mod error_codes {
     pub const NOT_FOUND: &str = "not_found";
     /// 401 — missing or invalid API key.
     pub const UNAUTHORIZED: &str = "unauthorized";
+    /// 401 — missing/malformed/rejected JWT under JWT auth (E5-1).
+    pub const INVALID_TOKEN: &str = "invalid_token";
+    /// 403 — RBAC denial or X-Tenant-Id/claim tenant mismatch (E5-1).
+    pub const FORBIDDEN: &str = "forbidden";
     /// 429 — rate limit exceeded.
     pub const RATE_LIMITED: &str = "rate_limited";
     /// 400 — generic invalid request.
@@ -275,16 +287,19 @@ fn idempotency_key_from_headers(
 ///
 /// The `(tenant, key)` pair co-forms the idempotency primary key, so an
 /// unbounded tenant id would let a single request inflate the stored key
-/// row. The bound applies ONLY at this save boundary: `X-Tenant-Id` keeps
-/// its unbounded, pass-through semantics on every other endpoint (see
-/// [`tenant_from_headers`]).
+/// row. The bound applies ONLY at this save boundary: the tenant scope
+/// keeps its unbounded, pass-through semantics on every other endpoint
+/// (the tenant comes from the verified JWT claim under JWT auth, or the
+/// untrusted `X-Tenant-Id` header in open/API-key modes — see
+/// [`tenant_from_identity`]).
 const MAX_IDEMPOTENCY_TENANT_BYTES: usize = 128;
 
-/// Validate the `X-Tenant-Id` of an idempotent start-instance request:
-/// when an `Idempotency-Key` is supplied, the co-stored tenant id must be
-/// at most [`MAX_IDEMPOTENCY_TENANT_BYTES`] printable ASCII bytes, else
-/// 400 `invalid_request` ("tenant id too long"). An absent tenant id is
-/// fine (idempotency keys work without a tenant scope).
+/// Validate the tenant of an idempotent start-instance request: when an
+/// `Idempotency-Key` is supplied, the co-stored tenant id (the JWT claim
+/// under JWT auth, else the `X-Tenant-Id` header) must be at most
+/// [`MAX_IDEMPOTENCY_TENANT_BYTES`] printable ASCII bytes, else 400
+/// `invalid_request` ("tenant id too long"). An absent tenant id is fine
+/// (idempotency keys work without a tenant scope).
 fn tenant_id_for_idempotency(
     tenant: Option<String>,
 ) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
@@ -293,8 +308,8 @@ fn tenant_id_for_idempotency(
     };
     if id.len() > MAX_IDEMPOTENCY_TENANT_BYTES || !id.bytes().all(|b| (0x20..=0x7E).contains(&b)) {
         return Err(bad_request(format!(
-            "tenant id too long: X-Tenant-Id must be at most {} printable ASCII bytes \
-             when an Idempotency-Key is supplied",
+            "tenant id too long: the tenant scope (X-Tenant-Id header, or the JWT tenant \
+             claim) must be at most {} printable ASCII bytes when an Idempotency-Key is supplied",
             MAX_IDEMPOTENCY_TENANT_BYTES
         )));
     }
@@ -456,11 +471,85 @@ fn internal_error_tuple(e: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
     )
 }
 
-fn tenant_from_headers(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-tenant-id")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from)
+/// The tenant scope of a request, from the verified [`Identity`] (E5-1).
+///
+/// JWT-authenticated requests scope by the verified `tenant` claim (the
+/// client `X-Tenant-Id` header is deprecated in that mode and a conflicting
+/// header was already rejected by the middleware); open and API-key modes
+/// keep the pre-E5-1 untrusted-header value. This replaces the old
+/// `tenant_from_headers` for every call site.
+fn tenant_from_identity(identity: &Identity) -> Option<String> {
+    identity.tenant().map(String::from)
+}
+
+/// E5-1 cross-tenant gate: under a JWT-verified identity, an instance whose
+/// tenant does not match the claim is reported as 404 `not_found` — the
+/// SAME body an unknown id produces, so the response never leaks whether
+/// the instance exists. Open and API-key modes keep the pre-E5-1 behavior
+/// (no per-request tenant check on loads).
+fn tenant_denied(identity: &Identity, instance: &ProcessInstance) -> bool {
+    match identity {
+        Identity::Principal { tenant, .. } => {
+            instance.tenant_id.as_deref() != Some(tenant.as_str())
+        }
+        _ => false,
+    }
+}
+
+/// 404 `not_found` for a tenant-gated instance access (same shape as an
+/// unknown instance id).
+fn tenant_gate_not_found(id: &str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse::not_found(format!(
+            "process instance not found: {}",
+            id
+        ))),
+    )
+}
+
+/// E5-1 cross-tenant gate for external-task operations (complete / fail /
+/// extend-lock): under a verified identity the task's instance must belong
+/// to the claim tenant, checked BEFORE the store mutates the task. A
+/// refusal uses the SAME body an unknown task id produces (400
+/// `task_not_found` — no existence leak); a task whose instance cannot be
+/// loaded also fails closed (its tenancy cannot be established). Open and
+/// API-key modes keep the pre-E5-1 behavior (no gate).
+async fn external_task_tenant_gate(
+    state: &AppState,
+    identity: &Identity,
+    external_task_store: &Arc<dyn ExternalTaskStore>,
+    task_id: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let Identity::Principal { tenant, .. } = identity else {
+        return Ok(());
+    };
+    let unknown_task = || {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_code(
+                format!("task not found: {}", task_id),
+                error_codes::TASK_NOT_FOUND,
+            )),
+        )
+    };
+    let task = external_task_store
+        .get(task_id)
+        .await
+        .map_err(internal_error_tuple)?;
+    let Some(task) = task else {
+        return Err(unknown_task());
+    };
+    let instance = state
+        .storage
+        .process_store
+        .load(&task.process_instance_id)
+        .await
+        .map_err(internal_error_tuple)?;
+    match instance {
+        Some(instance) if instance.tenant_id.as_deref() == Some(tenant.as_str()) => Ok(()),
+        _ => Err(unknown_task()),
+    }
 }
 
 fn status_str(state: InstanceState) -> &'static str {
@@ -1073,9 +1162,10 @@ fn validate_sensitive_names(
 pub async fn start_instance(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Extension(identity): Extension<Identity>,
     ValidatedJson(body): ValidatedJson<StartInstanceRequest>,
 ) -> Result<(StatusCode, Json<StartInstanceResponse>), (StatusCode, Json<ErrorResponse>)> {
-    let tenant_id = tenant_from_headers(&headers);
+    let tenant_id = tenant_from_identity(&identity);
     let idempotency_key = idempotency_key_from_headers(&headers)?;
     // E2-4 review fix: bound the tenant id at the idempotency SAVE
     // boundary — only when a key is supplied (other endpoints, and
@@ -1178,6 +1268,7 @@ pub async fn start_instance(
     info!(
         instance_id = %instance_id,
         definition_id = %body.process_def_id,
+        actor = identity.actor(),
         idempotency_key = idempotency_key.as_deref(),
         "process instance started"
     );
@@ -1214,11 +1305,11 @@ pub struct PaginationView {
 /// array keeps its existing shape.
 pub async fn list_process_instances(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(identity): Extension<Identity>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<InstanceListResponse>, (StatusCode, Json<ErrorResponse>)> {
     let page = parse_page_params(&params)?;
-    let tenant_id = tenant_from_headers(&headers);
+    let tenant_id = tenant_from_identity(&identity);
     // Store-level pagination (the hot path): the window is pushed into the
     // store (SQL LIMIT/OFFSET in postgres mode).
     let instance_ids = state
@@ -1266,10 +1357,10 @@ pub async fn list_process_instances(
 /// GET /api/v1/process-instances/:id
 pub async fn get_instance(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
 ) -> Result<Json<InstanceStateResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let tenant_id = tenant_from_headers(&headers);
+    let tenant_id = tenant_from_identity(&identity);
     let _ctx = build_ctx(state.as_ref(), tenant_id);
     let process_store = Arc::clone(&state.storage.process_store);
     // E2-4 review fix: a storage ERROR is 500 `internal`, only a missing
@@ -1279,6 +1370,7 @@ pub async fn get_instance(
         .await
         .map_err(internal_error_tuple)?;
     match inst {
+        Some(inst) if tenant_denied(&identity, &inst) => Err(tenant_gate_not_found(&id)),
         Some(inst) => {
             let mut vars = inst.variables.clone();
             let _ = decrypt_instance_variables(&mut vars);
@@ -1380,24 +1472,21 @@ fn token_status_str(status: &bpm_engine_core::TokenStatus) -> &'static str {
 /// GET /api/v1/process-instances/:id/trace — aggregated execution trace (instance + token timelines + external task history).
 pub async fn get_instance_trace(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
 ) -> Result<Json<TraceResponse>, (StatusCode, Json<ErrorResponse>)> {
     let process_store = Arc::clone(&state.storage.process_store);
     // E2-4 review fix: storage ERROR → 500 internal; missing instance →
-    // 404 not_found.
+    // 404 not_found. E5-1: an instance of ANOTHER tenant is reported
+    // like a missing one (no existence leak).
     let inst = process_store
         .load(&id)
         .await
         .map_err(internal_error_tuple)?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::not_found(format!(
-                    "process instance not found: {}",
-                    id
-                ))),
-            )
-        })?;
+        .ok_or_else(|| tenant_gate_not_found(&id))?;
+    if tenant_denied(&identity, &inst) {
+        return Err(tenant_gate_not_found(&id));
+    }
     let mut vars = inst.variables.clone();
     let _ = decrypt_instance_variables(&mut vars);
     let instance_response = InstanceStateResponse {
@@ -1568,6 +1657,7 @@ pub async fn get_process_definition(
 /// `invalid_request`.
 pub async fn get_instance_history(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<HistoryResponse>, (StatusCode, Json<ErrorResponse>)> {
@@ -1588,6 +1678,24 @@ pub async fn get_instance_history(
             Some(parsed)
         }
     };
+    // E5-1: under a verified identity, an instance of another tenant is
+    // reported like an unknown one BEFORE any history rows are returned.
+    if let Identity::Principal { .. } = &identity {
+        let inst = state
+            .storage
+            .process_store
+            .load(&id)
+            .await
+            .map_err(internal_error_tuple)?;
+        match inst {
+            Some(inst) if tenant_denied(&identity, &inst) => {
+                return Err(tenant_gate_not_found(&id));
+            }
+            // A missing instance keeps the pre-E5-1 behavior: an empty
+            // event list, not a 404.
+            _ => {}
+        }
+    }
     let mut events = HistoryRepo::list_by_instance(
         state.storage.history_repo.as_ref(),
         &id,
@@ -1642,6 +1750,7 @@ pub async fn get_instance_history(
 /// classification to the event-type fallback.
 pub async fn get_instance_steps(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::step_trace::StepsResponse>, (StatusCode, Json<ErrorResponse>)> {
     let process_store = Arc::clone(&state.storage.process_store);
@@ -1649,15 +1758,11 @@ pub async fn get_instance_steps(
         .load(&id)
         .await
         .map_err(internal_error_tuple)?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::not_found(format!(
-                    "process instance not found: {}",
-                    id
-                ))),
-            )
-        })?;
+        .ok_or_else(|| tenant_gate_not_found(&id))?;
+    // E5-1: an instance of another tenant is reported like a missing one.
+    if tenant_denied(&identity, &inst) {
+        return Err(tenant_gate_not_found(&id));
+    }
     // Err (storage failure) ⇒ 500 `internal` like every other store error
     // here; Ok(None) (definition genuinely absent) ⇒ degrade node-kind
     // classification to the event-type fallback (see
@@ -1701,7 +1806,7 @@ pub async fn get_instance_steps(
 /// store level instead (see [`list_process_instances`]).
 pub async fn list_tasks(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(identity): Extension<Identity>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Vec<TaskListItem>>, (StatusCode, Json<ErrorResponse>)> {
     // Route-level pagination: absent parameters ⇒ no windowing (backward
@@ -1711,7 +1816,7 @@ pub async fn list_tasks(
     } else {
         None
     };
-    let tenant_id = tenant_from_headers(&headers);
+    let tenant_id = tenant_from_identity(&identity);
     let process_store = Arc::clone(&state.storage.process_store);
     let def_store = Arc::clone(&state.storage.def_store);
     let running_ids = process_store
@@ -1784,6 +1889,7 @@ pub struct FormSchemaResponse {
 /// GET /api/v1/tasks/:task_id/form — return form schema for a user task.
 pub async fn get_task_form(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(task_id): Path<String>,
 ) -> Result<Json<FormSchemaResponse>, (StatusCode, Json<ErrorResponse>)> {
     let (instance_id, node_id) = parse_task_id(&task_id)
@@ -1794,15 +1900,11 @@ pub async fn get_task_form(
         .load(&instance_id)
         .await
         .map_err(internal_error_tuple)?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::not_found(format!(
-                    "process instance not found: {}",
-                    instance_id
-                ))),
-            )
-        })?;
+        .ok_or_else(|| tenant_gate_not_found(&instance_id))?;
+    // E5-1: a task of another tenant is reported like an unknown one.
+    if tenant_denied(&identity, &instance) {
+        return Err(tenant_gate_not_found(&instance_id));
+    }
     let def = def_store
         .load(&instance.process_def_id)
         .await
@@ -1842,12 +1944,28 @@ pub async fn get_task_form(
 /// POST /api/v1/tasks/:task_id/complete
 pub async fn complete_task_by_id(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(identity): Extension<Identity>,
     Path(task_id): Path<String>,
     ValidatedJson(body): ValidatedJson<CompleteTaskBodyRequest>,
 ) -> Result<Json<CompleteTaskResponse>, (StatusCode, Json<ErrorResponse>)> {
     let (instance_id, node_id) = parse_task_id(&task_id)
         .ok_or_else(|| bad_request(format!("invalid task_id: {}", task_id)))?;
+
+    // E5-1 cross-tenant gate: under a verified identity, a task whose
+    // instance belongs to another tenant is reported like an unknown
+    // instance BEFORE any engine state is touched. (A missing instance
+    // keeps the pre-E5-1 fall-through behavior.)
+    if let Identity::Principal { .. } = &identity {
+        match state.storage.process_store.load(&instance_id).await {
+            Ok(Some(instance)) if tenant_denied(&identity, &instance) => {
+                return Err(tenant_gate_not_found(&instance_id));
+            }
+            // Storage errors on the gate path are surfaced as 500 like
+            // every other store error in this handler's flow.
+            Err(e) => return Err(internal_error_tuple(e)),
+            Ok(_) => {}
+        }
+    }
 
     // E2-3: enforce the variable value contract at this write boundary
     // (valid envelopes, valid artifact URIs, size cap) before the event
@@ -1887,7 +2005,7 @@ pub async fn complete_task_by_id(
         }
     }
 
-    let tenant_id = tenant_from_headers(&headers);
+    let tenant_id = tenant_from_identity(&identity);
     let mut ctx = build_ctx(state.as_ref(), tenant_id);
     let ev = EngineEvent::UserTaskCompleted(payloads::UserTaskCompleted {
         task_id: task_id.clone(),
@@ -1899,6 +2017,7 @@ pub async fn complete_task_by_id(
     info!(
         task_id = %task_id,
         instance_id = %instance_id,
+        actor = identity.actor(),
         "user task completed"
     );
     Ok(Json(CompleteTaskResponse {
@@ -1907,8 +2026,14 @@ pub async fn complete_task_by_id(
 }
 
 /// POST /api/v1/external-tasks/fetch-and-lock
+///
+/// E5-1 tenancy: under a JWT-verified identity the fetch is scoped to the
+/// claim tenant — tasks of other tenants (or tenant-less instances) are
+/// neither delivered NOR leased (store-level `fetch_and_lock_scoped`).
+/// Open/API-key modes keep the pre-E5-1 unscoped fetch.
 pub async fn external_task_fetch_and_lock(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     ValidatedJson(body): ValidatedJson<FetchAndLockRequest>,
 ) -> Result<Json<Vec<ExternalTaskResponse>>, (StatusCode, Json<ErrorResponse>)> {
     let external_task_store = Arc::clone(&state.storage.external_task_store);
@@ -1918,10 +2043,25 @@ pub async fn external_task_fetch_and_lock(
         .map_err(internal_error_tuple)?;
     let lock_duration = Duration::from_millis(body.lock_duration_ms);
     let max_tasks = body.max_tasks as usize;
-    let tasks = external_task_store
-        .fetch_and_lock(&body.worker_id, &body.task_types, max_tasks, lock_duration)
-        .await
-        .map_err(internal_error_tuple)?;
+    let tasks = match &identity {
+        Identity::Principal { tenant, .. } => {
+            external_task_store
+                .fetch_and_lock_scoped(
+                    &body.worker_id,
+                    &body.task_types,
+                    max_tasks,
+                    lock_duration,
+                    tenant,
+                )
+                .await
+        }
+        _ => {
+            external_task_store
+                .fetch_and_lock(&body.worker_id, &body.task_types, max_tasks, lock_duration)
+                .await
+        }
+    }
+    .map_err(internal_error_tuple)?;
     let occurred_at = occurred_at_now();
     for t in &tasks {
         let payload = serde_json::json!({
@@ -1962,7 +2102,7 @@ pub async fn external_task_fetch_and_lock(
 /// POST /api/v1/external-tasks/:task_id/complete
 pub async fn external_task_complete(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(identity): Extension<Identity>,
     Path(task_id): Path<String>,
     ValidatedJson(body): ValidatedJson<ExternalTaskCompleteRequest>,
 ) -> Result<Json<CompleteTaskResponse>, Response> {
@@ -2035,6 +2175,13 @@ pub async fn external_task_complete(
     enforce_variable_contract(&variables, &state.variable_limits)
         .map_err(|(status, json)| (status, json).into_response())?;
     let external_task_store = Arc::clone(&state.storage.external_task_store);
+    // E5-1 cross-tenant gate: under a verified identity, a task whose
+    // instance belongs to another tenant is refused BEFORE the store
+    // mutates the task, with the SAME body an unknown task id produces
+    // (400 task_not_found — no existence leak).
+    external_task_tenant_gate(&state, &identity, &external_task_store, &task_id)
+        .await
+        .map_err(|(status, json)| (status, json).into_response())?;
     external_task_store
         .complete(&task_id, &body.worker_id, variables.clone())
         .await
@@ -2056,6 +2203,7 @@ pub async fn external_task_complete(
     info!(
         task_id = %task_id,
         worker_id = %body.worker_id,
+        actor = identity.actor(),
         instance_id = %task.process_instance_id,
         "external task completed"
     );
@@ -2066,7 +2214,7 @@ pub async fn external_task_complete(
     // 3. Create new tokens via move_token
     // 4. Save the instance
     // 5. Emit TokenArrived events for each new token
-    let tenant_id = tenant_from_headers(&headers);
+    let tenant_id = tenant_from_identity(&identity);
     let mut ctx = build_ctx(state.as_ref(), tenant_id);
     // Load instance to get the node_id for the token
     let instance = ctx
@@ -2107,10 +2255,13 @@ pub async fn external_task_complete(
 /// POST /api/v1/external-tasks/:task_id/extend-lock — extend lock duration on a locked task.
 pub async fn external_task_extend_lock(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(task_id): Path<String>,
     ValidatedJson(body): ValidatedJson<ExtendLockRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let external_task_store = Arc::clone(&state.storage.external_task_store);
+    // E5-1 cross-tenant gate (see external_task_tenant_gate).
+    external_task_tenant_gate(&state, &identity, &external_task_store, &task_id).await?;
     let extension = Duration::from_millis(body.extension_ms);
     let ok = external_task_store
         .extend_lock(&task_id, &body.worker_id, extension)
@@ -2134,6 +2285,7 @@ pub async fn external_task_extend_lock(
 /// POST /api/v1/external-tasks/:task_id/fail
 pub async fn external_task_fail(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(task_id): Path<String>,
     ValidatedJson(body): ValidatedJson<ExternalTaskFailRequest>,
 ) -> Result<Json<CompleteTaskResponse>, Response> {
@@ -2205,6 +2357,10 @@ pub async fn external_task_fail(
         None => body.error.clone(),
     };
     let external_task_store = Arc::clone(&state.storage.external_task_store);
+    // E5-1 cross-tenant gate (see external_task_tenant_gate).
+    external_task_tenant_gate(&state, &identity, &external_task_store, &task_id)
+        .await
+        .map_err(|(status, json)| (status, json).into_response())?;
     let retry_after = body.retry_after_ms.map(Duration::from_millis);
     external_task_store
         .fail(
@@ -2288,7 +2444,13 @@ pub async fn external_task_fail(
             task_type: task.task_type.clone(),
             error_message: error_message.clone(),
             variables: serde_json::to_string(&task.variables).unwrap_or_default(),
-            tenant_id: None,
+            // E5-1: dead letters inherit the VERIFIED tenant under JWT
+            // (so the tenant's operators can list/requeue them); open and
+            // API-key modes keep the pre-E5-1 untagged behavior.
+            tenant_id: match &identity {
+                Identity::Principal { tenant, .. } => Some(tenant.clone()),
+                _ => None,
+            },
             created_at: occurred_at.clone(),
         };
         let _ = state.storage.dead_letter_store.insert(&dl_entry).await;
@@ -2405,31 +2567,34 @@ fn replay_snapshot_from_instance(inst: Option<&ProcessInstance>) -> ReplaySnapsh
 /// POST /api/v1/process-instances/:id/replay — create replay session.
 pub async fn create_replay(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<ReplayCreateResponse>), (StatusCode, Json<ErrorResponse>)> {
     // E2-4 review fix: storage ERROR → 500 internal; only a missing
-    // instance is 404 not_found.
+    // instance is 404 not_found. E5-1: an instance of ANOTHER tenant is
+    // reported like a missing one (no existence leak).
     let _inst = state
         .storage
         .process_store
         .load(&id)
         .await
         .map_err(internal_error_tuple)?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::not_found(format!(
-                    "process instance not found: {}",
-                    id
-                ))),
-            )
-        })?;
+        .ok_or_else(|| tenant_gate_not_found(&id))?;
+    if tenant_denied(&identity, &_inst) {
+        return Err(tenant_gate_not_found(&id));
+    }
     let events =
         HistoryRepo::list_by_instance(state.storage.history_repo.as_ref(), &id, None, None)
             .await
             .map_err(internal_error_tuple)?;
     let session_id = uuid::Uuid::new_v4().to_string();
-    let session = ReplaySession::new(id.clone(), events);
+    // E5-1: the session is bound to the verified tenant (None for
+    // open/API-key creators).
+    let session_tenant = match &identity {
+        Identity::Principal { tenant, .. } => Some(tenant.clone()),
+        _ => None,
+    };
+    let session = ReplaySession::new(id.clone(), events, session_tenant);
     let total_events = session.total_events();
     {
         evict_expired(&state.replay_sessions);
@@ -2475,9 +2640,30 @@ async fn replay_apply_one(
     replay_repo.load(&instance_id).await.ok().flatten()
 }
 
+/// E5-1 replay-session gate: under a verified identity, only sessions the
+/// SAME tenant created are usable — other tenants' sessions (and
+/// admin/open-mode sessions) are reported like missing ones.
+fn replay_session_denied(identity: &Identity, session: &ReplaySession) -> bool {
+    match identity {
+        Identity::Principal { tenant, .. } => session.tenant.as_deref() != Some(tenant.as_str()),
+        _ => false,
+    }
+}
+
+/// 404 `not_found` for an unknown (or tenant-gated) replay session.
+fn replay_session_not_found() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse::not_found(
+            "replay session not found or expired",
+        )),
+    )
+}
+
 /// POST /api/v1/replay/:session_id/step — step forward one event.
 pub async fn replay_step(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(session_id): Path<String>,
 ) -> Result<Json<ReplayStepResponse>, (StatusCode, Json<ErrorResponse>)> {
     let (ev_clone, snapshot_clone) = {
@@ -2487,14 +2673,12 @@ pub async fn replay_step(
                 Json(ErrorResponse::internal("internal lock error")),
             )
         })?;
-        let session = guard.get(&session_id).ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::not_found(
-                    "replay session not found or expired",
-                )),
-            )
-        })?;
+        let session = guard
+            .get(&session_id)
+            .ok_or_else(replay_session_not_found)?;
+        if replay_session_denied(&identity, session) {
+            return Err(replay_session_not_found());
+        }
         let ev = session
             .current_event()
             .ok_or_else(|| bad_request("no more events to step"))?;
@@ -2561,6 +2745,7 @@ pub async fn replay_step(
 /// POST /api/v1/replay/:session_id/seek — jump to cursor (replay events[0..cursor]).
 pub async fn replay_seek(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(session_id): Path<String>,
     ValidatedJson(body): ValidatedJson<ReplaySeekRequest>,
 ) -> Result<Json<ReplaySeekResponse>, (StatusCode, Json<ErrorResponse>)> {
@@ -2571,14 +2756,12 @@ pub async fn replay_seek(
                 Json(ErrorResponse::internal("internal lock error")),
             )
         })?;
-        let session = guard.get(&session_id).ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::not_found(
-                    "replay session not found or expired",
-                )),
-            )
-        })?;
+        let session = guard
+            .get(&session_id)
+            .ok_or_else(replay_session_not_found)?;
+        if replay_session_denied(&identity, session) {
+            return Err(replay_session_not_found());
+        }
         let cursor = body.cursor.min(session.events.len());
         session.events[..cursor].to_vec()
     };
@@ -2616,6 +2799,7 @@ pub async fn replay_seek(
 /// GET /api/v1/replay/:session_id/snapshot — read-only snapshot.
 pub async fn get_replay_snapshot(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(session_id): Path<String>,
 ) -> Result<Json<ReplaySnapshotResponse>, (StatusCode, Json<ErrorResponse>)> {
     let guard = state.replay_sessions.read().map_err(|_| {
@@ -2624,14 +2808,12 @@ pub async fn get_replay_snapshot(
             Json(ErrorResponse::internal("internal lock error")),
         )
     })?;
-    let session = guard.get(&session_id).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::not_found(
-                "replay session not found or expired",
-            )),
-        )
-    })?;
+    let session = guard
+        .get(&session_id)
+        .ok_or_else(replay_session_not_found)?;
+    if replay_session_denied(&identity, session) {
+        return Err(replay_session_not_found());
+    }
     let (completed, tokens) = match &session.snapshot {
         Some(i) => (
             i.state == InstanceState::Completed,
@@ -2657,6 +2839,7 @@ pub async fn get_replay_snapshot(
 /// DELETE /api/v1/replay/:session_id — destroy session.
 pub async fn delete_replay_session(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let mut guard = state.replay_sessions.write().map_err(|_| {
@@ -2665,6 +2848,12 @@ pub async fn delete_replay_session(
             Json(ErrorResponse::internal("internal lock error")),
         )
     })?;
+    // E5-1: a principal may only drop sessions its own tenant created.
+    if let Some(session) = guard.get(&session_id) {
+        if replay_session_denied(&identity, session) {
+            return Err(replay_session_not_found());
+        }
+    }
     guard.remove(&session_id);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -3148,6 +3337,24 @@ pub async fn readiness(
 // Dead Letter Queue endpoints
 // ---------------------------------------------------------------------------
 
+/// E5-1 dead-letter gate: under a verified identity, only entries of the
+/// claim tenant are visible — other tenants' (and untagged/admin) entries
+/// are reported like missing ones (the same 404 body, no existence leak).
+fn dead_letter_denied(identity: &Identity, entry: &bpm_engine_storage::DeadLetterEntry) -> bool {
+    match identity {
+        Identity::Principal { tenant, .. } => entry.tenant_id.as_deref() != Some(tenant.as_str()),
+        _ => false,
+    }
+}
+
+/// 404 `not_found` for an unknown (or tenant-gated) dead-letter entry.
+fn dead_letter_not_found() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse::not_found("dead letter not found")),
+    )
+}
+
 /// GET /api/v1/dead-letters — list dead letter entries.
 ///
 /// Optional route-level pagination (E2-4): `limit`/`offset` query
@@ -3158,7 +3365,7 @@ pub async fn readiness(
 /// which the memory and Postgres adapters enforce.
 async fn list_dead_letters(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    Extension(identity): Extension<Identity>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let page = if params.contains_key("limit") || params.contains_key("offset") {
@@ -3166,7 +3373,7 @@ async fn list_dead_letters(
     } else {
         None
     };
-    let tenant_id = tenant_from_headers(&headers);
+    let tenant_id = tenant_from_identity(&identity);
     let mut entries = state
         .storage
         .dead_letter_store
@@ -3184,6 +3391,7 @@ async fn list_dead_letters(
 /// GET /api/v1/dead-letters/:id — get a single dead letter entry.
 async fn get_dead_letter(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let entry = state
@@ -3192,32 +3400,37 @@ async fn get_dead_letter(
         .get(&id)
         .await
         .map_err(internal_error_tuple)?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::not_found("dead letter not found")),
-            )
-        })?;
+        .ok_or_else(dead_letter_not_found)?;
+    if dead_letter_denied(&identity, &entry) {
+        return Err(dead_letter_not_found());
+    }
     Ok(Json(serde_json::json!({ "entry": entry })))
 }
 
 /// POST /api/v1/dead-letters/:id/requeue — requeue a dead letter entry back as an external task.
 async fn requeue_dead_letter(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    // E5-1 gate before the mutation (requeue removes the entry).
+    let entry = state
+        .storage
+        .dead_letter_store
+        .get(&id)
+        .await
+        .map_err(internal_error_tuple)?
+        .ok_or_else(dead_letter_not_found)?;
+    if dead_letter_denied(&identity, &entry) {
+        return Err(dead_letter_not_found());
+    }
     let task_id = state
         .storage
         .dead_letter_store
         .requeue(&id)
         .await
         .map_err(internal_error_tuple)?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse::not_found("dead letter not found")),
-            )
-        })?;
+        .ok_or_else(dead_letter_not_found)?;
     Ok(Json(
         serde_json::json!({ "status": "requeued", "task_id": task_id }),
     ))
@@ -3226,8 +3439,20 @@ async fn requeue_dead_letter(
 /// DELETE /api/v1/dead-letters/:id — delete a dead letter entry.
 async fn delete_dead_letter(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    // E5-1 gate before the mutation (delete is irreversible).
+    let entry = state
+        .storage
+        .dead_letter_store
+        .get(&id)
+        .await
+        .map_err(internal_error_tuple)?
+        .ok_or_else(dead_letter_not_found)?;
+    if dead_letter_denied(&identity, &entry) {
+        return Err(dead_letter_not_found());
+    }
     state
         .storage
         .dead_letter_store
@@ -3373,10 +3598,10 @@ fn base_router() -> Router<Arc<AppState>> {
     router
 }
 
-/// The versioned `/api/v1` routes, with auth and rate limiting applied
-/// exactly as before (same layers, same order — the layers wrap the
-/// nested router, so they cover the API routes only, while the
-/// request-id middleware on the outer router covers everything).
+/// The versioned `/api/v1` routes, with authentication (JWT/API key/open,
+/// E5-1) and rate limiting applied exactly as before (same layer order —
+/// the layers wrap the nested router, so they cover the API routes only,
+/// while the request-id middleware on the outer router covers everything).
 fn api_v1_router(
     rate_limiter: std::sync::Arc<tokio::sync::Mutex<middleware::RateLimiterState>>,
 ) -> Router<Arc<AppState>> {
@@ -3510,7 +3735,7 @@ fn api_v1_router(
     let router = api_route!(router, DELETE, "/dead-letters/:id", delete_dead_letter);
     let router = api_route!(router, GET, "/invariants/check", invariant_check);
     router
-        .layer(axum_mw::from_fn(middleware::api_key_auth))
+        .layer(axum_mw::from_fn(middleware::authenticate))
         .layer(axum_mw::from_fn_with_state(
             rate_limiter,
             middleware::rate_limit,
@@ -3546,6 +3771,8 @@ mod tests {
         for code in [
             error_codes::NOT_FOUND,
             error_codes::UNAUTHORIZED,
+            error_codes::INVALID_TOKEN,
+            error_codes::FORBIDDEN,
             error_codes::RATE_LIMITED,
             error_codes::INVALID_REQUEST,
             error_codes::INVALID_JSON,

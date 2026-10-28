@@ -105,12 +105,34 @@ pub trait ExternalTaskStore: Send + Sync {
     /// Atomically: (1) reclaims any expired locks, (2) selects oldest READY tasks,
     /// (3) locks them to the requesting worker. Multiple concurrent callers each
     /// see a consistent snapshot with no race on task assignment.
+    ///
+    /// NOT tenant-scoped: any READY task of a requested type can be delivered.
+    /// Verified-tenant callers (E5-1) must use
+    /// [`ExternalTaskStore::fetch_and_lock_scoped`] instead.
     async fn fetch_and_lock(
         &self,
         worker_id: &str,
         task_types: &[String],
         max_tasks: usize,
         lock_duration: Duration,
+    ) -> anyhow::Result<Vec<ExternalTask>>;
+
+    /// Tenant-scoped fetch-and-lock (E5-1): like [`fetch_and_lock`], but only
+    /// tasks whose process instance belongs to `tenant_id` are SELECTED and
+    /// LOCKED — a task of another tenant (or of a tenant-less instance) is
+    /// never delivered and never leased by this call.
+    ///
+    /// Tenancy is resolved through the task's `process_instance_id` (the
+    /// instance row carries the tenant). The scoping happens inside the same
+    /// atomic select-and-lock section as [`fetch_and_lock`], so a scoped
+    /// worker cannot steal another tenant's lease.
+    async fn fetch_and_lock_scoped(
+        &self,
+        worker_id: &str,
+        task_types: &[String],
+        max_tasks: usize,
+        lock_duration: Duration,
+        tenant_id: &str,
     ) -> anyhow::Result<Vec<ExternalTask>>;
 
     /// Complete: LOCKED + lock_owner + not expired -> COMPLETED; merge variables.
