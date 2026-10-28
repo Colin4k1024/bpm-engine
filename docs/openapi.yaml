@@ -1,0 +1,2032 @@
+# BPM Engine REST API — OpenAPI 3.1 contract (E2-4).
+#
+# NORMATIVE: this file is the testable contract of the REST API. The CI
+# consistency suite (crates/server/rest/tests/openapi_contract.rs) checks
+# it against the implementation in BOTH directions:
+#   - every (path, method) documented here exists on the running router,
+#   - every route the router actually registers (derived at registration
+#     time via `routes::registered_routes()`) is documented here,
+#   - the `ErrorResponse.code` enum equals `routes::error_codes::ERROR_CODES`,
+#   - representative response bodies validate against the schemas below,
+#   - the schemas use only the JSON-Schema subset the suite's validator
+#     understands (whitelist: $ref, type, nullable, required, properties,
+#     items, additionalProperties, enum; unsupported keywords like
+#     oneOf/anyOf/format/minimum are rejected loudly by the suite).
+#
+# Versioning rules (v1):
+#   - /api/v1 is FROZEN for additive changes only: new optional request
+#     parameters, new optional response fields, new endpoints, new error
+#     codes. Removing/renaming a field, changing a type, or renaming an
+#     error code is a BREAKING change (requires /api/v2).
+#   - Error codes are stable identifiers. The enum below mirrors
+#     `routes::error_codes::ERROR_CODES` exactly; keep both in sync (the
+#     CI suite enforces set equality).
+#   - `GET /metrics` is feature-gated (`observability`) and intentionally
+#     NOT documented here: it is not part of the default wire contract.
+
+openapi: 3.1.0
+info:
+  title: BPM Engine REST API
+  version: 0.2.0
+  description: |
+    Token-driven, persistence-first BPM engine REST API.
+
+    Every execution step is driven by database state, every state
+    transition is recorded as history, external tasks use lease-based
+    execution, and timers are fully persistent.
+
+    Conventions:
+
+    - All management/integration endpoints live under `/api/v1`; the
+      health endpoints (`/health`, `/ready`) live at the root.
+    - Errors use the `ErrorResponse` schema: `error` (human-readable
+      message), `code` (stable machine-readable identifier, see the enum
+      in components.responses.ErrorResponse), and `invariant_violation`
+      (present only on invariant-violation rejections, mirrored in the
+      `X-Invariant-Violation` response header).
+    - Pagination: `GET /api/v1/process-instances` accepts `limit`
+      (default 50, max 500) and `offset` (default 0); out-of-range values
+      are rejected with 400 `invalid_request`. Other list endpoints
+      (`/tasks`, `/dead-letters`) accept the same optional parameters and
+      slice in memory; `/process-instances/{id}/history` accepts an
+      optional `limit`.
+    - Idempotency: `POST /api/v1/process-instances` accepts an optional
+      `Idempotency-Key` header (1-128 printable ASCII bytes). A known key
+      replays the recorded instance with 200 instead of creating a new
+      one (201). Keys are scoped by `X-Tenant-Id`; when a key is
+      supplied, the tenant id is bounded to 128 printable ASCII bytes
+      (400 `invalid_request` beyond that — the pair co-forms the
+      idempotency primary key). The check-then-create sequence is
+      single-service (not cross-process atomic); a key recorded after
+      creation failure returns 500 `internal` with an explicit message.
+    - Versioning: `/api/v1` is additive-only; error codes are stable
+      identifiers; renames are breaking. See docs/api-spec.md.
+servers:
+  - url: http://127.0.0.1:3000
+    description: "Local development server (config: server.host / server.port)"
+security:
+  - ApiKeyAuth: []
+tags:
+  - name: Health
+  - name: ProcessInstances
+  - name: ProcessDefinitions
+  - name: Tasks
+  - name: ExternalTasks
+  - name: Replay
+  - name: DeadLetters
+  - name: Invariants
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Liveness probe
+      description: Always returns 200 while the process is up.
+      security: []
+      tags: [Health]
+      responses:
+        "200":
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /ready:
+    get:
+      operationId: getReadiness
+      summary: Readiness probe
+      description: |
+        Checks the engine and the storage backend (plus the Postgres pool
+        and migration state in postgres mode). `status` is `ok` or
+        `degraded`; numeric check values are informational.
+      security: []
+      tags: [Health]
+      responses:
+        "200":
+          description: Readiness of every component.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+
+  /api/v1/process-instances:
+    get:
+      operationId: listProcessInstances
+      summary: List process instances (paginated)
+      description: |
+        One page of process instances visible to the tenant, ordered by
+        instance id. The window is pushed into the store (SQL
+        LIMIT/OFFSET in postgres mode) — this is the hot path.
+
+        `limit` defaults to 50 and must be in 1..=500; `offset` defaults
+        to 0 and must be a non-negative integer; malformed or
+        out-of-range values are rejected with 400 `invalid_request`. An
+        offset beyond the end returns an empty page with
+        `pagination.returned = 0`.
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Page of instances (the `pagination` field is additive, E2-4).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceListResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      operationId: startProcessInstance
+      summary: Start a process instance
+      description: |
+        Creates a process instance for the given definition and emits
+        `ProcessStarted` through the engine event loop.
+
+        With an `Idempotency-Key` header (1-128 printable ASCII bytes):
+        a key already recorded for the same tenant returns **200** with
+        the same `{instance_id, status}` shape for the originally created
+        instance (idempotent replay, no second instance); an unknown key
+        creates the instance (201) and records the mapping. Atomicity is
+        single-service: concurrent identical requests can still race, and
+        a key-recording failure after creation returns 500 `internal`
+        naming the situation.
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartInstanceRequest"
+      responses:
+        "201":
+          description: Instance created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StartInstanceResponse"
+        "200":
+          description: Idempotent replay — the recorded instance is returned, none created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StartInstanceResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/InvalidJson" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-instances/{id}:
+    get:
+      operationId: getProcessInstance
+      summary: Get instance state
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+        - $ref: "#/components/parameters/InstanceId"
+      responses:
+        "200":
+          description: Instance state (tokens, current nodes, variables).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceStateResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-instances/{id}/trace:
+    get:
+      operationId: getInstanceTrace
+      summary: Aggregated execution trace
+      description: |
+        Instance state plus token timelines and external-task history
+        aggregated by token/task, computed from history events. Shares
+        the History API semantics (docs/api-spec.md §9).
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+      responses:
+        "200":
+          description: Aggregated trace view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TraceResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-instances/{id}/history:
+    get:
+      operationId: getInstanceHistory
+      summary: Execution history (auditable timeline)
+      description: |
+        Events in causal order (by `occurred_at`, then `id`) with
+        zero-based `sequence` and `category` (`instance` | `token` |
+        `external`). Optional filters `token_id` and `event_type`; the
+        optional `limit` (1..=500, E2-4) truncates the returned list
+        after sorting. Absent parameters keep the pre-existing
+        full-history behavior.
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+        - name: token_id
+          in: query
+          schema: { type: string }
+          description: Filter events for a single token.
+        - name: event_type
+          in: query
+          schema: { type: string }
+          description: Filter by event type (e.g. `ProcessStarted`).
+        - name: limit
+          in: query
+          schema: { type: integer }
+          description: Optional cap on the number of returned events
+            (1..=500, validated as 400 `invalid_request` beyond).
+      responses:
+        "200":
+          description: Event timeline for the instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistoryResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-instances/{id}/replay:
+    post:
+      operationId: createReplaySession
+      summary: Create a replay session
+      description: |
+        Snapshots the instance's history into an ephemeral replay
+        session. Sessions are in-memory only and expire after inactivity
+        (docs/replay-rest-api.md; the Replay API may evolve —
+        docs/api-spec.md §8).
+      tags: [Replay]
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+      responses:
+        "201":
+          description: Replay session created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplayCreateResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/replay/{session_id}/step:
+    post:
+      operationId: replayStep
+      summary: Step forward one event
+      tags: [Replay]
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: One event applied; new snapshot returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplayStepResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/replay/{session_id}/seek:
+    post:
+      operationId: replaySeek
+      summary: Jump to a cursor
+      description: Re-applies events `[0..cursor]` and stores the snapshot.
+      tags: [Replay]
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplaySeekRequest"
+      responses:
+        "200":
+          description: Seek completed; snapshot at the new cursor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplaySeekResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/InvalidJson" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/replay/{session_id}/snapshot:
+    get:
+      operationId: getReplaySnapshot
+      summary: Read-only replay snapshot
+      tags: [Replay]
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: Current snapshot (cursor, tokens, completed flag).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplaySnapshotResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/replay/{session_id}:
+    delete:
+      operationId: deleteReplaySession
+      summary: Destroy a replay session
+      tags: [Replay]
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "204":
+          description: Session destroyed (unknown ids are a no-op 204).
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-definitions:
+    get:
+      operationId: listProcessDefinitions
+      summary: List every deployed definition version
+      tags: [ProcessDefinitions]
+      responses:
+        "200":
+          description: All versions of all keys.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DefinitionListResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-definitions/{id}:
+    get:
+      operationId: getProcessDefinitionView
+      summary: Definition view (nodes and edges) for the Trace UI diagram
+      tags: [ProcessDefinitions]
+      parameters:
+        - $ref: "#/components/parameters/DefinitionId"
+      responses:
+        "200":
+          description: Node/edge graph of the definition.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessDefinitionView"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-definitions/versions/{key}:
+    get:
+      operationId: listDefinitionVersions
+      summary: List all versions of a definition key (newest first)
+      tags: [ProcessDefinitions]
+      parameters:
+        - $ref: "#/components/parameters/DefinitionKey"
+      responses:
+        "200":
+          description: Versions for the key (empty when unknown).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionListResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-definitions/active/{key}:
+    get:
+      operationId: getActiveDefinition
+      summary: Get the active version of a definition key
+      tags: [ProcessDefinitions]
+      parameters:
+        - $ref: "#/components/parameters/DefinitionKey"
+      responses:
+        "200":
+          description: The active version record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DefinitionVersionView"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-definitions/deploy:
+    post:
+      operationId: deployProcessDefinition
+      summary: Deploy a process definition from BPMN 2.0 XML
+      description: |
+        Request body is the raw BPMN 2.0 XML document (content type
+        `application/xml`). Parse failures return 400 with the
+        `DeployError` shape carrying `error`; semantic compile failures
+        return 400 with the `DeployError` shape carrying `errors`;
+        persistence failures return 500 with the standard ErrorResponse
+        shape and code `deploy_failed` (E2-4 — previously persistence
+        failures reused the parse shape).
+      tags: [ProcessDefinitions]
+      requestBody:
+        required: true
+        content:
+          application/xml:
+            schema: { type: string }
+            description: BPMN 2.0 XML document.
+      responses:
+        "201":
+          description: Definition deployed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeployResponse"
+        "400":
+          description: Parse error (single message) or compile errors (list).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeployError"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/DeployFailed" }
+
+  /api/v1/process-definitions/validate:
+    post:
+      operationId: validateProcessDefinition
+      summary: Pre-deploy static validation (no persistence, E2-2)
+      description: |
+        Compiles the source and runs `validate_definition` WITHOUT
+        deploying. Compile errors are returned as HTTP 200 data
+        (`valid: false` + `compile_errors`); a successful compile reports
+        findings and `valid` is true when no finding is Critical.
+        4xx is reserved for malformed envelopes (`invalid_format`,
+        `empty_source`, `invalid_request_body`).
+      tags: [ProcessDefinitions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ValidateSourceRequest"
+      responses:
+        "200":
+          description: Validation outcome (compile errors and/or findings as data).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidateResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/InvalidJson" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /api/v1/process-definitions/dry-run:
+    post:
+      operationId: dryRunProcessDefinition
+      summary: Side-effect-free simulation (no persistence, E2-2)
+      description: |
+        Validate plus a dry-run walk with hypothetical start variables.
+        MUST NOT deploy and MUST NOT create any instance, task, timer or
+        history record. Same response contract as validate plus the
+        `dry_run` walk report.
+      tags: [ProcessDefinitions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ValidateSourceRequest"
+      responses:
+        "200":
+          description: Validation outcome plus the walk report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DryRunResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/InvalidJson" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /api/v1/process-definitions/{id}/activate:
+    put:
+      operationId: activateDefinition
+      summary: Set a version as the active one
+      tags: [ProcessDefinitions]
+      parameters:
+        - $ref: "#/components/parameters/DefinitionId"
+      responses:
+        "200":
+          description: Version activated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivateResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-definitions/{id}/deprecate:
+    put:
+      operationId: deprecateDefinition
+      summary: Mark a version as deprecated
+      tags: [ProcessDefinitions]
+      parameters:
+        - $ref: "#/components/parameters/DefinitionId"
+      responses:
+        "200":
+          description: Version deprecated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivateResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/tasks:
+    get:
+      operationId: listTasks
+      summary: List pending tasks (user / external)
+      description: |
+        Waiting user/service/external tasks of running instances.
+        Optional `type` filter (`user` or `external`) and the E2-4
+        route-level pagination parameters `limit`/`offset` (validated
+        like the instances endpoint: `limit` 1..=500, `offset` >= 0, else
+        400 `invalid_request`), applied in memory over the full scan;
+        absent parameters keep the previous full-list behavior.
+      tags: [Tasks]
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+        - name: type
+          in: query
+          schema: { type: string, enum: [user, external] }
+          description: Filter by task type.
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Task list (may be empty).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TaskListItem"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/tasks/{task_id}/form:
+    get:
+      operationId: getTaskForm
+      summary: Form schema of a user task
+      description: "`task_id` has the form `<instance_id>:<node_id>`."
+      tags: [Tasks]
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+      responses:
+        "200":
+          description: Form schema (form key and/or fields).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FormSchemaResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/tasks/{task_id}/complete:
+    post:
+      operationId: completeUserTask
+      summary: Complete a user task
+      description: |
+        Emits `UserTaskCompleted` through the engine event loop. The
+        E2-3 variable value contract and required form fields are
+        enforced at this boundary; the reserved `__task_envelope` key is
+        rejected (E3-1, `reserved_variable_key`).
+      tags: [Tasks]
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+        - $ref: "#/components/parameters/TenantId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompleteTaskBodyRequest"
+      responses:
+        "200":
+          description: Task completed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompleteTaskResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/InvalidJson" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/external-tasks/fetch-and-lock:
+    post:
+      operationId: fetchAndLockExternalTasks
+      summary: Fetch and lock external tasks for a worker
+      description: |
+        Lease-based delivery: one owner at a time, expired leases are
+        reclaimed first, tasks are ordered by creation time. Emits an
+        `ExternalTaskLocked` history event per delivered task.
+      tags: [ExternalTasks]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FetchAndLockRequest"
+      responses:
+        "200":
+          description: Locked tasks (may be empty).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ExternalTaskResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/InvalidJson" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/external-tasks/{task_id}/complete:
+    post:
+      operationId: completeExternalTask
+      summary: Complete a locked external task
+      description: |
+        The worker returns result variables; the engine merges them and
+        advances the token via `ExternalTaskCompleted`. The E2-3
+        variable contract runs BEFORE the store mutates the task, so a
+        rejected request leaves the task locked and completable.
+
+        E3-1: an optional typed `envelope` field is validated
+        (4xx `task_envelope_invalid` with the sub-code in the message)
+        and merged into the reserved `__task_envelope` variable of the
+        merged map. The worker-sdk wire format (a serialized envelope at
+        that reserved key) is accepted; junk there, or supplying both
+        channels, is rejected with 4xx `reserved_variable_key`.
+      tags: [ExternalTasks]
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+        - $ref: "#/components/parameters/TenantId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExternalTaskCompleteRequest"
+      responses:
+        "200":
+          description: Task completed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompleteTaskResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/InvalidJson" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/external-tasks/{task_id}/fail:
+    post:
+      operationId: failExternalTask
+      summary: Fail a locked external task
+      description: |
+        Decrements retries; at zero retries the task moves to Failed and
+        is enqueued to the dead letter queue, with a `TokenFailed` event.
+        E3-1: optional `category` (`transient`|`permanent`, else 400
+        `invalid_retry_category`) and `envelope` are recorded for
+        observability; retry behavior is unchanged (E3-2 scope).
+      tags: [ExternalTasks]
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExternalTaskFailRequest"
+      responses:
+        "200":
+          description: Task failed (status `FAILED`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompleteTaskResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/InvalidJson" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/external-tasks/{task_id}/extend-lock:
+    post:
+      operationId: extendExternalTaskLock
+      summary: Extend the lock duration of a locked task
+      description: |
+        Refused with 409 `lock_conflict` when the task is unknown, not
+        locked, or owned by a different worker.
+      tags: [ExternalTasks]
+      parameters:
+        - $ref: "#/components/parameters/TaskId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExtendLockRequest"
+      responses:
+        "200":
+          description: Lock extended.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LockExtensionResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/LockConflict" }
+        "422": { $ref: "#/components/responses/InvalidJson" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/dead-letters:
+    get:
+      operationId: listDeadLetters
+      summary: List dead letter entries
+      description: |
+        Failed external tasks after retry exhaustion. Optional E2-4
+        route-level pagination (`limit` 1..=500, `offset` >= 0, else 400
+        `invalid_request`) slices the fetched entries in memory; absent
+        parameters keep the previous behavior. The fetch itself is
+        bounded: the store returns AT MOST 100 entries per request (both
+        the memory and Postgres adapters), so a page can never expose
+        more than the first 100 dead letters; deeper listing requires
+        store-level pagination (not part of v1).
+      tags: [DeadLetters]
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: Dead letter entries (may be empty).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeadLetterListResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/dead-letters/{id}:
+    get:
+      operationId: getDeadLetter
+      summary: Get a single dead letter entry
+      tags: [DeadLetters]
+      parameters:
+        - $ref: "#/components/parameters/DeadLetterId"
+      responses:
+        "200":
+          description: The dead letter entry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeadLetterEntryResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      operationId: deleteDeadLetter
+      summary: Delete a dead letter entry
+      tags: [DeadLetters]
+      parameters:
+        - $ref: "#/components/parameters/DeadLetterId"
+      responses:
+        "204": { description: Entry deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/dead-letters/{id}/requeue:
+    post:
+      operationId: requeueDeadLetter
+      summary: Requeue a dead letter entry as a new external task
+      tags: [DeadLetters]
+      parameters:
+        - $ref: "#/components/parameters/DeadLetterId"
+      responses:
+        "200":
+          description: Entry requeued; the new task id is returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequeueResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/invariants/check:
+    get:
+      operationId: checkInvariants
+      summary: Run storage-layer invariant checks
+      description: |
+        Verifies the formal invariants (docs/invariants.md) over stored
+        instances/tokens/tasks/timers. Use for health checks, debugging,
+        or post-crash recovery verification.
+      tags: [Invariants]
+      responses:
+        "200":
+          description: Invariant check results.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvariantCheckResult"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        Enforced only when the server is configured with an API key
+        (`auth.api_key` / `BPM_API_KEY`); without a configured key the
+        server runs in PoC mode and accepts all requests. Missing or
+        invalid keys are rejected with 401 `unauthorized`.
+
+  parameters:
+    TenantId:
+      name: X-Tenant-Id
+      in: header
+      schema: { type: string }
+      description: Tenant scope for the request (optional).
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string }
+      description: |
+        Start-instance idempotency key (E2-4): 1-128 printable ASCII
+        bytes. A known key replays the recorded instance with 200;
+        unknown keys are recorded on creation. Malformed keys are
+        rejected with 400 `invalid_request`.
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 50 }
+      description: "Page size (1..=500; default 50 on the instances list).
+        Validated as 400 `invalid_request` when out of range. On
+        `/dead-letters` the page is a window over at most the 100 entries
+        the store returns per request (see that endpoint's description)."
+    Offset:
+      name: offset
+      in: query
+      schema: { type: integer, default: 0 }
+      description: Zero-based index of the first returned entry
+        (non-negative; validated as 400 `invalid_request` when negative).
+    InstanceId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Process instance id.
+    DefinitionId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Process definition version id (e.g. `order-flow:3`).
+    DefinitionKey:
+      name: key
+      in: path
+      required: true
+      schema: { type: string }
+      description: Process definition key (e.g. `order-flow`).
+    TaskId:
+      name: task_id
+      in: path
+      required: true
+      schema: { type: string }
+      description: "Task id; user tasks use `<instance_id>:<node_id>`."
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Replay session id.
+    DeadLetterId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Dead letter entry id.
+
+  responses:
+    BadRequest:
+      description: |
+        Malformed request (400). Code is `invalid_request` (generic:
+        bad path ids or query parameters) or a boundary-specific code
+        (`invalid_format`, `empty_source`, `invalid_request_body`,
+        `variable_*`, `sensitive_requires_encryption`,
+        `encryption_key_not_configured`, `reserved_variable_key`,
+        `task_envelope_invalid`, `invalid_retry_category`,
+        `missing_required_fields`, `task_not_found`, `task_not_locked`,
+        `lock_expired`, `invariant_violation`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InvalidJson:
+      description: |
+        Request body is not valid JSON for the endpoint (422 when the
+        JSON is well-formed but does not match the target type, 400 for
+        syntax/content-type problems). Code `invalid_json`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Missing or invalid API key (401, code `unauthorized`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Unknown resource id (404, code `not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    LockConflict:
+      description: |
+        Lock extension refused (409, code `lock_conflict`): task unknown,
+        not locked, or owned by a different worker.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    RateLimited:
+      description: Request rate above the configured window (429, code `rate_limited`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalError:
+      description: |
+        Unexpected server-side failure (500, code `internal`). Details
+        are logged server-side only.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    DeployFailed:
+      description: |
+        Definition persistence failure at deploy (500, code
+        `deploy_failed`); the definition itself compiled fine.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable error message (stable-ish wording, not a contract).
+        code:
+          type: string
+          description: |
+            Stable machine-readable error code (E2-4). Renaming or
+            removing a value is a BREAKING change; additions are
+            backward compatible. This enum mirrors
+            `routes::error_codes::ERROR_CODES` exactly — the CI
+            consistency suite asserts set equality.
+          enum:
+            - not_found
+            - unauthorized
+            - rate_limited
+            - invalid_request
+            - invalid_json
+            - internal
+            - deploy_failed
+            - invalid_format
+            - empty_source
+            - invalid_request_body
+            - variable_too_large
+            - variable_invalid_envelope
+            - variable_invalid_artifact_uri
+            - sensitive_requires_encryption
+            - encryption_key_not_configured
+            - task_envelope_invalid
+            - reserved_variable_key
+            - invalid_retry_category
+            - missing_required_fields
+            - task_not_found
+            - task_not_locked
+            - lock_expired
+            - invariant_violation
+            - lock_conflict
+        invariant_violation:
+          type: string
+          description: |
+            Invariant kind (e.g. `ExternalTaskLeaseConflict`), present
+            only on invariant-violation rejections; mirrored in the
+            `X-Invariant-Violation` response header (stable contract).
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    ReadinessResponse:
+      type: object
+      required: [status, checks]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        checks:
+          type: object
+          additionalProperties: { type: string }
+          description: Component name to status (e.g. `engine`, `database`).
+
+    StartInstanceRequest:
+      type: object
+      required: [process_def_id]
+      properties:
+        process_def_id:
+          type: string
+          description: Definition version id to start.
+        variables:
+          type: object
+          additionalProperties: { type: string }
+          default: {}
+          description: Initial variables (E2-3 value contract enforced).
+        encrypted:
+          type: array
+          items: { type: string }
+          default: []
+          description: Variable names to encrypt before storage.
+        sensitive:
+          type: array
+          items: { type: string }
+          description: |
+            Variable names declared sensitive: each must exist in
+            `variables` AND be listed in `encrypted` (E2-3).
+
+    StartInstanceResponse:
+      type: object
+      required: [instance_id, status]
+      properties:
+        instance_id:
+          type: string
+        status:
+          type: string
+          enum: [RUNNING, COMPLETED, TERMINATED]
+          description: |
+            `RUNNING` on creation; on an idempotent replay the instance's
+            CURRENT state.
+
+    PaginationView:
+      type: object
+      required: [limit, offset, returned]
+      properties:
+        limit:
+          type: integer
+          description: Effective page size (default 50, max 500).
+        offset:
+          type: integer
+          description: Zero-based index of the first returned instance.
+        returned:
+          type: integer
+          description: Number of instances in this response.
+
+    Token:
+      type: object
+      required: [id, node_id, status, mode, version, attempt]
+      properties:
+        id:
+          type: string
+        node_id:
+          type: string
+        status:
+          type: string
+          enum: [Created, Ready, Executing, Waiting, Suspended, Completed, Terminated]
+        mode:
+          type: string
+          enum: [Forward, Compensation]
+        version:
+          type: integer
+          description: Optimistic concurrency version.
+        attempt:
+          type: integer
+        parallel_group_id:
+          type: [string, "null"]
+          description: Present when the token belongs to a parallel fork group.
+        updated_at:
+          type: [string, "null"]
+          description: ISO 8601 timestamp of the last state change.
+
+    InstanceStateResponse:
+      type: object
+      required: [instance_id, process_def_id, status, current_nodes, tokens]
+      properties:
+        instance_id:
+          type: string
+        process_def_id:
+          type: string
+        status:
+          type: string
+          enum: [RUNNING, COMPLETED, TERMINATED]
+        current_nodes:
+          type: array
+          items: { type: string }
+          description: Nodes with waiting tokens (sorted, deduplicated).
+        tokens:
+          type: array
+          items:
+            $ref: "#/components/schemas/Token"
+        variables:
+          type: object
+          additionalProperties: { type: string }
+          description: Instance variables (encrypted values decrypted when configured).
+
+    InstanceListResponse:
+      type: object
+      required: [instances, pagination]
+      properties:
+        instances:
+          type: array
+          items:
+            $ref: "#/components/schemas/InstanceStateResponse"
+        pagination:
+          $ref: "#/components/schemas/PaginationView"
+
+    TraceEventView:
+      type: object
+      required: [event_type, occurred_at]
+      properties:
+        event_type:
+          type: string
+        occurred_at:
+          type: string
+        payload:
+          description: Raw history event payload.
+
+    TokenTimelineView:
+      type: object
+      required: [token_id, node_id, status, events]
+      properties:
+        token_id:
+          type: string
+        node_id:
+          type: string
+        status:
+          type: string
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/TraceEventView"
+
+    ExternalTaskHistoryEntryView:
+      type: object
+      required: [task_id, token_id, process_instance_id, events]
+      properties:
+        task_id:
+          type: string
+        token_id:
+          type: string
+        process_instance_id:
+          type: string
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/TraceEventView"
+
+    TraceResponse:
+      type: object
+      required: [instance, token_timelines, external_task_history]
+      properties:
+        instance:
+          $ref: "#/components/schemas/InstanceStateResponse"
+        token_timelines:
+          type: array
+          items:
+            $ref: "#/components/schemas/TokenTimelineView"
+        external_task_history:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExternalTaskHistoryEntryView"
+
+    HistoryEventView:
+      type: object
+      required: [sequence, id, event_type, category, occurred_at, payload]
+      properties:
+        sequence:
+          type: integer
+          description: Zero-based index in causal order.
+        id:
+          type: string
+        event_type:
+          type: string
+          description: e.g. `ProcessStarted`, `TokenArrived`, `ExternalTaskLocked`.
+        category:
+          type: string
+          enum: [instance, token, external]
+        occurred_at:
+          type: string
+          description: Unix epoch seconds.
+        payload:
+          description: Raw event payload.
+
+    HistoryResponse:
+      type: object
+      required: [instance_id, events]
+      properties:
+        instance_id:
+          type: string
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/HistoryEventView"
+
+    TaskListItem:
+      type: object
+      required: [task_id, node_id, instance_id, task_type]
+      properties:
+        task_id:
+          type: string
+          description: "`<instance_id>:<node_id>` for user tasks."
+        node_id:
+          type: string
+        instance_id:
+          type: string
+        task_type:
+          type: string
+          enum: [user, external]
+
+    FormField:
+      type: object
+      required: [id, label, type, required]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        type:
+          type: string
+          enum: [String, Number, Boolean, Enum]
+        required:
+          type: boolean
+        default_value:
+          type: string
+        options:
+          type: array
+          items: { type: string }
+          description: Present for enum fields.
+
+    FormSchemaResponse:
+      type: object
+      required: [task_id, node_id]
+      properties:
+        task_id:
+          type: string
+        node_id:
+          type: string
+        form_key:
+          type: string
+        fields:
+          type: array
+          items:
+            $ref: "#/components/schemas/FormField"
+
+    CompleteTaskBodyRequest:
+      type: object
+      properties:
+        variables:
+          type: object
+          additionalProperties: { type: string }
+          default: {}
+          description: Variables to merge into the instance.
+
+    CompleteTaskResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [COMPLETED, FAILED]
+
+    LockExtensionResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [lock_extended]
+
+    FetchAndLockRequest:
+      type: object
+      required: [worker_id, task_types, lock_duration_ms]
+      properties:
+        worker_id:
+          type: string
+        task_types:
+          type: array
+          items: { type: string }
+        max_tasks:
+          type: integer
+          default: 10
+        lock_duration_ms:
+          type: integer
+          description: Lease duration in milliseconds.
+
+    ExternalTaskResponse:
+      type: object
+      required: [task_id, token_id, process_instance_id, task_type, variables]
+      properties:
+        task_id:
+          type: string
+        token_id:
+          type: string
+        process_instance_id:
+          type: string
+        task_type:
+          type: string
+        variables:
+          type: object
+          additionalProperties: { type: string }
+          description: Task input variables (delivered verbatim, E2-3).
+
+    ExternalTaskCompleteRequest:
+      type: object
+      required: [worker_id]
+      properties:
+        worker_id:
+          type: string
+        variables:
+          type: object
+          additionalProperties: { type: string }
+          default: {}
+        envelope:
+          $ref: "#/components/schemas/AiTaskEnvelope"
+
+    ExternalTaskFailRequest:
+      type: object
+      required: [worker_id, error]
+      properties:
+        worker_id:
+          type: string
+        error:
+          type: string
+          description: Failure description.
+        retry_after_ms:
+          type: integer
+          description: Optional fetch backoff hint (not enforced, E1-3).
+        category:
+          type: string
+          enum: [transient, permanent]
+          description: |
+            E3-1 retry category, recorded for observability; retry
+            behavior is unchanged in v1.
+        envelope:
+          $ref: "#/components/schemas/AiTaskEnvelope"
+
+    ExtendLockRequest:
+      type: object
+      required: [worker_id, extension_ms]
+      properties:
+        worker_id:
+          type: string
+        extension_ms:
+          type: integer
+
+    AiTaskEnvelope:
+      type: object
+      required: [schema_version, execution_id]
+      description: |
+        E3-1 typed execution metadata for AI-driven external tasks.
+        Unknown fields are rejected. `schema_version` must be 1.
+      properties:
+        schema_version:
+          type: integer
+          enum: [1]
+        execution_id:
+          type: string
+          description: '"<task_id>:<attempt>" (see execution_id helper).'
+        idempotency_key:
+          type: string
+          description: Worker-chosen side-effect dedup key (non-empty).
+        timeout_secs:
+          type: integer
+          description: Worker-side timeout hint (informational in v1, > 0).
+        retry_category:
+          type: string
+          enum: [transient, permanent]
+        model:
+          $ref: "#/components/schemas/ModelRef"
+        tools:
+          type: array
+          items:
+            $ref: "#/components/schemas/ToolRef"
+        artifacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ArtifactRef"
+        input_schema:
+          description: JSON Schema fragment describing expected input variables.
+        output_schema:
+          description: JSON Schema fragment describing promised output variables.
+
+    ModelRef:
+      type: object
+      required: [provider, name]
+      properties:
+        provider:
+          type: string
+        name:
+          type: string
+        version:
+          type: string
+
+    ToolRef:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+
+    ArtifactRef:
+      type: object
+      required: [uri]
+      properties:
+        uri:
+          type: string
+          description: Absolute artifact URI (E2-3 rules; never dereferenced).
+        sha256:
+          type: string
+          description: 64 hex chars when known.
+        size:
+          type: integer
+        media_type:
+          type: string
+
+    ReplayCreateResponse:
+      type: object
+      required: [session_id, instance_id, total_events]
+      properties:
+        session_id:
+          type: string
+        instance_id:
+          type: string
+        total_events:
+          type: integer
+
+    ReplayEventView:
+      type: object
+      required: [event_type, occurred_at]
+      properties:
+        event_type:
+          type: string
+        occurred_at:
+          type: string
+        token_id:
+          type: string
+        node_id:
+          type: string
+
+    ReplayTokenView:
+      type: object
+      required: [token_id, node_id, state]
+      properties:
+        token_id:
+          type: string
+        node_id:
+          type: string
+        state:
+          type: string
+          description: Token status name.
+
+    ReplaySnapshotView:
+      type: object
+      required: [completed, tokens]
+      properties:
+        completed:
+          type: boolean
+        tokens:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReplayTokenView"
+
+    ReplayStepResponse:
+      type: object
+      required: [cursor, event, snapshot]
+      properties:
+        cursor:
+          type: integer
+        event:
+          $ref: "#/components/schemas/ReplayEventView"
+        snapshot:
+          $ref: "#/components/schemas/ReplaySnapshotView"
+
+    ReplaySeekRequest:
+      type: object
+      required: [cursor]
+      properties:
+        cursor:
+          type: integer
+          description: Zero-based event index to seek to (clamped to the
+            session's event count).
+
+    ReplaySeekResponse:
+      type: object
+      required: [cursor, snapshot]
+      properties:
+        cursor:
+          type: integer
+        snapshot:
+          $ref: "#/components/schemas/ReplaySnapshotView"
+
+    ReplaySnapshotResponse:
+      type: object
+      required: [cursor, total_events, completed, tokens]
+      properties:
+        cursor:
+          type: integer
+        total_events:
+          type: integer
+        completed:
+          type: boolean
+        tokens:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReplayTokenView"
+
+    DeployResponse:
+      type: object
+      required: [process_definition_id]
+      properties:
+        process_definition_id:
+          type: string
+
+    DeployErrorParse:
+      description: "BPMN XML parse failure body: a single message object."
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: BPMN XML parse error message.
+
+    DeployError:
+      description: |
+        Failure body of `POST /api/v1/process-definitions/deploy` (serde
+        untagged enum): a parse failure carries `error`; semantic compile
+        failures carry `errors`. Exactly one of the two fields is present
+        per 400 response. The 500 persistence failure does NOT use this
+        shape — it uses the standard ErrorResponse with code
+        `deploy_failed`.
+      type: object
+      properties:
+        error:
+          type: string
+          description: BPMN XML parse error message.
+        errors:
+          type: array
+          description: Semantic compile errors.
+          items:
+            $ref: "#/components/schemas/CompilerError"
+
+    CompilerError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - NoStartEvent
+            - MultipleStartEvents
+            - NoEndEvent
+            - OrphanNode
+            - DeadEnd
+            - ExclusiveGatewayNoDefault
+            - ParallelGatewayInvalidShape
+            - SequenceFlowSourceNotFound
+            - SequenceFlowTargetNotFound
+            - UnsupportedElement
+        message:
+          type: string
+        node_id:
+          type: ["string", "null"]
+          description: Affected node (null when the error is definition-wide).
+        flow_id:
+          type: ["string", "null"]
+          description: Affected sequence flow (null when not flow-specific).
+        hint:
+          type: ["string", "null"]
+          description: Optional remediation hint (null when absent).
+
+    ValidateSourceRequest:
+      type: object
+      required: [format, source]
+      properties:
+        format:
+          type: string
+          enum: [bpmn, dsl]
+        source:
+          type: string
+          description: Full source document (XML or JSON, per `format`).
+        variables:
+          type: object
+          additionalProperties: { type: string }
+          default: {}
+          description: Hypothetical start variables (dry-run only).
+
+    CompileErrorsView:
+      description: |
+        Compile-phase failures as DATA (HTTP 200). Genuinely polymorphic
+        (serde untagged enum — cannot be a single typed object):
+        - a BPMN parse failure serializes as `{"error": "..."}` — exactly
+          the `DeployErrorParse` object schema;
+        - BPMN semantic errors serialize as an ARRAY of
+          `CompilerError` objects;
+        - DSL errors serialize as an ARRAY of `DslError` objects.
+        The concrete element schemas are referenced below from the
+        sample-validation tests of the consistency suite.
+
+    DslError:
+      description: |
+        One DSL compile diagnostic (serde camelCase fields): a stable
+        snake_case `code`, a JSON-pointer `path`, a `message`, an optional
+        actionable `hint` (null when absent), and `sourceCode` — the
+        upstream BPMN `ErrorCode` name, present only when `code` is
+        `compile`.
+      type: object
+      required: [code, path, message]
+      properties:
+        code:
+          type: string
+          description: Stable snake_case code (docs/dsl-guide.md).
+        path:
+          type: string
+          description: JSON-pointer path into the source document.
+        message:
+          type: string
+        hint:
+          type: ["string", "null"]
+          description: Optional actionable hint (null when absent).
+        sourceCode:
+          type: string
+          description: 'Upstream BPMN ErrorCode name (only for code "compile").'
+
+    ValidationFinding:
+      type: object
+      required: [severity, code, message]
+      properties:
+        severity:
+          type: string
+          enum: [Critical, Warning, Info]
+        code:
+          type: string
+          description: Stable snake_case finding code (E2-2).
+        node_id:
+          type: string
+        message:
+          type: string
+
+    ValidateResponse:
+      type: object
+      required: [valid]
+      properties:
+        valid:
+          type: boolean
+          description: False when compilation failed or a Critical finding exists.
+        compile_errors:
+          $ref: "#/components/schemas/CompileErrorsView"
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ValidationFinding"
+
+    DryRunStep:
+      type: object
+      required: [node_id, node_type]
+      properties:
+        node_id:
+          type: string
+        node_type:
+          type: string
+          description: Stable camelCase node-type name.
+        detail:
+          type: string
+
+    DryRunTerminus:
+      description: |
+        How the dry-run walk ended. Serialized by serde as an INTERNALLY
+        TAGGED object (`tag = "type"`, camelCase variant names): every
+        terminus is `{"type": <tag>, "node_id": ...}` and the two
+        "paused/cannot continue" variants additionally carry `reason`.
+        `node_id` is snake_case on the wire (serde field name, unchanged
+        by the variant rename).
+      type: object
+      required: [type, node_id]
+      properties:
+        type:
+          type: string
+          enum:
+            - completedAt
+            - waitingAt
+            - stuckAt
+            - unresolvedBranch
+            - maxStepsExceeded
+          description: |
+            The terminus kind: `completedAt` — an end event was reached;
+            `waitingAt` — execution would pause at this node (user task,
+            timer/message/signal catch, or a parallel join waiting for
+            remaining branches); `stuckAt` — the walk cannot continue
+            (e.g. every gateway condition false, no default edge);
+            `unresolvedBranch` — gateway routing undecidable by the
+            lightweight evaluator; `maxStepsExceeded` — the step budget
+            ran out (typical for loops).
+        node_id:
+          type: string
+          description: The node the terminus refers to (end node, wait node,
+            stuck gateway, or the node about to be visited at budget
+            exhaustion).
+        reason:
+          type: string
+          description: Why the walk waits (`waitingAt`) or cannot continue
+            (`stuckAt`) — present on those two variants only.
+
+    DryRunReport:
+      type: object
+      required: [steps, terminus, unresolved_conditions, max_steps]
+      properties:
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/DryRunStep"
+        terminus:
+          $ref: "#/components/schemas/DryRunTerminus"
+        unresolved_conditions:
+          type: array
+          items: { type: string }
+        max_steps:
+          type: integer
+
+    DryRunResponse:
+      type: object
+      required: [valid]
+      properties:
+        valid:
+          type: boolean
+        compile_errors:
+          $ref: "#/components/schemas/CompileErrorsView"
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ValidationFinding"
+        dry_run:
+          $ref: "#/components/schemas/DryRunReport"
+
+    DefinitionVersionView:
+      type: object
+      required: [id, key, version, status, created_at]
+      properties:
+        id:
+          type: string
+        key:
+          type: string
+        version:
+          type: integer
+        status:
+          type: string
+          enum: [active, deprecated]
+        created_at:
+          type: string
+
+    VersionListResponse:
+      type: object
+      required: [key, versions]
+      properties:
+        key:
+          type: string
+        versions:
+          type: array
+          items:
+            $ref: "#/components/schemas/DefinitionVersionView"
+
+    DefinitionListResponse:
+      type: object
+      required: [definitions]
+      properties:
+        definitions:
+          type: array
+          items:
+            $ref: "#/components/schemas/DefinitionVersionView"
+
+    ActivateResponse:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [active, deprecated]
+
+    NodeView:
+      type: object
+      required: [id, node_type]
+      properties:
+        id:
+          type: string
+        node_type:
+          type: string
+          description: e.g. `Start`, `UserTask`, `ParallelJoin`.
+
+    EdgeView:
+      type: object
+      required: [source, target]
+      properties:
+        source:
+          type: string
+        target:
+          type: string
+
+    ProcessDefinitionView:
+      type: object
+      required: [id, start, nodes, edges]
+      properties:
+        id:
+          type: string
+        start:
+          type: string
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeView"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeView"
+
+    DeadLetterEntry:
+      type: object
+      required:
+        - id
+        - task_id
+        - token_id
+        - process_instance_id
+        - task_type
+        - error_message
+        - variables
+        - created_at
+      properties:
+        id:
+          type: string
+        task_id:
+          type: string
+        token_id:
+          type: string
+        process_instance_id:
+          type: string
+        task_type:
+          type: string
+        error_message:
+          type: string
+        variables:
+          type: string
+          description: Process variables as serialized JSON.
+        tenant_id:
+          type: string
+        created_at:
+          type: string
+
+    DeadLetterListResponse:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeadLetterEntry"
+
+    DeadLetterEntryResponse:
+      type: object
+      required: [entry]
+      properties:
+        entry:
+          $ref: "#/components/schemas/DeadLetterEntry"
+
+    RequeueResponse:
+      type: object
+      required: [status, task_id]
+      properties:
+        status:
+          type: string
+          enum: [requeued]
+        task_id:
+          type: string
+
+    InvariantViolationReport:
+      type: object
+      required: [invariant, description, entity_id, severity]
+      properties:
+        invariant:
+          type: string
+        description:
+          type: string
+        entity_id:
+          type: string
+        severity:
+          type: string
+          enum: [Critical, Warning, Info]
+
+    CheckStats:
+      type: object
+      required:
+        - instances_checked
+        - tokens_checked
+        - external_tasks_checked
+        - timers_checked
+        - duration_ms
+      properties:
+        instances_checked:
+          type: integer
+        tokens_checked:
+          type: integer
+        external_tasks_checked:
+          type: integer
+        timers_checked:
+          type: integer
+        duration_ms:
+          type: integer
+
+    InvariantCheckResult:
+      type: object
+      required: [passed, violations, stats]
+      properties:
+        passed:
+          type: boolean
+        violations:
+          type: array
+          items:
+            $ref: "#/components/schemas/InvariantViolationReport"
+        stats:
+          $ref: "#/components/schemas/CheckStats"

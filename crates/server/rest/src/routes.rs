@@ -1,11 +1,12 @@
 //! REST API v1 routes: process-instances, tasks, external-tasks.
 
 use axum::{
-    extract::{Path, Query, State},
+    async_trait,
+    extract::{rejection::JsonRejection, FromRequest, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware as axum_mw,
     response::{IntoResponse, Response},
-    routing::{delete, get, post, put},
+    routing::MethodRouter,
     Json, Router,
 };
 use bpm_engine_core::{
@@ -19,7 +20,7 @@ use bpm_engine_storage::{
     CompensationRecordRepo, ExternalTaskStore, HistoryRepo, ParallelJoinRepo,
     ProcessDefinitionStore, ProcessInstanceStore, TimerStore, TokenStore,
 };
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +36,269 @@ fn occurred_at_now() -> String {
         .unwrap()
         .as_secs()
         .to_string()
+}
+
+// --- Stable error-code contract (E2-4) --------------------------------------
+//
+// The canonical, single-source-of-truth list of machine-readable error
+// codes the REST API can emit in `ErrorResponse.code`. `docs/openapi.yaml`
+// mirrors this list in the `ErrorResponse.code` enum, and the CI
+// consistency suite (`crates/server/rest/tests/openapi_contract.rs`)
+// asserts set equality between the two, so a code cannot be added on one
+// side only.
+pub mod error_codes {
+    /// Every stable error code of the REST API (E2-4).
+    ///
+    /// Rules:
+    /// - Codes are **stable identifiers**: renaming or removing one is a
+    ///   breaking API change; adding one is backward compatible.
+    /// - Each code has a fixed HTTP status family (documented per code in
+    ///   `docs/api-spec.md` and `docs/openapi.yaml`).
+    /// - Codes that predate E2-4 (E2-2/E2-3/E3-1) keep their exact names.
+    pub const ERROR_CODES: &[&str] = &[
+        // Generic request/transport-level codes.
+        //
+        // `not_found`: 404 — unknown instance / definition / task /
+        // dead-letter / replay-session id (and pre-existing 400-family
+        // not-found responses keep their status, see `task_not_found`).
+        "not_found",
+        // `unauthorized`: 401 — missing or invalid API key.
+        "unauthorized",
+        // `rate_limited`: 429 — request rate above the configured window.
+        "rate_limited",
+        // `invalid_request`: 400 — generic client error (malformed path
+        // ids, bad query parameters, semantically invalid requests).
+        "invalid_request",
+        // `invalid_json`: 400/422 — request body is not valid JSON for the
+        // endpoint (syntax/content-type → 400; type mismatch → 422).
+        "invalid_json",
+        // `internal`: 500 — unexpected server-side failure. Details are
+        // logged server-side, never leaked to the client.
+        "internal",
+        // Deploy & definition management.
+        //
+        // `deploy_failed`: 500 — the definition compiled but could not be
+        // persisted (distinct from parse/compile 400s).
+        "deploy_failed",
+        // `invalid_format`: 400 — validate/dry-run `format` is neither
+        // "bpmn" nor "dsl" (E2-2).
+        "invalid_format",
+        // `empty_source`: 400 — validate/dry-run `source` is empty (E2-2).
+        "empty_source",
+        // `invalid_request_body`: 400 — validate/dry-run body is not
+        // deserializable JSON (E2-2).
+        "invalid_request_body",
+        // Variable contract (E2-3) and encryption.
+        "variable_too_large",
+        "variable_invalid_envelope",
+        "variable_invalid_artifact_uri",
+        "sensitive_requires_encryption",
+        // `encryption_key_not_configured`: 400 — `encrypted` variables
+        // submitted while `BPM_VARIABLE_ENCRYPTION_KEY` is unset.
+        "encryption_key_not_configured",
+        // AI task envelope (E3-1).
+        "task_envelope_invalid",
+        "reserved_variable_key",
+        "invalid_retry_category",
+        // User tasks.
+        //
+        // `missing_required_fields`: 400 — user-task complete without the
+        // form's required fields.
+        "missing_required_fields",
+        // External-task lease errors (store-level rejections).
+        //
+        // `task_not_found` / `task_not_locked` / `lock_expired`: 400 —
+        // the store rejected the operation (kept at 400 for backward
+        // compatibility with the pre-code contract).
+        "task_not_found",
+        "task_not_locked",
+        "lock_expired",
+        // `invariant_violation`: 400 — an engine invariant was violated
+        // (e.g. lease conflict); the kind is in `invariant_violation` and
+        // the `X-Invariant-Violation` header.
+        "invariant_violation",
+        // `lock_conflict`: 409 — lock extension refused (task unknown, not
+        // locked, or owned by a different worker).
+        "lock_conflict",
+    ];
+
+    /// 404 — unknown resource id.
+    pub const NOT_FOUND: &str = "not_found";
+    /// 401 — missing or invalid API key.
+    pub const UNAUTHORIZED: &str = "unauthorized";
+    /// 429 — rate limit exceeded.
+    pub const RATE_LIMITED: &str = "rate_limited";
+    /// 400 — generic invalid request.
+    pub const INVALID_REQUEST: &str = "invalid_request";
+    /// 400/422 — invalid JSON request body.
+    pub const INVALID_JSON: &str = "invalid_json";
+    /// 500 — internal server error.
+    pub const INTERNAL: &str = "internal";
+    /// 500 — definition persistence failed at deploy.
+    pub const DEPLOY_FAILED: &str = "deploy_failed";
+    /// 400 — external task id unknown (store rejection).
+    pub const TASK_NOT_FOUND: &str = "task_not_found";
+    /// 400 — external task not in the Locked state.
+    pub const TASK_NOT_LOCKED: &str = "task_not_locked";
+    /// 400 — external task lock expired.
+    pub const LOCK_EXPIRED: &str = "lock_expired";
+    /// 400 — an engine invariant was violated (kind in `invariant_violation`).
+    pub const INVARIANT_VIOLATION: &str = "invariant_violation";
+    /// 409 — lock extension refused.
+    pub const LOCK_CONFLICT: &str = "lock_conflict";
+}
+
+/// A request-body extractor that produces the API's typed error contract
+/// instead of axum's plain-text JSON rejections (E2-4).
+///
+/// Wraps [`Json`]: on success the body is deserialized exactly like
+/// `Json<T>`; on rejection the response is the standard
+/// [`ErrorResponse`] JSON with the stable code `invalid_json` (400 for
+/// syntax/content-type problems, 422 — via axum's semantics — when the
+/// JSON is well-formed but does not match the target type). Use this for
+/// every handler that accepts a JSON request body.
+pub struct ValidatedJson<T>(pub T);
+
+#[async_trait]
+impl<T, S> FromRequest<S> for ValidatedJson<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, Json<ErrorResponse>);
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(ValidatedJson(value)),
+            Err(rejection) => {
+                let status = match &rejection {
+                    JsonRejection::JsonDataError(_) => StatusCode::UNPROCESSABLE_ENTITY,
+                    _ => StatusCode::BAD_REQUEST,
+                };
+                Err((
+                    status,
+                    Json(ErrorResponse::with_code(
+                        rejection.body_text(),
+                        error_codes::INVALID_JSON,
+                    )),
+                ))
+            }
+        }
+    }
+}
+
+// --- Pagination (E2-4) ------------------------------------------------------
+
+/// Default page size for `GET /api/v1/process-instances`.
+const DEFAULT_LIST_LIMIT: u64 = 50;
+/// Maximum accepted page size for the paginated list endpoints.
+const MAX_LIST_LIMIT: u64 = 500;
+
+/// A validated `limit`/`offset` query window.
+#[derive(Debug, Clone, Copy)]
+struct Page {
+    limit: u64,
+    offset: u64,
+}
+
+/// Parse `limit`/`offset` query parameters with the API's error contract.
+///
+/// `limit` must be an integer in `1..=MAX_LIST_LIMIT` and `offset` a
+/// non-negative integer; anything else is 400 `invalid_request`.
+fn parse_page_params(
+    params: &HashMap<String, String>,
+) -> Result<Page, (StatusCode, Json<ErrorResponse>)> {
+    let limit = match params.get("limit") {
+        None => DEFAULT_LIST_LIMIT,
+        Some(raw) => raw.parse::<u64>().map_err(|_| {
+            bad_request(format!(
+                "limit must be a non-negative integer, got {:?}",
+                raw
+            ))
+        })?,
+    };
+    if !(1..=MAX_LIST_LIMIT).contains(&limit) {
+        return Err(bad_request(format!(
+            "limit must be between 1 and {}, got {}",
+            MAX_LIST_LIMIT, limit
+        )));
+    }
+    let offset = match params.get("offset") {
+        None => 0,
+        Some(raw) => raw.parse::<u64>().map_err(|_| {
+            bad_request(format!(
+                "offset must be a non-negative integer, got {:?}",
+                raw
+            ))
+        })?,
+    };
+    Ok(Page { limit, offset })
+}
+
+/// Build a 400 `invalid_request` response tuple.
+fn bad_request(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse::with_code(msg, error_codes::INVALID_REQUEST)),
+    )
+}
+
+// --- Idempotency keys (E2-4) ------------------------------------------------
+
+/// Extract and validate the optional `Idempotency-Key` header (E2-4).
+///
+/// The key must be 1–128 bytes of printable ASCII (`0x20..=0x7E`); an
+/// empty, oversized, or non-printable key is 400 `invalid_request`
+/// (rejected rather than silently ignored, so clients learn their retry
+/// deduplication is not in effect). Absent header → `Ok(None)`.
+fn idempotency_key_from_headers(
+    headers: &HeaderMap,
+) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
+    let Some(value) = headers.get("idempotency-key") else {
+        return Ok(None);
+    };
+    let raw = value
+        .to_str()
+        .map_err(|_| bad_request("Idempotency-Key header must be printable ASCII (1-128 bytes)"))?;
+    let valid_len = (1..=128).contains(&raw.len());
+    let printable = raw.bytes().all(|b| (0x20..=0x7E).contains(&b));
+    if !valid_len || !printable {
+        return Err(bad_request(
+            "Idempotency-Key header must be printable ASCII (1-128 bytes)",
+        ));
+    }
+    Ok(Some(raw.to_string()))
+}
+
+/// Maximum accepted `X-Tenant-Id` length when an `Idempotency-Key` is
+/// supplied (E2-4 review fix).
+///
+/// The `(tenant, key)` pair co-forms the idempotency primary key, so an
+/// unbounded tenant id would let a single request inflate the stored key
+/// row. The bound applies ONLY at this save boundary: `X-Tenant-Id` keeps
+/// its unbounded, pass-through semantics on every other endpoint (see
+/// [`tenant_from_headers`]).
+const MAX_IDEMPOTENCY_TENANT_BYTES: usize = 128;
+
+/// Validate the `X-Tenant-Id` of an idempotent start-instance request:
+/// when an `Idempotency-Key` is supplied, the co-stored tenant id must be
+/// at most [`MAX_IDEMPOTENCY_TENANT_BYTES`] printable ASCII bytes, else
+/// 400 `invalid_request` ("tenant id too long"). An absent tenant id is
+/// fine (idempotency keys work without a tenant scope).
+fn tenant_id_for_idempotency(
+    tenant: Option<String>,
+) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
+    let Some(id) = tenant else {
+        return Ok(None);
+    };
+    if id.len() > MAX_IDEMPOTENCY_TENANT_BYTES || !id.bytes().all(|b| (0x20..=0x7E).contains(&b)) {
+        return Err(bad_request(format!(
+            "tenant id too long: X-Tenant-Id must be at most {} printable ASCII bytes \
+             when an Idempotency-Key is supplied",
+            MAX_IDEMPOTENCY_TENANT_BYTES
+        )));
+    }
+    Ok(Some(id))
 }
 
 use super::replay::ReplaySession;
@@ -104,7 +368,8 @@ pub struct ExtendLockRequest {
 }
 
 /// Build 4xx error response for external task errors.
-/// Maps `ExternalTaskError` variants to appropriate HTTP status codes and safe error messages.
+/// Maps `ExternalTaskError` variants to appropriate HTTP status codes, safe
+/// error messages, and stable codes (E2-4: every rejection is typed).
 fn external_task_error_response(e: bpm_engine_storage::ExternalTaskError) -> Response {
     use bpm_engine_storage::ExternalTaskError;
 
@@ -118,7 +383,7 @@ fn external_task_error_response(e: bpm_engine_storage::ExternalTaskError) -> Res
             let kind_str = inv.kind.to_string();
             let body = ErrorResponse {
                 error: e.to_string(),
-                code: None,
+                code: Some(error_codes::INVARIANT_VIOLATION.to_string()),
                 invariant_violation: Some(kind_str.clone()),
             };
             let mut res = (StatusCode::BAD_REQUEST, Json(body)).into_response();
@@ -127,18 +392,38 @@ fn external_task_error_response(e: bpm_engine_storage::ExternalTaskError) -> Res
             }
             res
         }
-        ExternalTaskError::TaskNotFound { .. }
-        | ExternalTaskError::TaskNotLocked { .. }
-        | ExternalTaskError::LockExpired { .. } => (
+        ExternalTaskError::TaskNotFound { .. } => (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(e.to_string())),
+            Json(ErrorResponse::with_code(
+                e.to_string(),
+                error_codes::TASK_NOT_FOUND,
+            )),
+        )
+            .into_response(),
+        ExternalTaskError::TaskNotLocked { .. } => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_code(
+                e.to_string(),
+                error_codes::TASK_NOT_LOCKED,
+            )),
+        )
+            .into_response(),
+        ExternalTaskError::LockExpired { .. } => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::with_code(
+                e.to_string(),
+                error_codes::LOCK_EXPIRED,
+            )),
         )
             .into_response(),
         ExternalTaskError::Internal(msg) => {
             tracing::error!(error = %msg, "external task internal error");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("internal server error".to_string())),
+                Json(ErrorResponse::with_code(
+                    "internal server error",
+                    error_codes::INTERNAL,
+                )),
             )
                 .into_response()
         }
@@ -150,7 +435,10 @@ fn internal_error(e: anyhow::Error) -> Response {
     tracing::error!(error = %e, "internal server error");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse::new("internal server error".to_string())),
+        Json(ErrorResponse::with_code(
+            "internal server error",
+            error_codes::INTERNAL,
+        )),
     )
         .into_response()
 }
@@ -160,7 +448,10 @@ fn internal_error_tuple(e: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
     tracing::error!(error = %e, "internal server error");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse::new("internal server error".to_string())),
+        Json(ErrorResponse::with_code(
+            "internal server error",
+            error_codes::INTERNAL,
+        )),
     )
 }
 
@@ -300,7 +591,10 @@ pub struct InstanceStateResponse {
 
 #[derive(Serialize)]
 pub struct InstanceListResponse {
+    /// Page of instances visible to the tenant.
     pub instances: Vec<InstanceStateResponse>,
+    /// Page metadata (E2-4, additive field: `limit`, `offset`, `returned`).
+    pub pagination: PaginationView,
 }
 
 #[derive(Deserialize)]
@@ -334,15 +628,6 @@ pub struct ErrorResponse {
 }
 
 impl ErrorResponse {
-    /// Build error response without invariant violation (for non-invariant 4xx/5xx).
-    pub fn new(msg: impl Into<String>) -> Self {
-        Self {
-            error: msg.into(),
-            code: None,
-            invariant_violation: None,
-        }
-    }
-
     /// Build error response carrying a stable machine-readable error code.
     pub fn with_code(msg: impl Into<String>, code: impl Into<String>) -> Self {
         Self {
@@ -351,6 +636,17 @@ impl ErrorResponse {
             invariant_violation: None,
         }
     }
+
+    /// 404-shaped error with the stable `not_found` code (E2-4).
+    pub fn not_found(msg: impl Into<String>) -> Self {
+        Self::with_code(msg, error_codes::NOT_FOUND)
+    }
+
+    /// 500-shaped error with the stable `internal` code; details are only
+    /// logged server-side (E2-4).
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self::with_code(msg, error_codes::INTERNAL)
+    }
 }
 
 #[derive(Serialize)]
@@ -358,15 +654,35 @@ pub struct DeployResponse {
     pub process_definition_id: String,
 }
 
-/// Deploy failure: either parse error (single message) or compile errors (list).
+/// Failure shape of `POST /api/v1/process-definitions/deploy`.
+///
+/// Variants (untagged, additive):
+/// - `Parse` (400): the BPMN XML could not be parsed (`{"error": "..."}`).
+/// - `Compile` (400): semantic compile errors (`{"errors": [...]}`).
+/// - `Persist` (500, E2-4): the definition compiled but could NOT be
+///   persisted. Previously this reused the `Parse` shape, mislabeling a
+///   server-side failure as a client-side parse error. The body now matches
+///   the standard [`ErrorResponse`] shape with the stable code
+///   `deploy_failed`.
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum DeployErrorResponse {
+    /// BPMN XML parse failure (single message, 400).
     Parse {
+        /// Parse error message.
         error: String,
     },
+    /// Semantic compile errors (400).
     Compile {
+        /// Compile errors with stable codes.
         errors: Vec<bpm_engine_bpmn::CompilerError>,
+    },
+    /// Persistence failure (500, `code: "deploy_failed"`).
+    Persist {
+        /// Server-side failure message (safe: no internal details).
+        error: String,
+        /// Stable error code, always `deploy_failed`.
+        code: String,
     },
 }
 
@@ -460,8 +776,9 @@ fn encrypt_variables(
     let key = get_encryption_key()?.ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(
-                "BPM_VARIABLE_ENCRYPTION_KEY not configured; cannot encrypt variables".to_string(),
+            Json(ErrorResponse::with_code(
+                "BPM_VARIABLE_ENCRYPTION_KEY not configured; cannot encrypt variables",
+                "encryption_key_not_configured",
             )),
         )
     })?;
@@ -471,7 +788,7 @@ fn encrypt_variables(
             let encrypted = encryptor.encrypt(&key, value).map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new(format!(
+                    Json(ErrorResponse::internal(format!(
                         "encryption failed for variable '{}': {}",
                         name, e
                     ))),
@@ -730,13 +1047,88 @@ fn validate_sensitive_names(
 }
 
 /// POST /api/v1/process-instances — start a process instance.
+///
+/// # Idempotency (E2-4)
+///
+/// When the request carries an `Idempotency-Key` header (1–128 printable
+/// ASCII bytes):
+///
+/// - a key that has already been recorded for the same tenant scope
+///   returns **200** (not 201) with the SAME `{instance_id, status}`
+///   response shape for the originally created instance — an idempotent
+///   replay, no second instance is created;
+/// - an unknown key creates the instance (as today, 201) and records the
+///   key → instance_id mapping afterwards;
+/// - the mapping is tenant-scoped (`X-Tenant-Id`), so the same key under
+///   different tenants addresses different instances.
+///
+/// Atomicity boundary (honest, single-service): the check-then-create
+/// sequence is not cross-process atomic. The engine runs as one service
+/// per database (like the migration runner), so concurrent identical
+/// requests can still race; a key-recording failure AFTER the instance was
+/// created is reported as 500 `internal` with an explicit message — the
+/// retry may then create a second instance. Cross-process uniqueness
+/// would require a unique-constraint insert path, out of scope for v1.
 pub async fn start_instance(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(body): Json<StartInstanceRequest>,
+    ValidatedJson(body): ValidatedJson<StartInstanceRequest>,
 ) -> Result<(StatusCode, Json<StartInstanceResponse>), (StatusCode, Json<ErrorResponse>)> {
     let tenant_id = tenant_from_headers(&headers);
-    let mut ctx = build_ctx(state.as_ref(), tenant_id);
+    let idempotency_key = idempotency_key_from_headers(&headers)?;
+    // E2-4 review fix: bound the tenant id at the idempotency SAVE
+    // boundary — only when a key is supplied (other endpoints, and
+    // key-less starts, keep unbounded tenant semantics).
+    let tenant_id = if idempotency_key.is_some() {
+        tenant_id_for_idempotency(tenant_id)?
+    } else {
+        tenant_id
+    };
+
+    // Idempotent replay: a known key returns the recorded instance.
+    if let Some(key) = &idempotency_key {
+        match state
+            .storage
+            .process_store
+            .find_idempotency_key(key, tenant_id.as_deref())
+            .await
+        {
+            Ok(Some(instance_id)) => {
+                let inst = state
+                    .storage
+                    .process_store
+                    .load(&instance_id)
+                    .await
+                    .map_err(internal_error_tuple)?;
+                let Some(inst) = inst else {
+                    warn!(
+                        idempotency_key = %key,
+                        instance_id = %instance_id,
+                        "idempotency key points at a missing instance"
+                    );
+                    return Err(internal_error_tuple(anyhow::anyhow!(
+                        "recorded idempotency key points at an instance that no longer exists"
+                    )));
+                };
+                info!(
+                    idempotency_key = %key,
+                    instance_id = %instance_id,
+                    "idempotent start replayed"
+                );
+                return Ok((
+                    StatusCode::OK,
+                    Json(StartInstanceResponse {
+                        instance_id,
+                        status: status_str(inst.state).to_string(),
+                    }),
+                ));
+            }
+            Ok(None) => {} // unknown key → create below
+            Err(e) => return Err(internal_error_tuple(e)),
+        }
+    }
+
+    let mut ctx = build_ctx(state.as_ref(), tenant_id.clone());
     let instance_id = uuid::Uuid::new_v4().to_string();
     let mut variables = body.variables;
     // E2-3 boundary enforcement, in order:
@@ -762,9 +1154,30 @@ pub async fn start_instance(
         initial_variables,
     });
     state.engine.run_async(ev, &mut ctx).await;
+    // Record the idempotency key AFTER creation: on failure the instance
+    // exists but the mapping is missing, so the response is a 500 whose
+    // message names the situation (see the handler docs).
+    if let Some(key) = &idempotency_key {
+        if let Err(e) = state
+            .storage
+            .process_store
+            .save_idempotency_key(key, tenant_id.as_deref(), &instance_id)
+            .await
+        {
+            tracing::error!(error = %e, "failed to record idempotency key");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(
+                    "instance was started but its idempotency key could not be recorded; \
+                     retrying with the same key may create a second instance",
+                )),
+            ));
+        }
+    }
     info!(
         instance_id = %instance_id,
         definition_id = %body.process_def_id,
+        idempotency_key = idempotency_key.as_deref(),
         "process instance started"
     );
     Ok((
@@ -776,22 +1189,55 @@ pub async fn start_instance(
     ))
 }
 
-/// GET /api/v1/process-instances — list process instances visible to the tenant.
+/// Pagination metadata returned by `GET /api/v1/process-instances` (E2-4,
+/// additive response field).
+#[derive(Serialize)]
+pub struct PaginationView {
+    /// Effective page size (defaults to 50, capped at 500).
+    pub limit: u64,
+    /// Zero-based index of the first returned instance.
+    pub offset: u64,
+    /// Number of instances in this response (`0` when offset is beyond the
+    /// end).
+    pub returned: u64,
+}
+
+/// GET /api/v1/process-instances — list process instances visible to the
+/// tenant, one page at a time (E2-4).
+///
+/// Query parameters: `limit` (default 50, max 500) and `offset` (default
+/// 0), validated as 400 `invalid_request` when malformed or out of range.
+/// Instances are ordered by instance id (the store's deterministic
+/// `list_page` order). An offset beyond the end returns an empty page.
+/// The response gains the additive `pagination` object; the `instances`
+/// array keeps its existing shape.
 pub async fn list_process_instances(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<InstanceListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let page = parse_page_params(&params)?;
     let tenant_id = tenant_from_headers(&headers);
+    // Store-level pagination (the hot path): the window is pushed into the
+    // store (SQL LIMIT/OFFSET in postgres mode).
     let instance_ids = state
         .storage
         .process_store
-        .list_all(tenant_id.as_deref())
+        .list_page(tenant_id.as_deref(), page.offset, page.limit)
         .await
         .map_err(internal_error_tuple)?;
     let mut responses = Vec::with_capacity(instance_ids.len());
     for id in instance_ids {
-        // Instance may have been removed between list and load; skip it.
-        let Ok(Some(instance)) = state.storage.process_store.load(&id).await else {
+        // A load failure is a 500 (E2-4 review fix: load errors are never
+        // silently skipped); an instance that vanished between listing and
+        // loading (Ok(None), e.g. deleted) is skipped as before.
+        let inst = state
+            .storage
+            .process_store
+            .load(&id)
+            .await
+            .map_err(internal_error_tuple)?;
+        let Some(instance) = inst else {
             continue;
         };
         let mut variables = instance.variables.clone();
@@ -807,6 +1253,11 @@ pub async fn list_process_instances(
         });
     }
     Ok(Json(InstanceListResponse {
+        pagination: PaginationView {
+            limit: page.limit,
+            offset: page.offset,
+            returned: responses.len() as u64,
+        },
         instances: responses,
     }))
 }
@@ -820,7 +1271,12 @@ pub async fn get_instance(
     let tenant_id = tenant_from_headers(&headers);
     let _ctx = build_ctx(state.as_ref(), tenant_id);
     let process_store = Arc::clone(&state.storage.process_store);
-    let inst = process_store.load(&id).await.ok().flatten();
+    // E2-4 review fix: a storage ERROR is 500 `internal`, only a missing
+    // instance is 404 `not_found` (previously both collapsed into 404).
+    let inst = process_store
+        .load(&id)
+        .await
+        .map_err(internal_error_tuple)?;
     match inst {
         Some(inst) => {
             let mut vars = inst.variables.clone();
@@ -836,7 +1292,7 @@ pub async fn get_instance(
         }
         None => Err((
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new(format!(
+            Json(ErrorResponse::not_found(format!(
                 "process instance not found: {}",
                 id
             ))),
@@ -926,13 +1382,21 @@ pub async fn get_instance_trace(
     Path(id): Path<String>,
 ) -> Result<Json<TraceResponse>, (StatusCode, Json<ErrorResponse>)> {
     let process_store = Arc::clone(&state.storage.process_store);
-    let inst = process_store.load(&id).await.ok().flatten().ok_or((
-        StatusCode::NOT_FOUND,
-        Json(ErrorResponse::new(format!(
-            "process instance not found: {}",
-            id
-        ))),
-    ))?;
+    // E2-4 review fix: storage ERROR → 500 internal; missing instance →
+    // 404 not_found.
+    let inst = process_store
+        .load(&id)
+        .await
+        .map_err(internal_error_tuple)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "process instance not found: {}",
+                    id
+                ))),
+            )
+        })?;
     let mut vars = inst.variables.clone();
     let _ = decrypt_instance_variables(&mut vars);
     let instance_response = InstanceStateResponse {
@@ -1073,25 +1537,34 @@ pub async fn get_process_definition(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<ProcessDefinitionView>, (StatusCode, Json<ErrorResponse>)> {
+    // E2-4 review fix: storage ERROR → 500 internal; only a missing
+    // definition is 404 not_found.
     let def = state
         .storage
         .def_store
         .load(&id)
         .await
-        .ok()
-        .flatten()
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new(format!(
-                "process definition not found: {}",
-                id
-            ))),
-        ))?;
+        .map_err(internal_error_tuple)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "process definition not found: {}",
+                    id
+                ))),
+            )
+        })?;
     Ok(Json(process_definition_to_view(&def)))
 }
 
 /// GET /api/v1/process-instances/:id/history — execution history for Trace UI and auditing.
 /// Returns events in causal order with sequence and category (instance | token | external).
+///
+/// Query parameters: `token_id`, `event_type` (filters, as before) and the
+/// optional `limit` (E2-4): a positive integer ≤ 500 that truncates the
+/// returned event list after sorting; absent ⇒ the full history (the
+/// pre-existing behavior). Malformed or out-of-range values are 400
+/// `invalid_request`.
 pub async fn get_instance_history(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1099,6 +1572,21 @@ pub async fn get_instance_history(
 ) -> Result<Json<HistoryResponse>, (StatusCode, Json<ErrorResponse>)> {
     let token_id = params.get("token_id").map(String::as_str);
     let event_type = params.get("event_type").map(String::as_str);
+    let limit = match params.get("limit") {
+        None => None,
+        Some(raw) => {
+            let parsed = raw.parse::<u64>().map_err(|_| {
+                bad_request(format!("limit must be a positive integer, got {:?}", raw))
+            })?;
+            if !(1..=MAX_LIST_LIMIT).contains(&parsed) {
+                return Err(bad_request(format!(
+                    "limit must be between 1 and {}, got {}",
+                    MAX_LIST_LIMIT, parsed
+                )));
+            }
+            Some(parsed)
+        }
+    };
     let mut events = HistoryRepo::list_by_instance(
         state.storage.history_repo.as_ref(),
         &id,
@@ -1112,6 +1600,11 @@ pub async fn get_instance_history(
             .cmp(&b.occurred_at)
             .then_with(|| a.id.cmp(&b.id))
     });
+    // Route-level window over the sorted event list (documented; the store
+    // has no paged history API).
+    if let Some(limit) = limit {
+        events.truncate(limit as usize);
+    }
     let events: Vec<HistoryEventView> = events
         .into_iter()
         .enumerate()
@@ -1131,18 +1624,33 @@ pub async fn get_instance_history(
 }
 
 /// GET /api/v1/tasks?type=user|external
+///
+/// Optional route-level pagination (E2-4): `limit`/`offset` query
+/// parameters (validated like the instances endpoint: `limit` 1..=500,
+/// `offset` ≥ 0, else 400 `invalid_request`) slice the assembled task list
+/// IN MEMORY after the full scan. Absent parameters keep the previous
+/// behavior of returning every task. The store is not extended for this
+/// endpoint — instance listing is the hot path and is paginated at the
+/// store level instead (see [`list_process_instances`]).
 pub async fn list_tasks(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
-) -> Json<Vec<TaskListItem>> {
+) -> Result<Json<Vec<TaskListItem>>, (StatusCode, Json<ErrorResponse>)> {
+    // Route-level pagination: absent parameters ⇒ no windowing (backward
+    // compatible). When present, validation matches the instances list.
+    let page = if params.contains_key("limit") || params.contains_key("offset") {
+        Some(parse_page_params(&params)?)
+    } else {
+        None
+    };
     let tenant_id = tenant_from_headers(&headers);
     let process_store = Arc::clone(&state.storage.process_store);
     let def_store = Arc::clone(&state.storage.def_store);
     let running_ids = process_store
         .list_running(tenant_id.as_deref())
         .await
-        .unwrap_or_default();
+        .map_err(internal_error_tuple)?;
     let type_filter = params.get("type").map(String::as_str);
     let mut out = Vec::new();
     for instance_id in running_ids {
@@ -1178,7 +1686,12 @@ pub async fn list_tasks(
             });
         }
     }
-    Json(out)
+    if let Some(page) = page {
+        let offset = (page.offset as usize).min(out.len());
+        out.drain(..offset);
+        out.truncate(page.limit as usize);
+    }
+    Ok(Json(out))
 }
 
 fn parse_task_id(task_id: &str) -> Option<(String, String)> {
@@ -1206,38 +1719,45 @@ pub async fn get_task_form(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> Result<Json<FormSchemaResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let (instance_id, node_id) = parse_task_id(&task_id).ok_or((
-        StatusCode::BAD_REQUEST,
-        Json(ErrorResponse::new(format!("invalid task_id: {}", task_id))),
-    ))?;
+    let (instance_id, node_id) = parse_task_id(&task_id)
+        .ok_or_else(|| bad_request(format!("invalid task_id: {}", task_id)))?;
     let process_store = Arc::clone(&state.storage.process_store);
     let def_store = Arc::clone(&state.storage.def_store);
     let instance = process_store
         .load(&instance_id)
         .await
         .map_err(internal_error_tuple)?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new(format!(
-                "process instance not found: {}",
-                instance_id
-            ))),
-        ))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "process instance not found: {}",
+                    instance_id
+                ))),
+            )
+        })?;
     let def = def_store
         .load(&instance.process_def_id)
         .await
         .map_err(internal_error_tuple)?
-        .ok_or((
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "process definition not found: {}",
+                    instance.process_def_id
+                ))),
+            )
+        })?;
+    let node = def.nodes.get(node_id.as_str()).ok_or_else(|| {
+        (
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new(format!(
-                "process definition not found: {}",
-                instance.process_def_id
+            Json(ErrorResponse::not_found(format!(
+                "node not found: {}",
+                node_id
             ))),
-        ))?;
-    let node = def.nodes.get(node_id.as_str()).ok_or((
-        StatusCode::NOT_FOUND,
-        Json(ErrorResponse::new(format!("node not found: {}", node_id))),
-    ))?;
+        )
+    })?;
     match &node.node_type {
         NodeType::UserTask {
             form_key,
@@ -1248,13 +1768,7 @@ pub async fn get_task_form(
             form_key: form_key.clone(),
             fields: form_fields.clone(),
         })),
-        _ => Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(format!(
-                "node {} is not a user task",
-                node_id
-            ))),
-        )),
+        _ => Err(bad_request(format!("node {} is not a user task", node_id))),
     }
 }
 
@@ -1263,12 +1777,10 @@ pub async fn complete_task_by_id(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(task_id): Path<String>,
-    Json(body): Json<CompleteTaskBodyRequest>,
+    ValidatedJson(body): ValidatedJson<CompleteTaskBodyRequest>,
 ) -> Result<Json<CompleteTaskResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let (instance_id, node_id) = parse_task_id(&task_id).ok_or((
-        StatusCode::BAD_REQUEST,
-        Json(ErrorResponse::new(format!("invalid task_id: {}", task_id))),
-    ))?;
+    let (instance_id, node_id) = parse_task_id(&task_id)
+        .ok_or_else(|| bad_request(format!("invalid task_id: {}", task_id)))?;
 
     // E2-3: enforce the variable value contract at this write boundary
     // (valid envelopes, valid artifact URIs, size cap) before the event
@@ -1297,10 +1809,10 @@ pub async fn complete_task_by_id(
                     if !missing.is_empty() {
                         return Err((
                             StatusCode::BAD_REQUEST,
-                            Json(ErrorResponse::new(format!(
-                                "missing required fields: {}",
-                                missing.join(", ")
-                            ))),
+                            Json(ErrorResponse::with_code(
+                                format!("missing required fields: {}", missing.join(", ")),
+                                "missing_required_fields",
+                            )),
                         ));
                     }
                 }
@@ -1330,7 +1842,7 @@ pub async fn complete_task_by_id(
 /// POST /api/v1/external-tasks/fetch-and-lock
 pub async fn external_task_fetch_and_lock(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<FetchAndLockRequest>,
+    ValidatedJson(body): ValidatedJson<FetchAndLockRequest>,
 ) -> Result<Json<Vec<ExternalTaskResponse>>, (StatusCode, Json<ErrorResponse>)> {
     let external_task_store = Arc::clone(&state.storage.external_task_store);
     let _ = external_task_store
@@ -1385,7 +1897,7 @@ pub async fn external_task_complete(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(task_id): Path<String>,
-    Json(body): Json<ExternalTaskCompleteRequest>,
+    ValidatedJson(body): ValidatedJson<ExternalTaskCompleteRequest>,
 ) -> Result<Json<CompleteTaskResponse>, Response> {
     // E3-1: the envelope may arrive through EITHER channel:
     // - the typed `envelope` field (validated and merged by the server), or
@@ -1467,7 +1979,7 @@ pub async fn external_task_complete(
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new(format!(
+                Json(ErrorResponse::not_found(format!(
                     "task not found after complete: {}",
                     task_id
                 ))),
@@ -1498,7 +2010,7 @@ pub async fn external_task_complete(
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new(format!(
+                Json(ErrorResponse::not_found(format!(
                     "instance not found: {}",
                     task.process_instance_id
                 ))),
@@ -1510,14 +2022,7 @@ pub async fn external_task_complete(
         .iter()
         .find(|t| t.id == task.token_id)
         .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(format!(
-                    "token not found in instance: {}",
-                    task.token_id
-                ))),
-            )
-                .into_response()
+            bad_request(format!("token not found in instance: {}", task.token_id)).into_response()
         })?;
     let node_id = token.node_id.clone();
     let ev = EngineEvent::ExternalTaskCompleted(payloads::ExternalTaskCompleted {
@@ -1536,7 +2041,7 @@ pub async fn external_task_complete(
 pub async fn external_task_extend_lock(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
-    Json(body): Json<ExtendLockRequest>,
+    ValidatedJson(body): ValidatedJson<ExtendLockRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let external_task_store = Arc::clone(&state.storage.external_task_store);
     let extension = Duration::from_millis(body.extension_ms);
@@ -1545,10 +2050,14 @@ pub async fn external_task_extend_lock(
         .await
         .map_err(internal_error_tuple)?;
     if !ok {
+        // 409 with the stable `lock_conflict` code: the task is unknown,
+        // not locked, or owned by a different worker (the store reports a
+        // single boolean, so the causes share one code).
         return Err((
             StatusCode::CONFLICT,
-            Json(ErrorResponse::new(
-                "task not found, not locked, or owned by different worker".to_string(),
+            Json(ErrorResponse::with_code(
+                "task not found, not locked, or owned by different worker",
+                error_codes::LOCK_CONFLICT,
             )),
         ));
     }
@@ -1559,7 +2068,7 @@ pub async fn external_task_extend_lock(
 pub async fn external_task_fail(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
-    Json(body): Json<ExternalTaskFailRequest>,
+    ValidatedJson(body): ValidatedJson<ExternalTaskFailRequest>,
 ) -> Result<Json<CompleteTaskResponse>, Response> {
     // E3-1: optional retry category, validated up front. v1 semantics: the
     // category is RECORDED for observability (error message prefix,
@@ -1643,7 +2152,7 @@ pub async fn external_task_fail(
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new(format!(
+                Json(ErrorResponse::not_found(format!(
                     "task not found after fail: {}",
                     task_id
                 ))),
@@ -1712,13 +2221,15 @@ pub async fn external_task_fail(
 
         let tenant_id = None::<String>;
         let mut ctx = build_ctx(state.as_ref(), tenant_id);
+        // E2-4 review fix: a storage ERROR is 500 `internal` (previously
+        // swallowed by `.ok()`); an instance that is merely missing after
+        // the fail (Ok(None)) keeps the empty-node_id fallback below.
         let inst = state
             .storage
             .process_store
             .load(&task.process_instance_id)
             .await
-            .ok()
-            .flatten();
+            .map_err(internal_error)?;
         let node_id = inst
             .as_ref()
             .and_then(|i| {
@@ -1822,20 +2333,23 @@ pub async fn create_replay(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<ReplayCreateResponse>), (StatusCode, Json<ErrorResponse>)> {
+    // E2-4 review fix: storage ERROR → 500 internal; only a missing
+    // instance is 404 not_found.
     let _inst = state
         .storage
         .process_store
         .load(&id)
         .await
-        .ok()
-        .flatten()
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new(format!(
-                "process instance not found: {}",
-                id
-            ))),
-        ))?;
+        .map_err(internal_error_tuple)?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "process instance not found: {}",
+                    id
+                ))),
+            )
+        })?;
     let events =
         HistoryRepo::list_by_instance(state.storage.history_repo.as_ref(), &id, None, None)
             .await
@@ -1848,7 +2362,7 @@ pub async fn create_replay(
         let mut guard = state.replay_sessions.write().map_err(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("internal lock error".to_string())),
+                Json(ErrorResponse::internal("internal lock error")),
             )
         })?;
         guard.insert(session_id.clone(), session);
@@ -1896,19 +2410,20 @@ pub async fn replay_step(
         let guard = state.replay_sessions.read().map_err(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("internal lock error".to_string())),
+                Json(ErrorResponse::internal("internal lock error")),
             )
         })?;
-        let session = guard.get(&session_id).ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new(
-                "replay session not found or expired".to_string(),
-            )),
-        ))?;
-        let ev = session.current_event().ok_or((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new("no more events to step".to_string())),
-        ))?;
+        let session = guard.get(&session_id).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(
+                    "replay session not found or expired",
+                )),
+            )
+        })?;
+        let ev = session
+            .current_event()
+            .ok_or_else(|| bad_request("no more events to step"))?;
         (ev.clone(), session.snapshot.clone())
     };
     let new_snapshot = replay_apply_one(
@@ -1919,10 +2434,12 @@ pub async fn replay_step(
         &ev_clone,
     )
     .await
-    .ok_or((
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse::new("replay apply failed".to_string())),
-    ))?;
+    .ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal("replay apply failed")),
+        )
+    })?;
     let token_id = ev_clone
         .payload
         .get("token_id")
@@ -1943,15 +2460,17 @@ pub async fn replay_step(
         let mut guard = state.replay_sessions.write().map_err(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("internal lock error".to_string())),
+                Json(ErrorResponse::internal("internal lock error")),
             )
         })?;
-        let session = guard.get_mut(&session_id).ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new(
-                "replay session not found or expired".to_string(),
-            )),
-        ))?;
+        let session = guard.get_mut(&session_id).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(
+                    "replay session not found or expired",
+                )),
+            )
+        })?;
         session.touch();
         session.snapshot = Some(new_snapshot.clone());
         session.cursor += 1;
@@ -1969,21 +2488,23 @@ pub async fn replay_step(
 pub async fn replay_seek(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
-    Json(body): Json<ReplaySeekRequest>,
+    ValidatedJson(body): ValidatedJson<ReplaySeekRequest>,
 ) -> Result<Json<ReplaySeekResponse>, (StatusCode, Json<ErrorResponse>)> {
     let events_to_apply: Vec<bpm_engine_storage::HistoryEvent> = {
         let guard = state.replay_sessions.read().map_err(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("internal lock error".to_string())),
+                Json(ErrorResponse::internal("internal lock error")),
             )
         })?;
-        let session = guard.get(&session_id).ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new(
-                "replay session not found or expired".to_string(),
-            )),
-        ))?;
+        let session = guard.get(&session_id).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(
+                    "replay session not found or expired",
+                )),
+            )
+        })?;
         let cursor = body.cursor.min(session.events.len());
         session.events[..cursor].to_vec()
     };
@@ -2026,15 +2547,17 @@ pub async fn get_replay_snapshot(
     let guard = state.replay_sessions.read().map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("internal lock error".to_string())),
+            Json(ErrorResponse::internal("internal lock error")),
         )
     })?;
-    let session = guard.get(&session_id).ok_or((
-        StatusCode::NOT_FOUND,
-        Json(ErrorResponse::new(
-            "replay session not found or expired".to_string(),
-        )),
-    ))?;
+    let session = guard.get(&session_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found(
+                "replay session not found or expired",
+            )),
+        )
+    })?;
     let (completed, tokens) = match &session.snapshot {
         Some(i) => (
             i.state == InstanceState::Completed,
@@ -2065,7 +2588,7 @@ pub async fn delete_replay_session(
     let mut guard = state.replay_sessions.write().map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::new("internal lock error".to_string())),
+            Json(ErrorResponse::internal("internal lock error")),
         )
     })?;
     guard.remove(&session_id);
@@ -2097,10 +2620,14 @@ pub async fn deploy_bpmn(
     let process_definition_id = def.id.to_string();
     if let Err(e) = state.storage.deployer.deploy(&def, &body).await {
         tracing::error!(error = %e, "process definition deploy failed");
+        // E2-4 review fix: a persistence failure is a DISTINCT 500
+        // response with code `deploy_failed` — no longer the Parse (400)
+        // shape, which mislabeled server-side failures as client errors.
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(DeployErrorResponse::Parse {
-                error: format!("failed to persist process definition: {}", e),
+            Json(DeployErrorResponse::Persist {
+                error: "failed to persist process definition".to_string(),
+                code: error_codes::DEPLOY_FAILED.to_string(),
             }),
         ));
     }
@@ -2417,13 +2944,15 @@ pub async fn get_active_definition(
         .get_active(&key)
         .await
         .map_err(internal_error_tuple)?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new(format!(
-                "no active version found for key: {}",
-                key
-            ))),
-        ))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "no active version found for key: {}",
+                    key
+                ))),
+            )
+        })?;
     Ok(Json(DefinitionVersionView {
         id: record.id,
         key: record.key,
@@ -2514,17 +3043,35 @@ pub async fn readiness(
 // ---------------------------------------------------------------------------
 
 /// GET /api/v1/dead-letters — list dead letter entries.
+///
+/// Optional route-level pagination (E2-4): `limit`/`offset` query
+/// parameters (validated like the instances endpoint: `limit` 1..=500,
+/// `offset` ≥ 0, else 400 `invalid_request`) slice the fetched entries IN
+/// MEMORY. Absent parameters keep the previous behavior. The store is not
+/// extended: the fetch window stays bounded by the store's listing cap,
+/// which the memory and Postgres adapters enforce.
 async fn list_dead_letters(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let page = if params.contains_key("limit") || params.contains_key("offset") {
+        Some(parse_page_params(&params)?)
+    } else {
+        None
+    };
     let tenant_id = tenant_from_headers(&headers);
-    let entries = state
+    let mut entries = state
         .storage
         .dead_letter_store
         .list(tenant_id.as_deref(), 100)
         .await
         .map_err(internal_error_tuple)?;
+    if let Some(page) = page {
+        let offset = (page.offset as usize).min(entries.len());
+        entries.drain(..offset);
+        entries.truncate(page.limit as usize);
+    }
     Ok(Json(serde_json::json!({ "entries": entries })))
 }
 
@@ -2542,7 +3089,7 @@ async fn get_dead_letter(
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("dead letter not found".to_string())),
+                Json(ErrorResponse::not_found("dead letter not found")),
             )
         })?;
     Ok(Json(serde_json::json!({ "entry": entry })))
@@ -2562,7 +3109,7 @@ async fn requeue_dead_letter(
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
-                Json(ErrorResponse::new("dead letter not found".to_string())),
+                Json(ErrorResponse::not_found("dead letter not found")),
             )
         })?;
     Ok(Json(
@@ -2599,89 +3146,340 @@ async fn invariant_check(
         .map_err(internal_error_tuple)
 }
 
+// --- Route registration registry (E2-4 review fix) ---------------------------
+//
+// The OpenAPI route-consistency contract must compare the spec against
+// the routes the router ACTUALLY registers — not a hand-maintained table
+// that can drift from the real `.route(...)` calls. Every registration
+// therefore goes through the [`root_route!`]/[`api_route!`] macros
+// below, which record `(HTTP method, full wire path)` into a thread-local
+// registry as a side effect of building the router.
+// [`registered_routes`] derives the table by constructing the router once
+// (cheap: no state value, no I/O, handlers never invoked).
+
+thread_local! {
+    /// Routes registered by the most recent router build, in
+    /// registration order: `(HTTP method, full wire path)`.
+    static REGISTERED_ROUTES: std::cell::RefCell<Vec<(&'static str, &'static str)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Record a route registration (called by the route macros).
+fn track_route(method: &'static str, path: &'static str) {
+    REGISTERED_ROUTES.with(|cell| cell.borrow_mut().push((method, path)));
+}
+
+/// Start a fresh registration; the registry always describes exactly one
+/// full router build.
+fn reset_route_registry() {
+    REGISTERED_ROUTES.with(|cell| cell.borrow_mut().clear());
+}
+
+/// Build a single-method [`MethodRouter`] — the one place HTTP method
+/// names become axum method routers. An unknown method panics loudly; it
+/// can only come from a bug in the route macros below.
+fn method_router<S, H, T>(method: &'static str, handler: H) -> MethodRouter<S>
+where
+    H: axum::handler::Handler<T, S>,
+    T: 'static,
+    S: Clone + Send + Sync + 'static,
+{
+    match method {
+        "GET" => axum::routing::get(handler),
+        "POST" => axum::routing::post(handler),
+        "PUT" => axum::routing::put(handler),
+        "DELETE" => axum::routing::delete(handler),
+        other => panic!("unsupported HTTP method in route registration: {other}"),
+    }
+}
+
+/// Register a route on the top-level router and record
+/// `(METHOD, path)` in the route registry. `$path` is the full wire path.
+macro_rules! root_route {
+    ($router:expr, $method:ident, $path:literal, $handler:expr) => {{
+        track_route(stringify!($method), $path);
+        $router.route($path, method_router(stringify!($method), $handler))
+    }};
+}
+
+/// Register a route inside the `/api/v1` nest and record its FULL wire
+/// path (`/api/v1` + `$path`) in the route registry. The path literal is
+/// used exactly once, so the registry cannot drift from the actual
+/// registration.
+macro_rules! api_route {
+    // One method on the path.
+    ($router:expr, $method:ident, $path:literal, $handler:expr) => {{
+        track_route(stringify!($method), concat!("/api/v1", $path));
+        $router.route($path, method_router(stringify!($method), $handler))
+    }};
+    // Two methods on the same path (e.g. GET + POST /process-instances).
+    ($router:expr, $method1:ident, $method2:ident, $path:literal, $handler1:expr, $handler2:expr) => {{
+        track_route(stringify!($method1), concat!("/api/v1", $path));
+        track_route(stringify!($method2), concat!("/api/v1", $path));
+        $router.route(
+            $path,
+            method_router(stringify!($method1), $handler1)
+                .merge(method_router(stringify!($method2), $handler2)),
+        )
+    }};
+}
+
+/// Every `(HTTP method, full wire path)` the current build of [`router`]
+/// registers — DERIVED at registration time (the route macros record into
+/// the registry while the router is built), not hand-maintained.
+///
+/// This is the single source of truth the OpenAPI consistency suite
+/// (`crates/server/rest/tests/openapi_contract.rs`) compares against the
+/// paths/operations of `docs/openapi.yaml` in BOTH directions:
+///
+/// - a route cannot be registered without spec coverage, and
+/// - the spec cannot document a route that does not exist.
+///
+/// Construction needs no state value and performs no I/O: the handlers
+/// are generic over the state type and are never invoked, so the router
+/// is simply built and dropped. `GET /metrics` is recorded only under the
+/// `observability` build feature and is therefore not part of the default
+/// wire contract (documented in `docs/openapi.yaml`).
+pub fn registered_routes() -> Vec<(&'static str, &'static str)> {
+    let rate_limiter = std::sync::Arc::new(tokio::sync::Mutex::new(
+        middleware::RateLimiterState::new(0, 60),
+    ));
+    let _probe: Router<Arc<AppState>> = base_router().nest("/api/v1", api_v1_router(rate_limiter));
+    REGISTERED_ROUTES.with(|cell| cell.borrow().clone())
+}
+
+/// Top-level routes (outside the `/api/v1` nest). Also resets the route
+/// registry: each build starts from a clean slate, so the registry always
+/// mirrors the most recent [`router`] (or [`registered_routes`]) build.
+fn base_router() -> Router<Arc<AppState>> {
+    reset_route_registry();
+    let router = Router::new();
+    let router = root_route!(router, GET, "/health", health);
+    let router = root_route!(router, GET, "/ready", readiness);
+
+    // Add /metrics endpoint when observability feature is enabled
+    #[cfg(feature = "observability")]
+    let router = root_route!(router, GET, "/metrics", super::metrics::metrics_handler);
+
+    router
+}
+
+/// The versioned `/api/v1` routes, with auth and rate limiting applied
+/// exactly as before (same layers, same order — the layers wrap the
+/// nested router, so they cover the API routes only, while the
+/// request-id middleware on the outer router covers everything).
+fn api_v1_router(
+    rate_limiter: std::sync::Arc<tokio::sync::Mutex<middleware::RateLimiterState>>,
+) -> Router<Arc<AppState>> {
+    let router = Router::new();
+    let router = api_route!(
+        router,
+        GET,
+        POST,
+        "/process-instances",
+        list_process_instances,
+        start_instance
+    );
+    let router = api_route!(router, GET, "/process-instances/:id", get_instance);
+    let router = api_route!(
+        router,
+        GET,
+        "/process-instances/:id/trace",
+        get_instance_trace
+    );
+    let router = api_route!(
+        router,
+        GET,
+        "/process-instances/:id/history",
+        get_instance_history
+    );
+    let router = api_route!(router, POST, "/process-instances/:id/replay", create_replay);
+    let router = api_route!(router, POST, "/replay/:session_id/step", replay_step);
+    let router = api_route!(router, POST, "/replay/:session_id/seek", replay_seek);
+    let router = api_route!(
+        router,
+        GET,
+        "/replay/:session_id/snapshot",
+        get_replay_snapshot
+    );
+    let router = api_route!(router, DELETE, "/replay/:session_id", delete_replay_session);
+    let router = api_route!(
+        router,
+        GET,
+        "/process-definitions/:id",
+        get_process_definition
+    );
+    let router = api_route!(
+        router,
+        GET,
+        "/process-definitions",
+        list_process_definitions
+    );
+    let router = api_route!(
+        router,
+        GET,
+        "/process-definitions/versions/:key",
+        list_definition_versions
+    );
+    let router = api_route!(
+        router,
+        GET,
+        "/process-definitions/active/:key",
+        get_active_definition
+    );
+    let router = api_route!(
+        router,
+        PUT,
+        "/process-definitions/:id/activate",
+        activate_definition
+    );
+    let router = api_route!(
+        router,
+        PUT,
+        "/process-definitions/:id/deprecate",
+        deprecate_definition
+    );
+    let router = api_route!(router, GET, "/tasks", list_tasks);
+    let router = api_route!(router, GET, "/tasks/:task_id/form", get_task_form);
+    let router = api_route!(
+        router,
+        POST,
+        "/tasks/:task_id/complete",
+        complete_task_by_id
+    );
+    let router = api_route!(
+        router,
+        POST,
+        "/external-tasks/fetch-and-lock",
+        external_task_fetch_and_lock
+    );
+    let router = api_route!(
+        router,
+        POST,
+        "/external-tasks/:task_id/complete",
+        external_task_complete
+    );
+    let router = api_route!(
+        router,
+        POST,
+        "/external-tasks/:task_id/fail",
+        external_task_fail
+    );
+    let router = api_route!(
+        router,
+        POST,
+        "/external-tasks/:task_id/extend-lock",
+        external_task_extend_lock
+    );
+    let router = api_route!(router, POST, "/process-definitions/deploy", deploy_bpmn);
+    let router = api_route!(
+        router,
+        POST,
+        "/process-definitions/validate",
+        validate_process_definition
+    );
+    let router = api_route!(
+        router,
+        POST,
+        "/process-definitions/dry-run",
+        dry_run_process_definition
+    );
+    let router = api_route!(router, GET, "/dead-letters", list_dead_letters);
+    let router = api_route!(router, GET, "/dead-letters/:id", get_dead_letter);
+    let router = api_route!(
+        router,
+        POST,
+        "/dead-letters/:id/requeue",
+        requeue_dead_letter
+    );
+    let router = api_route!(router, DELETE, "/dead-letters/:id", delete_dead_letter);
+    let router = api_route!(router, GET, "/invariants/check", invariant_check);
+    router
+        .layer(axum_mw::from_fn(middleware::api_key_auth))
+        .layer(axum_mw::from_fn_with_state(
+            rate_limiter,
+            middleware::rate_limit,
+        ))
+}
+
 pub fn router(state: Arc<AppState>, rate_limit_rpm: u64) -> Router {
     let rate_limiter = std::sync::Arc::new(tokio::sync::Mutex::new(
         middleware::RateLimiterState::new(rate_limit_rpm, 60),
     ));
 
-    let router = Router::new()
-        .route("/health", get(health))
-        .route("/ready", get(readiness));
-
-    // Add /metrics endpoint when observability feature is enabled
-    #[cfg(feature = "observability")]
-    let router = router.route("/metrics", get(super::metrics::metrics_handler));
-
-    router
-        .nest(
-            "/api/v1",
-            Router::new()
-                .route(
-                    "/process-instances",
-                    get(list_process_instances).post(start_instance),
-                )
-                .route("/process-instances/:id", get(get_instance))
-                .route("/process-instances/:id/trace", get(get_instance_trace))
-                .route("/process-instances/:id/history", get(get_instance_history))
-                .route("/process-instances/:id/replay", post(create_replay))
-                .route("/replay/:session_id/step", post(replay_step))
-                .route("/replay/:session_id/seek", post(replay_seek))
-                .route("/replay/:session_id/snapshot", get(get_replay_snapshot))
-                .route("/replay/:session_id", delete(delete_replay_session))
-                .route("/process-definitions/:id", get(get_process_definition))
-                .route("/process-definitions", get(list_process_definitions))
-                .route(
-                    "/process-definitions/versions/:key",
-                    get(list_definition_versions),
-                )
-                .route(
-                    "/process-definitions/active/:key",
-                    get(get_active_definition),
-                )
-                .route(
-                    "/process-definitions/:id/activate",
-                    put(activate_definition),
-                )
-                .route(
-                    "/process-definitions/:id/deprecate",
-                    put(deprecate_definition),
-                )
-                .route("/tasks", get(list_tasks))
-                .route("/tasks/:task_id/form", get(get_task_form))
-                .route("/tasks/:task_id/complete", post(complete_task_by_id))
-                .route(
-                    "/external-tasks/fetch-and-lock",
-                    post(external_task_fetch_and_lock),
-                )
-                .route(
-                    "/external-tasks/:task_id/complete",
-                    post(external_task_complete),
-                )
-                .route("/external-tasks/:task_id/fail", post(external_task_fail))
-                .route(
-                    "/external-tasks/:task_id/extend-lock",
-                    post(external_task_extend_lock),
-                )
-                .route("/process-definitions/deploy", post(deploy_bpmn))
-                .route(
-                    "/process-definitions/validate",
-                    post(validate_process_definition),
-                )
-                .route(
-                    "/process-definitions/dry-run",
-                    post(dry_run_process_definition),
-                )
-                .route("/dead-letters", get(list_dead_letters))
-                .route("/dead-letters/:id", get(get_dead_letter))
-                .route("/dead-letters/:id/requeue", post(requeue_dead_letter))
-                .route("/dead-letters/:id", delete(delete_dead_letter))
-                .route("/invariants/check", get(invariant_check))
-                .layer(axum_mw::from_fn(middleware::api_key_auth))
-                .layer(axum_mw::from_fn_with_state(
-                    rate_limiter,
-                    middleware::rate_limit,
-                )),
-        )
+    base_router()
+        .nest("/api/v1", api_v1_router(rate_limiter))
         .with_state(state)
         .layer(axum_mw::from_fn(middleware::request_id_middleware))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::error_codes;
+
+    /// E2-4 review fix: the source-literal scan of the OpenAPI contract
+    /// suite cannot see codes referenced through the `error_codes` consts
+    /// (handlers mostly use `error_codes::NOT_FOUND` etc.). This test
+    /// names EVERY public const explicitly, so a const whose value is NOT
+    /// registered in `ERROR_CODES` — and therefore missing from the
+    /// `ErrorResponse.code` enum of `docs/openapi.yaml` — fails here.
+    /// When adding a const, extend this list; the
+    /// `error_codes_identifiers_used_in_routes_are_declared_consts` scan
+    /// of the contract suite keeps the two views in sync.
+    #[test]
+    fn every_error_code_const_is_registered() {
+        for code in [
+            error_codes::NOT_FOUND,
+            error_codes::UNAUTHORIZED,
+            error_codes::RATE_LIMITED,
+            error_codes::INVALID_REQUEST,
+            error_codes::INVALID_JSON,
+            error_codes::INTERNAL,
+            error_codes::DEPLOY_FAILED,
+            error_codes::TASK_NOT_FOUND,
+            error_codes::TASK_NOT_LOCKED,
+            error_codes::LOCK_EXPIRED,
+            error_codes::INVARIANT_VIOLATION,
+            error_codes::LOCK_CONFLICT,
+        ] {
+            assert!(
+                error_codes::ERROR_CODES.contains(&code),
+                "error-code const {code:?} must be registered in ERROR_CODES \
+                 (and mirrored in the docs/openapi.yaml ErrorResponse.code enum)"
+            );
+        }
+    }
+
+    /// The route registry is derived at registration time: constructing
+    /// the router populates it, every entry is unique, and the known
+    /// anchors are present (the OpenAPI contract suite does the full
+    /// spec ↔ registration comparison).
+    #[test]
+    fn route_registry_is_derived_and_duplicate_free() {
+        let routes = super::registered_routes();
+        assert!(
+            routes.contains(&("GET", "/health")),
+            "the registry must derive from the actual registrations"
+        );
+        assert!(
+            routes.contains(&("POST", "/api/v1/process-instances")),
+            "dual-method routes must record every method"
+        );
+        assert!(
+            routes.contains(&("GET", "/api/v1/process-instances")),
+            "dual-method routes must record every method"
+        );
+        let mut sorted = routes.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            routes.len(),
+            "duplicate route registrations: {routes:?}"
+        );
+        assert!(
+            routes.iter().all(|(_, p)| p.starts_with('/')),
+            "registry paths must be absolute wire paths: {routes:?}"
+        );
+    }
 }

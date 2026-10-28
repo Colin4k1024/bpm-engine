@@ -1,6 +1,7 @@
 //! Middleware: API key authentication, basic rate limiting,
 //! and request-id injection.
 
+use crate::routes::{error_codes, ErrorResponse};
 use axum::{
     extract::Request,
     http::{HeaderMap, HeaderValue, StatusCode},
@@ -8,19 +9,17 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde::Serialize;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 
-#[derive(Serialize)]
-struct AuthError {
-    error: String,
-}
-
 /// API key authentication middleware.
 /// Checks `X-API-Key` header against configured key.
 /// If `BPM_API_KEY` env var is unset, authentication is disabled (PoC mode).
+///
+/// Rejections use the standard [`ErrorResponse`] shape with the stable
+/// `unauthorized` code (E2-4); the body previously had only the `error`
+/// field, so this is an additive change.
 pub async fn api_key_auth(headers: HeaderMap, request: Request, next: Next) -> Response {
     let expected_key = std::env::var("BPM_API_KEY").ok();
 
@@ -35,9 +34,10 @@ pub async fn api_key_auth(headers: HeaderMap, request: Request, next: Next) -> R
         Some(key) if key == expected => next.run(request).await,
         _ => (
             StatusCode::UNAUTHORIZED,
-            Json(AuthError {
-                error: "missing or invalid API key".to_string(),
-            }),
+            Json(ErrorResponse::with_code(
+                "missing or invalid API key",
+                error_codes::UNAUTHORIZED,
+            )),
         )
             .into_response(),
     }
@@ -82,6 +82,10 @@ pub type SharedRateLimiter = Arc<Mutex<RateLimiterState>>;
 
 /// Rate limiting middleware.
 /// Returns 429 when request rate exceeds configured threshold.
+///
+/// Rejections use the standard [`ErrorResponse`] shape with the stable
+/// `rate_limited` code (E2-4); the body previously had only the `error`
+/// field, so this is an additive change.
 pub async fn rate_limit(
     axum::extract::State(limiter): axum::extract::State<SharedRateLimiter>,
     request: Request,
@@ -97,9 +101,10 @@ pub async fn rate_limit(
     } else {
         (
             StatusCode::TOO_MANY_REQUESTS,
-            Json(AuthError {
-                error: "rate limit exceeded".to_string(),
-            }),
+            Json(ErrorResponse::with_code(
+                "rate limit exceeded",
+                error_codes::RATE_LIMITED,
+            )),
         )
             .into_response()
     }

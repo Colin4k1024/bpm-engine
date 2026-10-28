@@ -239,4 +239,79 @@ impl ProcessInstanceStore for PostgresProcessStore {
             .await?;
         Ok(rows.iter().map(|row| row.get("id")).collect())
     }
+
+    async fn list_page(
+        &self,
+        tenant_id: Option<&str>,
+        offset: u64,
+        limit: u64,
+    ) -> anyhow::Result<Vec<String>> {
+        // Same deterministic ordering as list_all; the window is pushed down
+        // to the database (parameter-bound LIMIT/OFFSET).
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                r#"
+                SELECT id FROM process_instance
+                WHERE ($1::TEXT IS NULL OR tenant_id = $1)
+                ORDER BY id
+                LIMIT $2 OFFSET $3
+                "#,
+                &[&tenant_id, &(limit as i64), &(offset as i64)],
+            )
+            .await?;
+        Ok(rows.iter().map(|row| row.get("id")).collect())
+    }
+
+    async fn find_idempotency_key(
+        &self,
+        key: &str,
+        tenant_id: Option<&str>,
+    ) -> anyhow::Result<Option<String>> {
+        let client = self.pool.get().await?;
+        // tenant_id TEXT NOT NULL DEFAULT '' in the table: no tenant is
+        // stored as the empty string (a NULL would not participate in the
+        // PRIMARY KEY uniqueness).
+        let scope = tenant_id.unwrap_or("");
+        let row = client
+            .query_opt(
+                r#"
+                SELECT instance_id FROM idempotency_key
+                WHERE key = $1 AND tenant_id = $2
+                "#,
+                &[&key, &scope],
+            )
+            .await?;
+        Ok(row.map(|row| row.get("instance_id")))
+    }
+
+    async fn save_idempotency_key(
+        &self,
+        key: &str,
+        tenant_id: Option<&str>,
+        instance_id: &str,
+    ) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        let scope = tenant_id.unwrap_or("");
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_string();
+        // Upsert: re-recording a key overwrites the mapping (the table's
+        // PRIMARY KEY (key, tenant_id) is the conflict target).
+        client
+            .execute(
+                r#"
+                INSERT INTO idempotency_key (key, tenant_id, instance_id, created_at)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (key, tenant_id) DO UPDATE SET
+                    instance_id = EXCLUDED.instance_id,
+                    created_at = EXCLUDED.created_at
+                "#,
+                &[&key, &scope, &instance_id, &created_at],
+            )
+            .await?;
+        Ok(())
+    }
 }

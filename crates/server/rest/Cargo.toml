@@ -65,3 +65,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 testcontainers = "0.15"
 testcontainers-modules = { version = "0.3", features = ["postgres"] }
 bpm-engine-worker-sdk = { path = "../../worker-sdk", version = "0.2.0" }
+serde_yaml = "0.9"

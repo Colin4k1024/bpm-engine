@@ -30,8 +30,9 @@
 //! ```
 
 use bpm_engine_adapter_postgres::{
-    create_pool, migration_status, run_migrations, validate_up_to_date,
+    create_pool, migration_status, run_migrations, validate_up_to_date, PostgresProcessStore,
 };
+use bpm_engine_storage::ProcessInstanceStore;
 use testcontainers::clients;
 use testcontainers_modules::postgres::Postgres;
 
@@ -50,6 +51,7 @@ const ALL_TABLES: &[&str] = &[
     "compensation_record",
     "parallel_join",
     "dead_letter",
+    "idempotency_key",
     "schema_migrations",
 ];
 
@@ -204,15 +206,15 @@ async fn empty_db_migrates_from_scratch() {
     let applied = run_migrations(&pool).await.expect("run_migrations failed");
     assert_eq!(
         applied,
-        vec![1, 2],
-        "fresh database applies both migrations"
+        vec![1, 2, 3],
+        "fresh database applies all migrations"
     );
 
     let status = migration_status(&pool)
         .await
         .expect("migration_status failed");
-    assert_eq!(status.applied, vec![1, 2]);
-    assert_eq!(status.latest, 2);
+    assert_eq!(status.applied, vec![1, 2, 3]);
+    assert_eq!(status.latest, 3);
     assert!(status.pending.is_empty());
 
     {
@@ -226,6 +228,8 @@ async fn empty_db_migrates_from_scratch() {
         // 0002 indexes were applied
         assert!(object_exists(&client, "idx_process_instance_state").await);
         assert!(object_exists(&client, "idx_token_instance").await);
+        // 0003 table was applied
+        assert!(object_exists(&client, "idempotency_key").await);
 
         // The schema is usable: a round-trip works.
         client
@@ -282,18 +286,18 @@ async fn legacy_schema_is_baselined_and_upgraded() {
 
     let applied = run_migrations(&pool).await.expect("run_migrations failed");
     // 0001 was baseline-STAMPED (recorded, not executed by this call);
-    // only 0002 was actually applied here.
+    // only 0002 and 0003 were actually applied here.
     assert_eq!(
         applied,
-        vec![2],
-        "legacy schema: 0001 stamped as baseline, only 0002 applied"
+        vec![2, 3],
+        "legacy schema: 0001 stamped as baseline, 0002 and 0003 applied"
     );
 
     let status = migration_status(&pool)
         .await
         .expect("migration_status failed");
-    assert_eq!(status.applied, vec![1, 2]);
-    assert_eq!(status.latest, 2);
+    assert_eq!(status.applied, vec![1, 2, 3]);
+    assert_eq!(status.latest, 3);
     assert!(status.pending.is_empty());
 
     {
@@ -339,7 +343,7 @@ async fn second_run_is_noop() {
     let pool = db.pool.clone();
 
     let first = run_migrations(&pool).await.expect("first run failed");
-    assert_eq!(first, vec![1, 2]);
+    assert_eq!(first, vec![1, 2, 3]);
 
     let second = run_migrations(&pool).await.expect("second run failed");
     assert!(
@@ -350,8 +354,8 @@ async fn second_run_is_noop() {
     let status = migration_status(&pool)
         .await
         .expect("migration_status failed");
-    assert_eq!(status.applied, vec![1, 2]);
-    assert_eq!(status.latest, 2);
+    assert_eq!(status.applied, vec![1, 2, 3]);
+    assert_eq!(status.latest, 3);
     assert!(status.pending.is_empty());
 
     db.teardown().await;
@@ -369,7 +373,7 @@ async fn pending_detected_when_not_applied() {
         .expect("migration_status failed");
     assert_eq!(status.applied, Vec::<u32>::new());
     assert_eq!(status.latest, 0);
-    assert_eq!(status.pending, vec![1, 2]);
+    assert_eq!(status.pending, vec![1, 2, 3]);
 
     // The server-level startup contract (migrate_on_start = false): a
     // schema with pending migrations must fail validation, naming the
@@ -379,8 +383,8 @@ async fn pending_detected_when_not_applied() {
     let msg = err.to_string();
     assert!(msg.contains("pending migration versions"), "got: {msg}");
     assert!(
-        msg.contains("1, 2"),
-        "error should name versions 1, 2: {msg}"
+        msg.contains("1, 2, 3"),
+        "error should name versions 1, 2, 3: {msg}"
     );
     assert!(
         msg.contains("migrate_on_start"),
@@ -397,6 +401,105 @@ async fn pending_detected_when_not_applied() {
         validate_up_to_date(&status).is_ok(),
         "schema up to date must pass startup validation"
     );
+
+    db.teardown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn idempotency_key_store_round_trip_after_migration() {
+    // E2-4: migration 0003 creates the idempotency_key table; the process
+    // store round-trips keys over it (find / save / tenant scoping / upsert
+    // / list_page windowing).
+    let db = TestDb::new("idempotency_key_store_round_trip").await;
+    let pool = db.pool.clone();
+
+    let applied = run_migrations(&pool).await.expect("run_migrations failed");
+    assert_eq!(applied, vec![1, 2, 3]);
+
+    let store = PostgresProcessStore::new(pool.clone());
+
+    // Unknown key is None, not an error.
+    assert_eq!(
+        store.find_idempotency_key("k1", None).await.unwrap(),
+        None,
+        "unknown key must return Ok(None)"
+    );
+
+    // Record and find (no tenant).
+    store
+        .save_idempotency_key("k1", None, "inst-1")
+        .await
+        .unwrap();
+    assert_eq!(
+        store.find_idempotency_key("k1", None).await.unwrap(),
+        Some("inst-1".to_string())
+    );
+
+    // Tenant scoping: same key, different tenant → different mapping.
+    assert_eq!(
+        store
+            .find_idempotency_key("k1", Some("tenant-a"))
+            .await
+            .unwrap(),
+        None,
+        "key recorded without tenant must not leak into a tenant scope"
+    );
+    store
+        .save_idempotency_key("k1", Some("tenant-a"), "inst-2")
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .find_idempotency_key("k1", Some("tenant-a"))
+            .await
+            .unwrap(),
+        Some("inst-2".to_string())
+    );
+    assert_eq!(
+        store.find_idempotency_key("k1", None).await.unwrap(),
+        Some("inst-1".to_string())
+    );
+
+    // Upsert overwrites the mapping.
+    store
+        .save_idempotency_key("k1", None, "inst-3")
+        .await
+        .unwrap();
+    assert_eq!(
+        store.find_idempotency_key("k1", None).await.unwrap(),
+        Some("inst-3".to_string())
+    );
+
+    // The (key, tenant) uniqueness is enforced by the PRIMARY KEY: only one
+    // row exists per scope after upserts.
+    {
+        let client = pool.get().await.expect("client");
+        let rows: i64 = client
+            .query_one("SELECT COUNT(*) FROM idempotency_key", &[])
+            .await
+            .expect("count idempotency_key")
+            .get(0);
+        assert_eq!(rows, 2, "two scopes: no-tenant and tenant-a");
+    }
+
+    // list_page: window over the deterministic id ordering.
+    for id in ["page-a", "page-b", "page-c"] {
+        let client = pool.get().await.expect("client");
+        client
+            .execute(
+                "INSERT INTO process_instance (id, process_def_id, state, version) \
+                 VALUES ($1, 'def-1', 'Running', 1)",
+                &[&id],
+            )
+            .await
+            .expect("seed instance");
+    }
+    assert_eq!(
+        store.list_page(None, 1, 1).await.unwrap(),
+        vec!["page-b".to_string()]
+    );
+    assert!(store.list_page(None, 100, 10).await.unwrap().is_empty());
 
     db.teardown().await;
 }

@@ -156,7 +156,7 @@ async fn postgres_mode_survives_restart() {
     );
     assert_eq!(body["checks"]["db_pool"], "ok");
     assert_eq!(body["checks"]["db_migrations"], "ok");
-    assert_eq!(body["checks"]["db_schema_version"], "2");
+    assert_eq!(body["checks"]["db_schema_version"], "3");
 
     // --- Stop app 1 (cancel timer token, abort serve task, drop state) ------
     app1.stop().await;

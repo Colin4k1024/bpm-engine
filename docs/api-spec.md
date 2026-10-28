@@ -6,6 +6,16 @@ layout: default
 
 > This document defines the **external API contract** of the BPM Engine.
 > The APIs are designed for **service usage**, **external workers**, and **operational tooling**.
+>
+> **Normative, testable contract (E2-4)**: [`docs/openapi.yaml`](openapi.yaml)
+> is the machine-readable OpenAPI 3.1 contract of the REST API — paths,
+> request/response schemas, security scheme, and the stable
+> `ErrorResponse.code` enum. The CI consistency suite
+> (`crates/server/rest/tests/openapi_contract.rs`) verifies the spec
+> against the implementation in both directions (route parity, error-code
+> set equality, sample-response validation). This document remains the
+> prose specification; where the two disagree, `openapi.yaml` wins and a
+> PR must fix the divergence.
 
 ---
 
@@ -324,9 +334,132 @@ message FailRequest {
 
 ## 5. Idempotency & Safety
 
-- REST supports `Idempotency-Key` header (accepted on `POST /process-instances` and `POST /tasks/{task_id}/complete`; cached response behavior to be implemented).
+- REST supports the `Idempotency-Key` header on `POST /api/v1/process-instances`
+  (E2-4, implemented): see §5c for the exact semantics.
 - gRPC tasks are **at-least-once**
 - Duplicate completion is safe
+
+---
+
+## 5a. Error Contract (E2-4)
+
+Every error response uses the `ErrorResponse` body:
+
+```json
+{
+  "error": "human-readable message (wording is NOT a contract)",
+  "code": "stable_snake_case",
+  "invariant_violation": "OptionalKindName"
+}
+```
+
+- `code` is present on every error emitted by the typed boundaries (the
+  pre-E2-4 deploy parse/compile 400s keep their legacy shapes — see the
+  notes below).
+- `invariant_violation` is present only on invariant rejections and is
+  mirrored in the `X-Invariant-Violation` response header (stable).
+- 5xx bodies never leak internal details; they are logged server-side.
+
+Stable error codes (single source of truth:
+`crates/server/rest/src/routes.rs::error_codes::ERROR_CODES`, mirrored in
+`docs/openapi.yaml` — the CI suite asserts set equality; **renaming a
+code is a breaking change**):
+
+| Code | HTTP | Meaning |
+|------|------|---------|
+| `not_found` | 404 | Unknown instance / definition / task / dead-letter / replay-session id |
+| `unauthorized` | 401 | Missing or invalid API key |
+| `rate_limited` | 429 | Request rate above the configured window |
+| `invalid_request` | 400 | Generic client error (malformed path ids, bad query params, invalid idempotency key) |
+| `invalid_json` | 400/422 | Request body is not valid JSON for the endpoint (syntax/content-type → 400; type mismatch → 422) |
+| `internal` | 500 | Unexpected server-side failure |
+| `deploy_failed` | 500 | Definition compiled but could not be persisted |
+| `invalid_format` | 400 | validate/dry-run `format` is neither `bpmn` nor `dsl` (E2-2) |
+| `empty_source` | 400 | validate/dry-run `source` is empty (E2-2) |
+| `invalid_request_body` | 400 | validate/dry-run body is not deserializable JSON (E2-2) |
+| `variable_too_large` | 400 | Variable value exceeds `engine.variable_max_bytes` (E2-3) |
+| `variable_invalid_envelope` | 400 | Malformed/unsupported envelope version (E2-3) |
+| `variable_invalid_artifact_uri` | 400 | Artifact URI violates the E2-3 URI contract |
+| `sensitive_requires_encryption` | 400 | Sensitive variable not present / not encrypted (E2-3) |
+| `encryption_key_not_configured` | 400 | `encrypted` requested while `BPM_VARIABLE_ENCRYPTION_KEY` is unset |
+| `task_envelope_invalid` | 400 | AI task envelope failed validation (E3-1, sub-code in message) |
+| `reserved_variable_key` | 400 | User-supplied `__task_envelope` variable (E3-1) |
+| `invalid_retry_category` | 400 | fail `category` is not `transient`/`permanent` (E3-1) |
+| `missing_required_fields` | 400 | user-task complete without the form's required fields |
+| `task_not_found` | 400 | External-task store: unknown task (kept 400 for compat) |
+| `task_not_locked` | 400 | External-task store: task not in the Locked state |
+| `lock_expired` | 400 | External-task store: lease expired |
+| `invariant_violation` | 400 | Engine invariant violated (kind in `invariant_violation` + header) |
+| `lock_conflict` | 409 | Lock extension refused (unknown / not locked / other owner) |
+
+Backward compatibility: pre-E2-4 error bodies only GAIN the `code` field;
+existing codes (E2-2/E2-3/E3-1) are unchanged. The deploy endpoint's 400
+parse (`{"error": ...}`) and compile (`{"errors": [...]}`) shapes are
+legacy-stable (no code field); its persistence failure moved from the
+parse shape to 500 `{error, code: "deploy_failed"}` (E1-1 review fix).
+
+---
+
+## 5b. Pagination (E2-4)
+
+- `GET /api/v1/process-instances?limit&offset` — store-level pagination
+  (SQL `LIMIT`/`OFFSET` in postgres mode; the hot path). `limit` ∈
+  1..=500 (default **50**), `offset` ≥ 0 (default 0); malformed or
+  out-of-range values → 400 `invalid_request`. Instances are ordered by
+  instance id; an offset beyond the end returns an empty page. The
+  response gains the additive `pagination: {limit, offset, returned}`
+  object; the `instances` array shape is unchanged.
+- `GET /api/v1/tasks` and `GET /api/v1/dead-letters` accept the same
+  optional `limit`/`offset`, applied **in memory** over the assembled
+  result (documented; the store traits are not extended for these —
+  instance listing is the only store-level window). Absent parameters
+  keep the previous full-list behavior. NOTE for `/dead-letters`: the
+  fetch itself is bounded — the store returns at most **100** entries
+  per request (memory and Postgres adapters alike), so a page can never
+  expose more than the first 100 dead letters; deeper listing requires
+  store-level pagination (not part of v1).
+- `GET /api/v1/process-instances/:id/history` accepts an optional
+  `limit` (1..=500) that truncates the event list after causal sorting;
+  absent → full history (previous behavior).
+
+---
+
+## 5c. Idempotency Keys — start-instance (E2-4)
+
+`POST /api/v1/process-instances` accepts an optional `Idempotency-Key`
+HTTP header (1–128 printable ASCII bytes; malformed keys are rejected
+with 400 `invalid_request` rather than silently ignored).
+
+Because the `(key, tenant_id)` pair co-forms the idempotency primary
+key, the co-stored `X-Tenant-Id` is bounded at this save boundary: when
+an `Idempotency-Key` is supplied, the tenant id must be at most 128
+printable ASCII bytes (400 `invalid_request` "tenant id too long"
+otherwise). `X-Tenant-Id` keeps its unbounded, pass-through semantics on
+every other endpoint and on key-less starts.
+
+Semantics:
+
+- **Known key** (recorded for the same `X-Tenant-Id` scope): the server
+  returns **200** (not 201) with the SAME `{instance_id, status}`
+  response shape for the originally created instance — `status` is the
+  instance's CURRENT state (RUNNING/COMPLETED/TERMINATED), not a cached
+  copy. No second instance is created and the engine emits no events.
+- **Unknown key**: the instance is created as today (**201**) and the
+  key → instance_id mapping is recorded afterwards (upsert; keys are
+  tenant-scoped, so the same key under different tenants addresses
+  different instances).
+- **Persistence**: memory adapter keeps a map; PostgreSQL stores it in
+  the `idempotency_key` table (migration 0003,
+  `PRIMARY KEY (key, tenant_id)`, `tenant_id TEXT NOT NULL DEFAULT ''`).
+
+Atomicity boundary (honest, single-service): the check-then-create
+sequence is **not cross-process atomic** — the engine runs as one
+service per database (the same boundary as the migration runner), so
+two concurrent identical requests can still race. A key-recording
+failure AFTER the instance was created is reported as 500 `internal`
+with an explicit message (the retry may then create a second instance).
+Cross-process uniqueness would require a unique-constraint insert path;
+out of scope for v1.
 
 ---
 
@@ -342,6 +475,25 @@ message FailRequest {
 
 - URL-based versioning (`/v1`)
 - Backward-compatible changes only
+
+### Versioning rules (E2-4, binding for `/api/v1`)
+
+- **Path version `/api/v1` is frozen for additive changes only.** A
+  change is additive if: a new endpoint, a new OPTIONAL request
+  parameter, or a new OPTIONAL response field. Removing or renaming a
+  field, changing a field's type, or changing a response status for a
+  given condition is a BREAKING change and requires `/api/v2`.
+- **Error codes are stable identifiers.** The list in §5a is the
+  contract: renaming or removing a code is breaking; adding a code is
+  additive (clients must treat unknown codes as fallback-to-`error`).
+- **Response fields are additive-only (optional fields may appear).**
+  Example: the instance list gained `pagination: {limit, offset,
+  returned}` (E2-4) while keeping the `instances` array shape.
+- **Pagination and idempotency are part of the contract** (§5b, §5c):
+  parameter names, defaults (`limit=50`), bounds (`1..=500`), and the
+  200-vs-201 idempotent replay semantics are stable.
+- The OpenAPI document (`docs/openapi.yaml`) is the machine-readable
+  form of these rules and is CI-checked against the implementation.
 
 ---
 
