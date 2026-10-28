@@ -30,7 +30,9 @@ pub enum TokenStatus {
     Executing,
     /// Blocked on an external condition (timer, message, external task).
     Waiting,
-    /// Paused by operator action; can be resumed to Ready.
+    /// Paused by operator action; resume restores the pre-pause semantics
+    /// (Ready for execution-flow tokens, Waiting for tokens that were
+    /// waiting at a timer/message/signal intermediate catch, E5-2/ADR-008 §5).
     Suspended,
     /// Terminal: successfully completed execution at this node.
     Completed,

@@ -213,8 +213,10 @@ mod tests {
     fn embedded_catalog_parses() {
         let catalog = Catalog::embedded().expect("embedded catalog parses");
         assert_eq!(catalog.catalog_version, "1");
-        // E4-1 ships 35 tools.
-        assert_eq!(catalog.tools.len(), 35);
+        // The catalog count is pinned so adding an engine operation without
+        // regenerating the catalog fails loudly (E4-1 shipped 35; E5-2's
+        // approval endpoints took it to 40).
+        assert_eq!(catalog.tools.len(), 40);
     }
 
     #[test]

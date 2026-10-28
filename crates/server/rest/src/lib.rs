@@ -260,12 +260,32 @@ pub async fn build_app(config: &BpmConfig) -> anyhow::Result<AppHandle> {
         history_redaction_policy: bpm_engine_core::HistoryRedactionPolicy {
             max_variable_bytes: config.engine.history_variable_max_bytes,
         },
+        approval_required_task_types: Arc::new(
+            config
+                .engine
+                .approval_required_task_types
+                .iter()
+                .cloned()
+                .collect(),
+        ),
+        instance_lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
         replay_sessions: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         timer_cancel: timer_cancel.clone(),
         extra_health_checks,
         #[cfg(feature = "observability")]
         metrics_render,
     });
+
+    // E5-2 (ADR-008 §7.1): approval-effect startup sweep. Re-drive every
+    // decided approval record whose effect is still Pending — decisions
+    // that survived a crash between the durable decide and the effect
+    // application. Meaningful for the persistent (Postgres) driver; the
+    // memory store is process-lifetime dev/test state and starts empty, so
+    // the sweep is a no-op there by construction. Runs before serving so
+    // the state is converged when the first request arrives; per-record
+    // failures are logged (the decision stays durable, a retried decide
+    // re-drives the effect).
+    routes::recover_pending_approval_effects(&state).await;
 
     // Start the timer scheduler in the background.
     // Wire the event channel so TimerFired events are processed by the engine.
