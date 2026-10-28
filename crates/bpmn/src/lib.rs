@@ -13,6 +13,21 @@ pub use errors::{CompileError, CompileErrors, CompilerError, ErrorCode, ParseErr
 pub use model::{BpmnFlowNode, BpmnProcess, BpmnSequenceFlow, FlowAttach};
 pub use parser::parse;
 
+// --- E2-2 static validation & dry-run (keep this block self-contained) ---
+
+/// Lightweight condition-evaluator subset shared by `validation` and
+/// `simulation` (private: the runtime's full EL cannot be reused here
+/// because the runtime depends on this crate).
+mod condition_lite;
+
+pub mod simulation;
+pub mod validation;
+
+pub use simulation::{
+    dry_run, DryRunReport, DryRunRequest, DryRunStep, Terminus, DEFAULT_MAX_STEPS,
+};
+pub use validation::{validate_definition, Severity, ValidationFinding};
+
 /// Parse BPMN XML and compile to engine ProcessDefinition in one step.
 /// Returns Parse error or list of CompilerErrors (03.md).
 pub fn parse_and_compile(xml: &str) -> Result<bpm_engine_core::ProcessDefinition, CompileError> {

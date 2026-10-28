@@ -397,6 +397,7 @@ dependencies = [
  "bpm-engine-adapter-postgres",
  "bpm-engine-bpmn",
  "bpm-engine-core",
+ "bpm-engine-dsl",
  "bpm-engine-runtime",
  "bpm-engine-storage",
  "bpm-engine-worker-sdk",

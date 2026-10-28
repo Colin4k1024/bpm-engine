@@ -157,4 +157,7 @@ deserialization stops at the first syntax/data problem.
   surprises.
 
 REST deployment of DSL documents lands with the API-contract issues
-(see [ADR-006](adr/ADR-006-minimal-declarative-dsl.md)).
+(see [ADR-006](adr/ADR-006-minimal-declarative-dsl.md)); pre-deploy static
+validation and dry-run of DSL documents is available now via
+`POST /api/v1/process-definitions/validate` and `/dry-run` with
+`format: "dsl"` (see [validation-and-dry-run.md](validation-and-dry-run.md)).
