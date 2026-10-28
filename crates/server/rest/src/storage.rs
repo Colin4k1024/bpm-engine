@@ -16,8 +16,8 @@
 use crate::state::ExtraHealthChecks;
 use bpm_engine_adapter_memory::{DeadLetterRepo, MemoryRepo, ProcessDefStore};
 use bpm_engine_storage::{
-    CompensationRecordRepo, DeadLetterStore, DefinitionDeployer, ExternalTaskStore, HistoryRepo,
-    InvariantChecker, ParallelJoinRepo, ProcessDefinitionStore, ProcessInstanceStore,
+    ApprovalStore, CompensationRecordRepo, DeadLetterStore, DefinitionDeployer, ExternalTaskStore,
+    HistoryRepo, InvariantChecker, ParallelJoinRepo, ProcessDefinitionStore, ProcessInstanceStore,
     StoreInvariantChecker, TimerStore, TokenStore,
 };
 use std::sync::Arc;
@@ -45,6 +45,8 @@ pub struct Storage {
     pub external_task_store: Arc<dyn ExternalTaskStore>,
     /// Execution history recording.
     pub history_repo: Arc<dyn HistoryRepo>,
+    /// Engine-owned approval records (E5-2, ADR-008).
+    pub approval_store: Arc<dyn ApprovalStore>,
     /// Dead letter queue storage.
     pub dead_letter_store: Arc<dyn DeadLetterStore>,
     /// Invariant checker over the process instance store.
@@ -73,6 +75,7 @@ impl Storage {
             compensation_repo: Arc::clone(&repo) as Arc<dyn CompensationRecordRepo>,
             external_task_store: Arc::clone(&repo) as Arc<dyn ExternalTaskStore>,
             history_repo: Arc::clone(&repo) as Arc<dyn HistoryRepo>,
+            approval_store: Arc::clone(&repo) as Arc<dyn ApprovalStore>,
             dead_letter_store: Arc::new(DeadLetterRepo::new()) as Arc<dyn DeadLetterStore>,
             invariant_checker: Arc::new(StoreInvariantChecker::new(
                 Arc::clone(&repo) as Arc<dyn ProcessInstanceStore>
@@ -102,10 +105,10 @@ impl Storage {
         migrate_on_start: bool,
     ) -> anyhow::Result<(Storage, ExtraHealthChecks)> {
         use bpm_engine_adapter_postgres::{
-            migration_status, run_migrations, validate_up_to_date, PostgresCompensationRepo,
-            PostgresDeadLetterStore, PostgresExternalTaskStore, PostgresHistoryRepo,
-            PostgresParallelJoinRepo, PostgresProcessDefStore, PostgresProcessStore,
-            PostgresTimerStore, PostgresTokenStore,
+            migration_status, run_migrations, validate_up_to_date, PostgresApprovalStore,
+            PostgresCompensationRepo, PostgresDeadLetterStore, PostgresExternalTaskStore,
+            PostgresHistoryRepo, PostgresParallelJoinRepo, PostgresProcessDefStore,
+            PostgresProcessStore, PostgresTimerStore, PostgresTokenStore,
         };
 
         let pool = bpm_engine_adapter_postgres::create_pool_with_max_size(url, max_connections)?;
@@ -147,6 +150,7 @@ impl Storage {
             compensation_repo: Arc::new(PostgresCompensationRepo::new(pool.clone())),
             external_task_store: Arc::new(PostgresExternalTaskStore::new(pool.clone())),
             history_repo: Arc::new(PostgresHistoryRepo::new(pool.clone())),
+            approval_store: Arc::new(PostgresApprovalStore::new(pool.clone())),
             dead_letter_store: Arc::new(PostgresDeadLetterStore::new(pool.clone())),
             invariant_checker: Arc::new(StoreInvariantChecker::new(
                 process_store as Arc<dyn ProcessInstanceStore>,

@@ -6,6 +6,7 @@
 
 #![warn(missing_docs)]
 
+pub mod approval_store;
 pub mod compensation;
 pub mod dead_letter_store;
 pub mod event_store;
@@ -18,6 +19,7 @@ pub mod process_store;
 pub mod timer_store;
 pub mod token_store;
 
+pub use approval_store::*;
 pub use compensation::*;
 pub use dead_letter_store::*;
 pub use event_store::*;

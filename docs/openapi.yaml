@@ -366,6 +366,165 @@ paths:
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /api/v1/process-instances/{id}/approvals:
+    get:
+      operationId: listInstanceApprovals
+      summary: List the instance's approval records
+      description: |
+        The engine-owned approval records of the instance (E5-2, ADR-008):
+        one per approval-required step visit, with the decision, actor and
+        note once decided. Operators use this to discover pending approval
+        ids for the decide endpoint; auditors inspect the records. Read
+        operation (all roles).
+      tags: [Approvals]
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+        - $ref: "#/components/parameters/TenantId"
+      responses:
+        "200":
+          description: The instance's approval records (may be empty).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalListResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-instances/{id}/pause:
+    post:
+      operationId: pauseInstance
+      summary: Pause a running process instance
+      description: |
+        Operator action (E5-2, ADR-008 §5): suspends every non-terminal
+        token of the instance (Suspended status; the instance state stays
+        RUNNING — `paused` in the response is derived from the token
+        states) and records an `InstancePaused` history event with the
+        actor. Only-once: pausing an already-paused instance replays 200
+        without a second history event; a terminal instance answers 409
+        `instance_not_pausable`. Honest pause semantics: in-flight
+        external-task leases are NOT revoked — complete/fail (and user-task
+        complete) are refused with 409 `instance_paused` until resume,
+        while lease extension continues.
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+      responses:
+        "200":
+          description: Instance paused (or an idempotent replay).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceLifecycleResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/InstanceNotPausable" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-instances/{id}/resume:
+    post:
+      operationId: resumeInstance
+      summary: Resume a paused process instance
+      description: |
+        Operator action (E5-2, ADR-008 §5): flips Suspended tokens back to
+        Ready (version-bumped) and records an `InstanceResumed` history
+        event with the actor. Idempotent: resuming an unpaused instance is
+        a 200 no-op; a terminal instance answers 409 `instance_not_pausable`.
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+      responses:
+        "200":
+          description: Instance resumed (or an idempotent no-op replay).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceLifecycleResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/InstanceNotPausable" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-instances/{id}/cancel:
+    post:
+      operationId: cancelInstance
+      summary: Cancel a process instance
+      description: |
+        Operator action (E5-2, ADR-008 §6): terminates every non-terminal
+        token and the instance itself (TerminateEnd semantics — a
+        `ProcessTerminated` engine event is recorded), plus an
+        `InstanceCancelled` history event with the actor. Only-once:
+        cancelling a TERMINATED instance replays 200 with the terminal
+        state; a COMPLETED instance replays 200 as a no-op. Task operations
+        (external-task complete/fail/extend-lock, user-task complete) on a
+        cancelled instance are rejected with 409 `instance_cancelled`.
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+      responses:
+        "200":
+          description: Instance cancelled (or an idempotent terminal replay).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceLifecycleResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/approvals/{approval_id}/decide:
+    post:
+      operationId: decideApproval
+      summary: Approve or reject a pending approval record
+      description: |
+        Operator action (E5-2, ADR-008): decides a Pending approval record
+        atomically — exactly once. Approve creates the fetchable external
+        task with the ENGINE-written `__approval` task variable
+        (task-creation-after-approval: until then no task row exists, so
+        workers never see unapproved work). Reject dead-letters the step,
+        terminates the token (`TokenFailed`), and terminates the instance
+        when nothing else is active. Both decisions append an
+        `ApprovalGranted`/`ApprovalRejected` history event carrying the
+        verified actor and the optional note.
+
+        Only-once contract: a retried SAME decision replays 200 with the
+        recorded outcome; a CONFLICTING decision on a decided record
+        answers 409 `approval_already_decided` — the original outcome
+        always stands. Approvals of a cancelled instance are still decided
+        (audit) but create no task.
+      tags: [Approvals]
+      parameters:
+        - $ref: "#/components/parameters/ApprovalId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalDecideRequest"
+      responses:
+        "200":
+          description: The decision was applied (or replayed identically).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalRecordResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/ApprovalNotFound" }
+        "409": { $ref: "#/components/responses/ApprovalConflict" }
+        "422": { $ref: "#/components/responses/InvalidJson" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /api/v1/process-instances/{id}/replay:
     post:
       operationId: createReplaySession
@@ -772,6 +931,15 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: |
+            Refused by the E5-2 instance lifecycle gate: `instance_paused`
+            (the instance's tokens are Suspended — complete after resume)
+            or `instance_cancelled` (the instance was cancelled).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "422": { $ref: "#/components/responses/InvalidJson" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -843,6 +1011,15 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: |
+            Refused by the E5-2 instance lifecycle gate: `instance_paused`
+            (the task stays Locked; complete after resume or redelivery)
+            or `instance_cancelled` (the work is discarded).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "422": { $ref: "#/components/responses/InvalidJson" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -881,6 +1058,14 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: |
+            Refused by the E5-2 instance lifecycle gate: `instance_paused`
+            or `instance_cancelled`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "422": { $ref: "#/components/responses/InvalidJson" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -911,7 +1096,15 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "409": { $ref: "#/components/responses/LockConflict" }
+        "409":
+          description: |
+            `lock_conflict` (unknown / not locked / wrong owner), or
+            `instance_cancelled` — E5-2: lease maintenance continues during
+            a PAUSE, but a cancelled instance rejects the extension.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "422": { $ref: "#/components/responses/InvalidJson" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
@@ -1116,6 +1309,12 @@ components:
       required: true
       schema: { type: string }
       description: "Task id; user tasks use `<instance_id>:<node_id>`."
+    ApprovalId:
+      name: approval_id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Approval record id (a UUID; discover via the instance approvals list).
     SessionId:
       name: session_id
       in: path
@@ -1192,6 +1391,32 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    ApprovalNotFound:
+      description: |
+        Unknown approval record id (404, code `approval_not_found`,
+        E5-2). A record of another tenant is reported exactly the same way
+        (no existence leak).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ApprovalConflict:
+      description: |
+        A CONFLICTING decision on an already-decided approval record (409,
+        code `approval_already_decided`, E5-2): the original outcome stands.
+        A retried same decision is a 200 replay instead.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InstanceNotPausable:
+      description: |
+        Pause or resume on an instance that reached a terminal state (409,
+        code `instance_not_pausable`, E5-2).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     InternalError:
       description: |
         Unexpected server-side failure (500, code `internal`). Details
@@ -1252,6 +1477,11 @@ components:
             - lock_expired
             - invariant_violation
             - lock_conflict
+            - approval_not_found
+            - approval_already_decided
+            - instance_paused
+            - instance_cancelled
+            - instance_not_pausable
         invariant_violation:
           type: string
           description: |
@@ -1697,6 +1927,77 @@ components:
         status:
           type: string
           enum: [COMPLETED, FAILED]
+
+    ApprovalDecideRequest:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [approve, reject]
+          description: |
+            The operator's decision (E5-2). Approve creates the fetchable
+            external task with the engine-written `__approval` variable;
+            reject dead-letters the step and fails the token.
+        note:
+          type: string
+          description: Optional note recorded with the decision (record + history).
+
+    ApprovalRecordResponse:
+      type: object
+      required: [approval_id, instance_id, node_id, token_id, task_type, status, created_at]
+      properties:
+        approval_id:
+          type: string
+        instance_id:
+          type: string
+        node_id:
+          type: string
+        token_id:
+          type: string
+        task_type:
+          type: string
+        status:
+          type: string
+          enum: [PENDING, APPROVED, REJECTED]
+        decided_by:
+          type: string
+          description: The deciding (E5-1 verified) actor, once decided.
+        decided_at:
+          type: string
+          description: Epoch-seconds timestamp of the decision, once decided.
+        note:
+          type: string
+        created_at:
+          type: string
+          description: Epoch-seconds creation timestamp.
+
+    ApprovalListResponse:
+      type: object
+      required: [instance_id, approvals]
+      properties:
+        instance_id:
+          type: string
+        approvals:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApprovalRecordResponse"
+
+    InstanceLifecycleResponse:
+      type: object
+      required: [instance_id, status, paused]
+      properties:
+        instance_id:
+          type: string
+        status:
+          type: string
+          enum: [RUNNING, COMPLETED, TERMINATED]
+        paused:
+          type: boolean
+          description: |
+            Whether the instance currently has Suspended (paused) tokens
+            (E5-2): pause suspends tokens while the instance state stays
+            RUNNING, so `paused` is derived from the token states.
 
     LockExtensionResponse:
       type: object

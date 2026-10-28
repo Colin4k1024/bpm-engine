@@ -100,10 +100,12 @@ bootstrap path), and open mode has no credentials to authorize.
 | Activate / deprecate definition (`PUT /process-definitions/:id/...`) | ✓ | | | |
 | Start instance (`POST /process-instances`) | | ✓ | | |
 | Complete user task (`POST /tasks/:task_id/complete`) | | ✓ | | |
+| Approve / reject an approval record (`POST /approvals/:approval_id/decide`, E5-2) | | ✓ | | |
+| Pause / resume / cancel an instance (`POST /process-instances/:id/pause` / `resume` / `cancel`, E5-2) | | ✓ | | |
 | Replay sessions (`POST /process-instances/:id/replay`, `POST /replay/:sid/step`, `POST /replay/:sid/seek`, `DELETE /replay/:sid`) | | ✓ | | |
 | DLQ requeue / delete (`POST /dead-letters/:id/requeue`, `DELETE /dead-letters/:id`) | | ✓ | | |
 | External-task lease lifecycle (`fetch-and-lock`, `complete`, `fail`, `extend-lock`) | | | ✓ | |
-| **All reads** — every `GET` (instances, trace, history, steps, definitions, versions, tasks, forms, dead-letters, invariants, replay snapshot) | ✓ | ✓ | ✓ | ✓ |
+| **All reads** — every `GET` (instances, trace, history, steps, approval lists, definitions, versions, tasks, forms, dead-letters, invariants, replay snapshot) | ✓ | ✓ | ✓ | ✓ |
 | Side-effect-free POSTs: `validate`, `dry-run` (E2-2) | ✓ | ✓ | ✓ | ✓ |
 
 Decisions worth restating:
@@ -192,7 +194,7 @@ Un-scoped notes (honest v1 boundary):
 
 ## Error codes
 
-Two stable codes join `routes::error_codes::ERROR_CODES` (mirrored in
+Stable codes in `routes::error_codes::ERROR_CODES` (mirrored in
 `docs/openapi.yaml` and the catalog — both directions asserted by the
 consistency suite):
 
@@ -200,6 +202,11 @@ consistency suite):
 |------|------|------|
 | `invalid_token` | 401 | JWT presented/required but missing, malformed, or rejected (signature, expiry, claims) |
 | `forbidden` | 403 | RBAC denial, or `X-Tenant-Id` conflicting with the tenant claim |
+| `approval_not_found` | 404 | unknown approval record id; another tenant's record answers identically (E5-2) |
+| `approval_already_decided` | 409 | a CONFLICTING decide on a decided approval record — the original outcome stands (E5-2) |
+| `instance_paused` | 409 | task complete/fail on a paused instance (E5-2) |
+| `instance_cancelled` | 409 | task operations on a cancelled instance (E5-2) |
+| `instance_not_pausable` | 409 | pause/resume on a terminal instance (E5-2) |
 
 ## Boundaries and forward references
 

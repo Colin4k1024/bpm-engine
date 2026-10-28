@@ -578,6 +578,51 @@ impl ExternalTaskStore for PostgresExternalTaskStore {
         }
     }
 
+    async fn get_by_token(&self, token_id: &str) -> anyhow::Result<Option<ExternalTask>> {
+        // E5-2 grant-effect idempotency guard (ADR-008 §7.1): any task row
+        // for the token (any state) proves the approval-grant effect already
+        // created it, so a re-drive must not create a second task. Recovery
+        // path only — a plain filter scan is acceptable here.
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                r#"
+                SELECT id, token_id, process_instance_id, task_type, retries,
+                       timeout_secs, variables, state, worker_id, error_message,
+                       lock_expire_at, created_at, updated_at
+                FROM external_task
+                WHERE token_id = $1
+                ORDER BY created_at ASC
+                LIMIT 1
+                "#,
+                &[&token_id],
+            )
+            .await?;
+
+        match row {
+            Some(row) => {
+                let variables: HashMap<String, String> =
+                    serde_json::from_str(row.get("variables")).unwrap_or_default();
+                let lock_expire_at: Option<String> = row.get("lock_expire_at");
+                Ok(Some(ExternalTask {
+                    task_id: row.get("id"),
+                    token_id: row.get("token_id"),
+                    process_instance_id: row.get("process_instance_id"),
+                    task_type: row.get("task_type"),
+                    retries: row.get::<_, i32>("retries"),
+                    state: str_to_external_task_state(row.get("state")),
+                    lock_owner: row.get("worker_id"),
+                    lock_expire_at,
+                    error_message: row.get("error_message"),
+                    variables,
+                    created_at: row.get("created_at"),
+                    updated_at: row.get("updated_at"),
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
     async fn extend_lock(
         &self,
         task_id: &str,

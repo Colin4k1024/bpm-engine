@@ -8,6 +8,8 @@
 
 /// AI task envelope (E3-1): typed execution metadata for AI external tasks.
 pub mod ai_task;
+/// Engine-owned approval records for high-risk steps (E5-2, ADR-008).
+pub mod approval;
 /// Core error types for the BPM engine.
 pub mod error;
 /// Immutable events driving all state transitions.
@@ -30,6 +32,7 @@ pub mod variable;
 pub mod variable_contract;
 
 pub use ai_task::*;
+pub use approval::*;
 pub use error::*;
 pub use event::*;
 pub use external_task::*;
@@ -59,6 +62,15 @@ pub use variable_contract::*;
 ///                    │           ├──► Suspended ──► Ready
 ///                    │           │
 ///                    │           └──► Terminated
+///   Operator actions (E5-2, ADR-008) — forced, apply from any active state:
+///                    any active ──► Suspended   (instance pause)
+///                    any active ──► Terminated  (instance cancel / rejection)
+///   Resume (E5-2, ADR-008 §5) restores the pre-pause semantics:
+///                    Suspended ──► Ready        (default resume)
+///                    Suspended ──► Waiting      (catch tokens: timer/message/
+///                                                signal intermediate catch were
+///                                                Waiting before the pause — their
+///                                                advance handlers match Waiting)
 /// ```
 ///
 /// Terminal states (no outgoing transitions): `Completed`, `Terminated`.
@@ -73,6 +85,18 @@ pub use variable_contract::*;
 /// assert!(is_valid_token_transition(TokenStatus::Ready, TokenStatus::Executing));
 /// assert!(is_valid_token_transition(TokenStatus::Executing, TokenStatus::Waiting));
 /// assert!(is_valid_token_transition(TokenStatus::Waiting, TokenStatus::Ready));
+///
+/// // Operator-forced transitions (E5-2): pause suspends, cancel/reject
+/// // terminates — from ANY active state, not only Executing.
+/// assert!(is_valid_token_transition(TokenStatus::Waiting, TokenStatus::Suspended));
+/// assert!(is_valid_token_transition(TokenStatus::Waiting, TokenStatus::Terminated));
+/// assert!(is_valid_token_transition(TokenStatus::Suspended, TokenStatus::Terminated));
+/// assert!(is_valid_token_transition(TokenStatus::Suspended, TokenStatus::Ready));
+///
+/// // Resume of a catch token restores its pre-pause WAITING semantics
+/// // (E5-2, ADR-008 §5): a suspended timer/message/signal catch token must
+/// // go back to Waiting, not Ready, or its catch could never advance.
+/// assert!(is_valid_token_transition(TokenStatus::Suspended, TokenStatus::Waiting));
 ///
 /// // Invalid: must go through Ready
 /// assert!(!is_valid_token_transition(TokenStatus::Created, TokenStatus::Executing));
@@ -103,6 +127,25 @@ pub fn is_valid_token_transition(from: TokenStatus, to: TokenStatus) -> bool {
         // Execution → waiting (e.g., at a gateway or timer)
         (Executing, Waiting) => true,
 
+        // Operator-forced transitions (E5-2, ADR-008): instance pause
+        // suspends every non-terminal token; instance cancel / approval
+        // rejection terminates them. These hold of ANY active state — the
+        // operator action is authoritative, exactly like the pre-existing
+        // (Executing, Terminated) force path.
+        (Waiting, Suspended) => true,
+        (Ready, Suspended) => true,
+        (Created, Suspended) => true,
+        (Created, Terminated) => true,
+        (Ready, Terminated) => true,
+        (Waiting, Terminated) => true,
+        (Suspended, Terminated) => true,
+
+        // Resume restoring pre-pause semantics (E5-2, ADR-008 §5): a token
+        // that was Waiting at a timer/message/signal intermediate catch when
+        // the instance was paused returns to Waiting — the catch advance
+        // handlers match Waiting, so a Ready token could never fire.
+        (Suspended, Waiting) => true,
+
         // Same-state transitions are always valid (no-op)
         (s, t) if s == t => true,
 
@@ -112,8 +155,8 @@ pub fn is_valid_token_transition(from: TokenStatus, to: TokenStatus) -> bool {
         // - Created → Executing (must go through Ready)
         // - Waiting → Executing (must go through Ready)
         // - Suspended → Executing (must go through Ready)
-        // - Ready → Waiting / Suspended / Completed / Terminated
-        // - Created → Waiting / Suspended / Completed / Terminated
+        // - Ready → Waiting / Completed
+        // - Created → Waiting / Completed
         _ => false,
     }
 }
@@ -134,12 +177,8 @@ pub fn transition_reason(from: TokenStatus, to: TokenStatus) -> &'static str {
             | (TokenStatus::Suspended, TokenStatus::Executing) => {
                 "must transition through Ready before Executing"
             }
-            (TokenStatus::Ready, TokenStatus::Waiting)
-            | (TokenStatus::Ready, TokenStatus::Suspended) => {
-                "Ready tokens must start executing first"
-            }
-            (TokenStatus::Created, TokenStatus::Waiting)
-            | (TokenStatus::Created, TokenStatus::Suspended) => "invalid transition from Created",
+            (TokenStatus::Ready, TokenStatus::Waiting) => "Ready tokens must start executing first",
+            (TokenStatus::Created, TokenStatus::Waiting) => "invalid transition from Created",
             _ => "unknown invalid transition",
         }
     }
@@ -315,10 +354,20 @@ mod tests {
     }
 
     #[test]
-    fn token_created_to_suspended_is_invalid() {
+    fn token_created_to_suspended_is_valid_operator_pause() {
+        // E5-2: instance pause suspends every non-terminal token, from any
+        // active state — including Created (a crash-recovery window state).
         assert!(
-            !is_valid_token_transition(TokenStatus::Created, TokenStatus::Suspended),
-            "Created → Suspended should be invalid"
+            is_valid_token_transition(TokenStatus::Created, TokenStatus::Suspended),
+            "Created → Suspended should be valid (operator pause, E5-2)"
+        );
+    }
+
+    #[test]
+    fn token_created_to_terminated_is_valid_operator_cancel() {
+        assert!(
+            is_valid_token_transition(TokenStatus::Created, TokenStatus::Terminated),
+            "Created → Terminated should be valid (operator cancel, E5-2)"
         );
     }
 
@@ -331,10 +380,11 @@ mod tests {
     }
 
     #[test]
-    fn token_ready_to_suspended_is_invalid() {
+    fn token_ready_to_suspended_is_valid_operator_pause() {
+        // E5-2: pause is a forced operator transition from any active state.
         assert!(
-            !is_valid_token_transition(TokenStatus::Ready, TokenStatus::Suspended),
-            "Ready → Suspended should be invalid (must execute first)"
+            is_valid_token_transition(TokenStatus::Ready, TokenStatus::Suspended),
+            "Ready → Suspended should be valid (operator pause, E5-2)"
         );
     }
 
@@ -347,11 +397,47 @@ mod tests {
     }
 
     #[test]
-    fn token_ready_to_terminated_is_invalid() {
+    fn token_ready_to_terminated_is_valid_operator_cancel() {
+        // E5-2: cancel is a forced operator transition from any active state.
         assert!(
-            !is_valid_token_transition(TokenStatus::Ready, TokenStatus::Terminated),
-            "Ready → Terminated should be invalid (must execute)"
+            is_valid_token_transition(TokenStatus::Ready, TokenStatus::Terminated),
+            "Ready → Terminated should be valid (operator cancel, E5-2)"
         );
+    }
+
+    #[test]
+    fn token_operator_forced_transitions_from_waiting_and_suspended() {
+        // E5-2 (ADR-008): pause suspends a Waiting token; cancel / approval
+        // rejection terminates Waiting and Suspended tokens.
+        assert!(is_valid_token_transition(
+            TokenStatus::Waiting,
+            TokenStatus::Suspended
+        ));
+        assert!(is_valid_token_transition(
+            TokenStatus::Waiting,
+            TokenStatus::Terminated
+        ));
+        assert!(is_valid_token_transition(
+            TokenStatus::Suspended,
+            TokenStatus::Terminated
+        ));
+    }
+
+    #[test]
+    fn token_suspended_to_waiting_is_valid_resume_of_catch_tokens() {
+        // E5-2 (ADR-008 §5): resume restores the PRE-PAUSE semantics. A
+        // timer/message/signal intermediate catch token was Waiting when the
+        // instance was paused (Waiting → Suspended); resume must return it
+        // to Waiting — the catch advance handlers match Waiting, so a Ready
+        // token could never fire (the round trip is legal in both orders).
+        assert!(is_valid_token_transition(
+            TokenStatus::Waiting,
+            TokenStatus::Suspended
+        ));
+        assert!(is_valid_token_transition(
+            TokenStatus::Suspended,
+            TokenStatus::Waiting
+        ));
     }
 
     #[test]
@@ -598,6 +684,16 @@ mod proptests {
                     | (TokenStatus::Executing, TokenStatus::Suspended)
                     | (TokenStatus::Suspended, TokenStatus::Ready)
                     | (TokenStatus::Executing, TokenStatus::Waiting)
+                    // Operator-forced transitions (E5-2, ADR-008).
+                    | (TokenStatus::Created, TokenStatus::Suspended)
+                    | (TokenStatus::Ready, TokenStatus::Suspended)
+                    | (TokenStatus::Waiting, TokenStatus::Suspended)
+                    | (TokenStatus::Created, TokenStatus::Terminated)
+                    | (TokenStatus::Ready, TokenStatus::Terminated)
+                    | (TokenStatus::Waiting, TokenStatus::Terminated)
+                    | (TokenStatus::Suspended, TokenStatus::Terminated)
+                    // Resume restoring pre-pause semantics (E5-2, §5).
+                    | (TokenStatus::Suspended, TokenStatus::Waiting)
             );
             let is_same_state = from == to;
 

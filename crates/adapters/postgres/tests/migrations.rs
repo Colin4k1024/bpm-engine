@@ -52,6 +52,7 @@ const ALL_TABLES: &[&str] = &[
     "parallel_join",
     "dead_letter",
     "idempotency_key",
+    "approval_record",
     "schema_migrations",
 ];
 
@@ -206,15 +207,15 @@ async fn empty_db_migrates_from_scratch() {
     let applied = run_migrations(&pool).await.expect("run_migrations failed");
     assert_eq!(
         applied,
-        vec![1, 2, 3],
+        vec![1, 2, 3, 4],
         "fresh database applies all migrations"
     );
 
     let status = migration_status(&pool)
         .await
         .expect("migration_status failed");
-    assert_eq!(status.applied, vec![1, 2, 3]);
-    assert_eq!(status.latest, 3);
+    assert_eq!(status.applied, vec![1, 2, 3, 4]);
+    assert_eq!(status.latest, 4);
     assert!(status.pending.is_empty());
 
     {
@@ -286,18 +287,18 @@ async fn legacy_schema_is_baselined_and_upgraded() {
 
     let applied = run_migrations(&pool).await.expect("run_migrations failed");
     // 0001 was baseline-STAMPED (recorded, not executed by this call);
-    // only 0002 and 0003 were actually applied here.
+    // only 0002, 0003 and 0004 were actually applied here.
     assert_eq!(
         applied,
-        vec![2, 3],
-        "legacy schema: 0001 stamped as baseline, 0002 and 0003 applied"
+        vec![2, 3, 4],
+        "legacy schema: 0001 stamped as baseline, 0002-0004 applied"
     );
 
     let status = migration_status(&pool)
         .await
         .expect("migration_status failed");
-    assert_eq!(status.applied, vec![1, 2, 3]);
-    assert_eq!(status.latest, 3);
+    assert_eq!(status.applied, vec![1, 2, 3, 4]);
+    assert_eq!(status.latest, 4);
     assert!(status.pending.is_empty());
 
     {
@@ -343,7 +344,7 @@ async fn second_run_is_noop() {
     let pool = db.pool.clone();
 
     let first = run_migrations(&pool).await.expect("first run failed");
-    assert_eq!(first, vec![1, 2, 3]);
+    assert_eq!(first, vec![1, 2, 3, 4]);
 
     let second = run_migrations(&pool).await.expect("second run failed");
     assert!(
@@ -354,8 +355,8 @@ async fn second_run_is_noop() {
     let status = migration_status(&pool)
         .await
         .expect("migration_status failed");
-    assert_eq!(status.applied, vec![1, 2, 3]);
-    assert_eq!(status.latest, 3);
+    assert_eq!(status.applied, vec![1, 2, 3, 4]);
+    assert_eq!(status.latest, 4);
     assert!(status.pending.is_empty());
 
     db.teardown().await;
@@ -373,7 +374,7 @@ async fn pending_detected_when_not_applied() {
         .expect("migration_status failed");
     assert_eq!(status.applied, Vec::<u32>::new());
     assert_eq!(status.latest, 0);
-    assert_eq!(status.pending, vec![1, 2, 3]);
+    assert_eq!(status.pending, vec![1, 2, 3, 4]);
 
     // The server-level startup contract (migrate_on_start = false): a
     // schema with pending migrations must fail validation, naming the
@@ -383,8 +384,8 @@ async fn pending_detected_when_not_applied() {
     let msg = err.to_string();
     assert!(msg.contains("pending migration versions"), "got: {msg}");
     assert!(
-        msg.contains("1, 2, 3"),
-        "error should name versions 1, 2, 3: {msg}"
+        msg.contains("1, 2, 3, 4"),
+        "error should name versions 1, 2, 3, 4: {msg}"
     );
     assert!(
         msg.contains("migrate_on_start"),
@@ -415,7 +416,7 @@ async fn idempotency_key_store_round_trip_after_migration() {
     let pool = db.pool.clone();
 
     let applied = run_migrations(&pool).await.expect("run_migrations failed");
-    assert_eq!(applied, vec![1, 2, 3]);
+    assert_eq!(applied, vec![1, 2, 3, 4]);
 
     let store = PostgresProcessStore::new(pool.clone());
 

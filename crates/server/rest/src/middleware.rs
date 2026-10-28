@@ -412,6 +412,9 @@ const PERMISSIONS: &[(&str, &[&str], &[Role])] = &[
     ("GET", &["process-instances", ANY, "trace"], ROLES),
     ("GET", &["process-instances", ANY, "history"], ROLES),
     ("GET", &["process-instances", ANY, "steps"], ROLES),
+    // E5-2: the approval list of an instance is a read (operators use it
+    // to discover pending approval ids; auditors inspect the records).
+    ("GET", &["process-instances", ANY, "approvals"], ROLES),
     ("GET", &["replay", ANY, "snapshot"], ROLES),
     ("GET", &["process-definitions"], ROLES),
     ("GET", &["process-definitions", ANY], ROLES),
@@ -452,6 +455,25 @@ const PERMISSIONS: &[(&str, &[&str], &[Role])] = &[
     ("POST", &["replay", ANY, "seek"], &[Role::Operator]),
     ("DELETE", &["replay", ANY], &[Role::Operator]),
     ("POST", &["tasks", ANY, "complete"], &[Role::Operator]),
+    // E5-2 instance lifecycle + approvals: operator actions (decide, pause,
+    // resume, cancel — the operator role owns instance lifecycle per
+    // ADR-008 §9).
+    ("POST", &["approvals", ANY, "decide"], &[Role::Operator]),
+    (
+        "POST",
+        &["process-instances", ANY, "pause"],
+        &[Role::Operator],
+    ),
+    (
+        "POST",
+        &["process-instances", ANY, "resume"],
+        &[Role::Operator],
+    ),
+    (
+        "POST",
+        &["process-instances", ANY, "cancel"],
+        &[Role::Operator],
+    ),
     ("POST", &["dead-letters", ANY, "requeue"], &[Role::Operator]),
     ("DELETE", &["dead-letters", ANY], &[Role::Operator]),
     // External-task lease operations: worker ONLY (E5-1 decision — the
@@ -713,6 +735,13 @@ mod tests {
             ("PUT", "/process-definitions/d/deprecate", deployer_only),
             ("POST", "/process-instances", operator_only),
             ("POST", "/process-instances/i/replay", operator_only),
+            // E5-2: approvals + instance lifecycle are operator actions.
+            ("POST", "/approvals/a/decide", operator_only),
+            ("POST", "/process-instances/i/pause", operator_only),
+            ("POST", "/process-instances/i/resume", operator_only),
+            ("POST", "/process-instances/i/cancel", operator_only),
+            // ...while the approval LIST is a read (all roles).
+            ("GET", "/process-instances/i/approvals", all),
             ("POST", "/replay/s/step", operator_only),
             ("DELETE", "/replay/s", operator_only),
             ("POST", "/tasks/t/complete", operator_only),

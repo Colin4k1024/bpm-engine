@@ -7,6 +7,12 @@ use tracing::{debug, info, warn};
 use super::handler::{EngineContext, EventHandler};
 use super::transition::move_token;
 
+/// How long (seconds) a timer on a suspended (paused) host token is
+/// re-postponed before it fires (and re-reschedules) again — a short poll
+/// interval, so the timer fires promptly once resume un-suspends the token
+/// (E5-2 / ADR-008 §2 freeze semantics: rescheduled, never dropped).
+const RESCHEDULLED_POLL_INTERVAL_SECS: u64 = 1;
+
 /// Handler that advances tokens when a timer fires (boundary events and timer catch events).
 pub struct TimerFiredHandler;
 
@@ -50,6 +56,50 @@ impl EventHandler for TimerFiredHandler {
         };
 
         let mut out = vec![];
+
+        // E5-2 pause (ADR-008 §2): a timer whose host token is Suspended is
+        // FROZEN, not consumed. The scheduler already marked the record
+        // Fired before dispatching this event, so a plain early return
+        // would LOSE the deadline forever. Instead, RESCHEDULE the same
+        // timer record (id re-insert, ADR-004): due_at = now + a short poll
+        // interval, status = Scheduled — it re-fires (and re-reschedules)
+        // until the token is un-suspended, and fires normally once resume
+        // has restored the catch/host token. Boundary branches therefore
+        // never fire while paused; the deadline survives the pause.
+        if instance
+            .tokens
+            .iter()
+            .any(|t| t.id == e.token_id && t.status == TokenStatus::Suspended)
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let mut rescheduled = timer_record.clone();
+            rescheduled.status = "Scheduled".to_string();
+            rescheduled.due_at = (now + RESCHEDULLED_POLL_INTERVAL_SECS).to_string();
+            match timer_store.insert(&rescheduled).await {
+                Ok(()) => {
+                    debug!(
+                        instance_id = %instance_id,
+                        timer_id = %e.timer_id,
+                        due_in_secs = RESCHEDULLED_POLL_INTERVAL_SECS,
+                        "timer fired on a suspended (paused) host token; rescheduled \
+                         (frozen) until resume"
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        instance_id = %instance_id,
+                        timer_id = %e.timer_id,
+                        error = %err,
+                        "failed to reschedule a timer on a suspended host token; \
+                         the deadline is lost for this fire"
+                    );
+                }
+            }
+            return vec![];
+        }
 
         match &node.node_type {
             NodeType::BoundaryTimer {

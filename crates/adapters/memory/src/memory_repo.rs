@@ -3,12 +3,13 @@
 
 use async_trait::async_trait;
 use bpm_engine_core::{
-    ExternalTask, ExternalTaskState, InstanceState, ProcessInstance, Token, TokenStatus,
+    ApprovalDecision, ApprovalRecord, ApprovalStatus, ExternalTask, ExternalTaskState,
+    InstanceState, ProcessInstance, Token, TokenStatus,
 };
 use bpm_engine_storage::{
-    CompensationRecordRepo, CompensationRecordRow, ExternalTaskStore, HistoryEvent, HistoryRepo,
-    OutboxEvent, OutboxRepo, ParallelJoinRepo, ProcessInstanceStore, TimerRecord, TimerStore,
-    TokenStore,
+    ApprovalDecideOutcome, ApprovalError, ApprovalStore, CompensationRecordRepo,
+    CompensationRecordRow, ExternalTaskStore, HistoryEvent, HistoryRepo, OutboxEvent, OutboxRepo,
+    ParallelJoinRepo, ProcessInstanceStore, TimerRecord, TimerStore, TokenStore,
 };
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -79,6 +80,8 @@ pub struct MemoryRepo {
     compensation: RwLock<Vec<CompensationRecordRow>>,
     external_tasks: RwLock<HashMap<String, ExternalTaskRow>>,
     history_events: RwLock<Vec<HistoryEventRow>>,
+    /// Engine-owned approval records (E5-2): id -> record.
+    approvals: RwLock<HashMap<String, ApprovalRecord>>,
     /// Start-instance idempotency keys (E2-4): `(tenant_scope, key) ->
     /// instance_id`. The tenant scope is `""` for no tenant.
     idempotency_keys: RwLock<HashMap<(String, String), String>>,
@@ -94,6 +97,7 @@ impl MemoryRepo {
             compensation: RwLock::new(Vec::new()),
             external_tasks: RwLock::new(HashMap::new()),
             history_events: RwLock::new(Vec::new()),
+            approvals: RwLock::new(HashMap::new()),
             idempotency_keys: RwLock::new(HashMap::new()),
         }
     }
@@ -729,6 +733,17 @@ impl ExternalTaskStore for MemoryRepo {
             .get(task_id)
             .map(|r| r.to_external_task()))
     }
+
+    async fn get_by_token(&self, token_id: &str) -> anyhow::Result<Option<ExternalTask>> {
+        // E5-2 grant-effect idempotency: any task row for the token (any
+        // state) proves the approval-grant effect already created it.
+        let guard = self.external_tasks.read().unwrap();
+        let found = guard
+            .values()
+            .find(|r| r.token_id == token_id)
+            .map(|r| r.to_external_task());
+        Ok(found)
+    }
 }
 
 #[async_trait]
@@ -787,6 +802,104 @@ impl HistoryRepo for MemoryRepo {
     }
 }
 
+#[async_trait]
+impl ApprovalStore for MemoryRepo {
+    async fn create(&self, record: &ApprovalRecord) -> anyhow::Result<()> {
+        // Idempotent by subject (instance_id, node_id, token_id): an
+        // existing record is KEPT — a re-arrival of the same token at the
+        // same node (crash recovery, event re-delivery) must not create a
+        // second approval requirement. The whole check-insert runs inside
+        // one write-lock critical section, so concurrent arrivals also
+        // collapse to a single record.
+        let mut guard = self.approvals.write().unwrap();
+        let subject_exists = guard.values().any(|r| {
+            r.instance_id == record.instance_id
+                && r.node_id == record.node_id
+                && r.token_id == record.token_id
+        });
+        if !subject_exists {
+            guard.insert(record.id.clone(), record.clone());
+        }
+        Ok(())
+    }
+
+    async fn get(&self, approval_id: &str) -> anyhow::Result<Option<ApprovalRecord>> {
+        Ok(self.approvals.read().unwrap().get(approval_id).cloned())
+    }
+
+    async fn list_by_instance(&self, instance_id: &str) -> anyhow::Result<Vec<ApprovalRecord>> {
+        let mut out: Vec<ApprovalRecord> = self
+            .approvals
+            .read()
+            .unwrap()
+            .values()
+            .filter(|r| r.instance_id == instance_id)
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        Ok(out)
+    }
+
+    async fn decide(
+        &self,
+        approval_id: &str,
+        decision: ApprovalDecision,
+        actor: &str,
+        note: Option<&str>,
+    ) -> Result<ApprovalDecideOutcome, ApprovalError> {
+        // Only-once, atomically: the status check and the write share ONE
+        // write-lock critical section, so two concurrent decides (or a
+        // decide racing a retry) can never both flip the record — exactly
+        // one observes Pending and writes, the other reads the outcome.
+        //
+        // The DECISION is durable after this critical section; the record's
+        // EFFECT stays Pending until the caller applies it and confirms
+        // with mark_effect_applied (ADR-008 §7.1's re-drivable unit).
+        let mut guard = self.approvals.write().unwrap();
+        let record = guard
+            .get_mut(approval_id)
+            .ok_or_else(|| ApprovalError::NotFound {
+                approval_id: approval_id.to_string(),
+            })?;
+        if record.status != ApprovalStatus::Pending {
+            return Ok(ApprovalDecideOutcome::AlreadyDecided(record.clone()));
+        }
+        record.status = decision.resulting_status();
+        record.effect = bpm_engine_core::ApprovalEffect::Pending;
+        record.decided_by = Some(actor.to_string());
+        record.decided_at = Some(utc_now());
+        record.note = note.map(str::to_string);
+        Ok(ApprovalDecideOutcome::Decided(record.clone()))
+    }
+
+    async fn mark_effect_applied(&self, approval_id: &str) -> anyhow::Result<()> {
+        // Idempotent: an already-applied record stays applied; an unknown
+        // id is a no-op (the caller loaded the record first).
+        if let Some(record) = self.approvals.write().unwrap().get_mut(approval_id) {
+            record.effect = bpm_engine_core::ApprovalEffect::Applied;
+        }
+        Ok(())
+    }
+
+    async fn list_decided_with_pending_effect(&self) -> anyhow::Result<Vec<ApprovalRecord>> {
+        // The startup sweep's work list: decisions whose effect has not
+        // (fully) been applied yet, in creation order.
+        let mut out: Vec<ApprovalRecord> = self
+            .approvals
+            .read()
+            .unwrap()
+            .values()
+            .filter(|r| {
+                r.status != ApprovalStatus::Pending
+                    && r.effect == bpm_engine_core::ApprovalEffect::Pending
+            })
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -836,17 +949,17 @@ mod tests {
     #[tokio::test]
     async fn external_task_store_create_fetch_lock_complete() {
         let repo = MemoryRepo::new();
-        let task_id = repo
-            .create(
-                "token-1",
-                "instance-1",
-                "payment",
-                3,
-                60,
-                HashMap::from([("amount".to_string(), "100".to_string())]),
-            )
-            .await
-            .unwrap();
+        let task_id = ExternalTaskStore::create(
+            &repo,
+            "token-1",
+            "instance-1",
+            "payment",
+            3,
+            60,
+            HashMap::from([("amount".to_string(), "100".to_string())]),
+        )
+        .await
+        .unwrap();
         assert!(!task_id.is_empty());
 
         let tasks = repo
@@ -871,17 +984,27 @@ mod tests {
         .await
         .unwrap();
 
-        let task = repo.get(&task_id).await.unwrap().unwrap();
+        let task = ExternalTaskStore::get(&repo, &task_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(task.state, ExternalTaskState::Completed);
     }
 
     #[tokio::test]
     async fn external_task_store_fail_retry_then_fail() {
         let repo = MemoryRepo::new();
-        let task_id = repo
-            .create("token-1", "instance-1", "notify", 2, 60, HashMap::new())
-            .await
-            .unwrap();
+        let task_id = ExternalTaskStore::create(
+            &repo,
+            "token-1",
+            "instance-1",
+            "notify",
+            2,
+            60,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
 
         repo.fetch_and_lock(
             "worker-1",
@@ -894,7 +1017,10 @@ mod tests {
         repo.fail(&task_id, "worker-1", "timeout".to_string(), None, false)
             .await
             .unwrap();
-        let task = repo.get(&task_id).await.unwrap().unwrap();
+        let task = ExternalTaskStore::get(&repo, &task_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(task.state, ExternalTaskState::Ready);
         assert_eq!(task.retries, 1);
 
@@ -909,7 +1035,10 @@ mod tests {
         repo.fail(&task_id, "worker-1", "again".to_string(), None, false)
             .await
             .unwrap();
-        let task = repo.get(&task_id).await.unwrap().unwrap();
+        let task = ExternalTaskStore::get(&repo, &task_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(task.state, ExternalTaskState::Failed);
     }
 
@@ -918,10 +1047,17 @@ mod tests {
         // E3-2 structured failure: permanent fail goes straight to Failed —
         // no retry decrement, no requeue (fetch finds nothing).
         let repo = MemoryRepo::new();
-        let task_id = repo
-            .create("token-1", "instance-1", "notify", 3, 60, HashMap::new())
-            .await
-            .unwrap();
+        let task_id = ExternalTaskStore::create(
+            &repo,
+            "token-1",
+            "instance-1",
+            "notify",
+            3,
+            60,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
 
         repo.fetch_and_lock(
             "worker-1",
@@ -940,7 +1076,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let task = repo.get(&task_id).await.unwrap().unwrap();
+        let task = ExternalTaskStore::get(&repo, &task_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(task.state, ExternalTaskState::Failed);
         assert_eq!(task.retries, 3, "permanent fail must not decrement retries");
         assert!(task.error_message.unwrap().contains("permanent"));
@@ -961,10 +1100,10 @@ mod tests {
     #[tokio::test]
     async fn external_task_store_reclaim_expired_locks() {
         let repo = MemoryRepo::new();
-        let _ = repo
-            .create("token-1", "instance-1", "job", 1, 60, HashMap::new())
-            .await
-            .unwrap();
+        let _ =
+            ExternalTaskStore::create(&repo, "token-1", "instance-1", "job", 1, 60, HashMap::new())
+                .await
+                .unwrap();
         repo.fetch_and_lock("worker-1", &["job".to_string()], 10, Duration::from_secs(0))
             .await
             .unwrap();
@@ -981,6 +1120,245 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tasks.len(), 1);
+    }
+
+    // --- ApprovalStore (E5-2) ------------------------------------------------
+
+    fn make_approval(id: &str, token_id: &str) -> ApprovalRecord {
+        ApprovalRecord {
+            id: id.to_string(),
+            instance_id: "inst-1".to_string(),
+            node_id: "charge".to_string(),
+            token_id: token_id.to_string(),
+            task_type: "payment_charge".to_string(),
+            status: ApprovalStatus::Pending,
+            effect: bpm_engine_core::ApprovalEffect::Pending,
+            decided_by: None,
+            decided_at: None,
+            note: None,
+            created_at: "1000".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_create_is_idempotent_by_subject() {
+        // Two arrivals of the same token at the same node (crash recovery /
+        // re-delivery) collapse to ONE record: the first id and status win.
+        let repo = MemoryRepo::new();
+        ApprovalStore::create(&repo, &make_approval("appr-a", "tok-1"))
+            .await
+            .unwrap();
+        let second = make_approval("appr-b", "tok-1");
+        ApprovalStore::create(&repo, &second).await.unwrap();
+
+        let all = ApprovalStore::list_by_instance(&repo, "inst-1")
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 1, "same subject must not create a second record");
+        assert_eq!(all[0].id, "appr-a", "the original record is kept");
+
+        // A DIFFERENT token at the same node is a different subject.
+        ApprovalStore::create(&repo, &make_approval("appr-c", "tok-2"))
+            .await
+            .unwrap();
+        assert_eq!(
+            ApprovalStore::list_by_instance(&repo, "inst-1")
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_decide_is_only_once_and_returns_original_outcome() {
+        let repo = MemoryRepo::new();
+        ApprovalStore::create(&repo, &make_approval("appr-1", "tok-1"))
+            .await
+            .unwrap();
+
+        // First decide wins.
+        match repo
+            .decide("appr-1", ApprovalDecision::Approve, "alice", Some("ok"))
+            .await
+            .unwrap()
+        {
+            ApprovalDecideOutcome::Decided(r) => {
+                assert_eq!(r.status, ApprovalStatus::Approved);
+                assert_eq!(r.decided_by.as_deref(), Some("alice"));
+                assert_eq!(r.note.as_deref(), Some("ok"));
+                assert!(r.decided_at.is_some());
+                // The DECISION is durable but the EFFECT is still pending —
+                // the caller applies it and confirms (ADR-008 §7.1).
+                assert_eq!(r.effect, bpm_engine_core::ApprovalEffect::Pending);
+            }
+            other => panic!("expected Decided, got {other:?}"),
+        }
+
+        // Retried SAME decision: replay with the original outcome.
+        match repo
+            .decide("appr-1", ApprovalDecision::Approve, "alice", None)
+            .await
+            .unwrap()
+        {
+            ApprovalDecideOutcome::AlreadyDecided(r) => {
+                assert_eq!(r.status, ApprovalStatus::Approved);
+                assert_eq!(r.decided_by.as_deref(), Some("alice"));
+                // The note of the winning decide survives, not the retry's.
+                assert_eq!(r.note.as_deref(), Some("ok"));
+            }
+            other => panic!("expected AlreadyDecided, got {other:?}"),
+        }
+
+        // A conflicting decision never flips the record.
+        let outcome = repo
+            .decide("appr-1", ApprovalDecision::Reject, "bob", None)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ApprovalDecideOutcome::AlreadyDecided(_)));
+        assert_eq!(
+            ApprovalStore::get(&repo, "appr-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            ApprovalStatus::Approved
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_decide_reject_path_and_not_found() {
+        let repo = MemoryRepo::new();
+        ApprovalStore::create(&repo, &make_approval("appr-2", "tok-9"))
+            .await
+            .unwrap();
+
+        match repo
+            .decide("appr-2", ApprovalDecision::Reject, "bob", Some("no"))
+            .await
+            .unwrap()
+        {
+            ApprovalDecideOutcome::Decided(r) => {
+                assert_eq!(r.status, ApprovalStatus::Rejected);
+            }
+            other => panic!("expected Decided, got {other:?}"),
+        }
+
+        let err = repo
+            .decide("missing", ApprovalDecision::Approve, "x", None)
+            .await
+            .unwrap_err();
+        match err {
+            ApprovalError::NotFound { approval_id } => assert_eq!(approval_id, "missing"),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_list_by_instance_is_creation_ordered() {
+        let repo = MemoryRepo::new();
+        let mut first = make_approval("appr-b", "tok-1");
+        first.created_at = "1002".to_string();
+        let mut second = make_approval("appr-a", "tok-2");
+        second.created_at = "1001".to_string();
+        let mut other_instance = make_approval("appr-x", "tok-3");
+        other_instance.instance_id = "inst-2".to_string();
+        ApprovalStore::create(&repo, &first).await.unwrap();
+        ApprovalStore::create(&repo, &second).await.unwrap();
+        ApprovalStore::create(&repo, &other_instance).await.unwrap();
+
+        let ids: Vec<String> = ApprovalStore::list_by_instance(&repo, "inst-1")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec!["appr-a", "appr-b"]);
+    }
+
+    #[tokio::test]
+    async fn approval_effect_lifecycle_and_sweep_list() {
+        // E5-2 (ADR-008 §7.1): decide leaves the effect Pending;
+        // mark_effect_applied flips it (idempotently);
+        // list_decided_with_pending_effect is the sweep's work list —
+        // undecided records and applied effects are NOT on it.
+        let repo = MemoryRepo::new();
+        ApprovalStore::create(&repo, &make_approval("appr-1", "tok-1"))
+            .await
+            .unwrap();
+        ApprovalStore::create(&repo, &make_approval("appr-2", "tok-2"))
+            .await
+            .unwrap();
+        ApprovalStore::create(&repo, &make_approval("appr-3", "tok-3"))
+            .await
+            .unwrap();
+
+        repo.decide("appr-1", ApprovalDecision::Approve, "a", None)
+            .await
+            .unwrap();
+        repo.decide("appr-2", ApprovalDecision::Reject, "b", None)
+            .await
+            .unwrap();
+        // appr-3 stays undecided.
+
+        let pending_effect = repo.list_decided_with_pending_effect().await.unwrap();
+        assert_eq!(
+            pending_effect
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["appr-1", "appr-2"],
+            "both decisions have a pending effect; the undecided record does not"
+        );
+
+        // The caller applied appr-1's effect: confirmed, idempotently.
+        repo.mark_effect_applied("appr-1").await.unwrap();
+        repo.mark_effect_applied("appr-1").await.unwrap();
+        assert_eq!(
+            ApprovalStore::get(&repo, "appr-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .effect,
+            bpm_engine_core::ApprovalEffect::Applied
+        );
+        // An unknown id is a tolerated no-op (the route loads first).
+        repo.mark_effect_applied("missing").await.unwrap();
+
+        let pending_effect = repo.list_decided_with_pending_effect().await.unwrap();
+        assert_eq!(
+            pending_effect
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["appr-2"],
+            "only the unconfirmed decision remains on the sweep list"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_task_get_by_token_finds_any_state() {
+        // E5-2 grant-effect idempotency guard: any task row for the token
+        // (here: Locked after a fetch) proves the grant effect already ran.
+        let repo = MemoryRepo::new();
+        assert!(
+            repo.get_by_token("tok-1").await.unwrap().is_none(),
+            "no task exists yet for the token"
+        );
+        ExternalTaskStore::create(&repo, "tok-1", "inst-1", "job", 1, 60, HashMap::new())
+            .await
+            .unwrap();
+        repo.fetch_and_lock("w-1", &["job".to_string()], 10, Duration::from_secs(30))
+            .await
+            .unwrap();
+
+        let found = repo.get_by_token("tok-1").await.unwrap().unwrap();
+        assert_eq!(found.token_id, "tok-1");
+        assert_eq!(found.process_instance_id, "inst-1");
+        assert!(
+            repo.get_by_token("tok-other").await.unwrap().is_none(),
+            "another token has no task"
+        );
     }
 
     #[tokio::test]
@@ -1007,13 +1385,13 @@ mod tests {
             .await
             .unwrap();
         repo.save(&make_instance("inst-none", None)).await.unwrap();
-        repo.create("tok-a", "inst-a", "job", 1, 60, HashMap::new())
+        ExternalTaskStore::create(&repo, "tok-a", "inst-a", "job", 1, 60, HashMap::new())
             .await
             .unwrap();
-        repo.create("tok-b", "inst-b", "job", 1, 60, HashMap::new())
+        ExternalTaskStore::create(&repo, "tok-b", "inst-b", "job", 1, 60, HashMap::new())
             .await
             .unwrap();
-        repo.create("tok-n", "inst-none", "job", 1, 60, HashMap::new())
+        ExternalTaskStore::create(&repo, "tok-n", "inst-none", "job", 1, 60, HashMap::new())
             .await
             .unwrap();
 

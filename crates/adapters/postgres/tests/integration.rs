@@ -739,3 +739,170 @@ async fn external_task_store_complete_expiry_guard_and_epoch_updated_at() {
         updated_at
     );
 }
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn approval_store_only_once_and_subject_idempotent() {
+    // E5-2 (ADR-008): the Postgres approval store must match the memory
+    // adapter's only-once decide and subject-idempotent create semantics.
+    use bpm_engine_adapter_postgres::PostgresApprovalStore;
+    use bpm_engine_core::{ApprovalDecision, ApprovalEffect, ApprovalRecord, ApprovalStatus};
+    use bpm_engine_storage::{ApprovalDecideOutcome, ApprovalError, ApprovalStore};
+
+    let (pool, _container) = setup_pool().await;
+    let store = PostgresApprovalStore::new(pool.clone());
+    let instance_id = "inst-appr-1";
+    insert_test_instance(&pool, instance_id).await;
+
+    let record = ApprovalRecord {
+        id: "appr-1".to_string(),
+        instance_id: instance_id.to_string(),
+        node_id: "charge".to_string(),
+        token_id: "tok-1".to_string(),
+        task_type: "payment_charge".to_string(),
+        status: ApprovalStatus::Pending,
+        effect: ApprovalEffect::Pending,
+        decided_by: None,
+        decided_at: None,
+        note: None,
+        created_at: "1000".to_string(),
+    };
+    ApprovalStore::create(&store, &record).await.unwrap();
+
+    // Subject idempotency: the same (instance, node, token) keeps the
+    // original record (id and all).
+    let duplicate = ApprovalRecord {
+        id: "appr-dup".to_string(),
+        ..record.clone()
+    };
+    ApprovalStore::create(&store, &duplicate).await.unwrap();
+    assert_eq!(
+        ApprovalStore::get(&store, "appr-dup").await.unwrap(),
+        None,
+        "a duplicate subject insert must not create a second record"
+    );
+    assert_eq!(
+        ApprovalStore::get(&store, "appr-1")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "appr-1"
+    );
+
+    // First decide wins; a retried same decide replays; a conflicting
+    // decide never flips the record.
+    match ApprovalStore::decide(
+        &store,
+        "appr-1",
+        ApprovalDecision::Approve,
+        "alice",
+        Some("ok"),
+    )
+    .await
+    .unwrap()
+    {
+        ApprovalDecideOutcome::Decided(r) => {
+            assert_eq!(r.status, ApprovalStatus::Approved);
+            assert_eq!(r.decided_by.as_deref(), Some("alice"));
+            assert_eq!(r.note.as_deref(), Some("ok"));
+            // The DECISION is durable but the EFFECT is still Pending
+            // (ADR-008 §7.1's re-drivable unit) — the sweep list sees it.
+            assert_eq!(r.effect, ApprovalEffect::Pending);
+        }
+        other => panic!("expected Decided, got {other:?}"),
+    }
+    let sweep = ApprovalStore::list_decided_with_pending_effect(&store)
+        .await
+        .unwrap();
+    assert_eq!(
+        sweep.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        vec!["appr-1"],
+        "the unconfirmed decision is on the sweep list"
+    );
+    ApprovalStore::mark_effect_applied(&store, "appr-1")
+        .await
+        .unwrap();
+    ApprovalStore::mark_effect_applied(&store, "appr-1")
+        .await
+        .unwrap();
+    assert_eq!(
+        ApprovalStore::get(&store, "appr-1")
+            .await
+            .unwrap()
+            .unwrap()
+            .effect,
+        ApprovalEffect::Applied,
+        "mark_effect_applied is idempotent and flips the effect"
+    );
+    assert!(
+        ApprovalStore::list_decided_with_pending_effect(&store)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the confirmed decision is off the sweep list"
+    );
+    match ApprovalStore::decide(&store, "appr-1", ApprovalDecision::Approve, "alice", None)
+        .await
+        .unwrap()
+    {
+        ApprovalDecideOutcome::AlreadyDecided(r) => {
+            assert_eq!(r.status, ApprovalStatus::Approved);
+            assert_eq!(r.note.as_deref(), Some("ok"));
+            // The replay observes the applied effect (nothing to re-drive).
+            assert_eq!(r.effect, ApprovalEffect::Applied);
+        }
+        other => panic!("expected AlreadyDecided, got {other:?}"),
+    }
+    assert!(matches!(
+        ApprovalStore::decide(&store, "appr-1", ApprovalDecision::Reject, "bob", None)
+            .await
+            .unwrap(),
+        ApprovalDecideOutcome::AlreadyDecided(_)
+    ));
+    assert_eq!(
+        ApprovalStore::get(&store, "appr-1")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ApprovalStatus::Approved
+    );
+
+    // Reject path + list ordering + NotFound classification.
+    let second = ApprovalRecord {
+        id: "appr-2".to_string(),
+        token_id: "tok-2".to_string(),
+        created_at: "1001".to_string(),
+        ..record
+    };
+    ApprovalStore::create(&store, &second).await.unwrap();
+    match ApprovalStore::decide(
+        &store,
+        "appr-2",
+        ApprovalDecision::Reject,
+        "bob",
+        Some("no"),
+    )
+    .await
+    .unwrap()
+    {
+        ApprovalDecideOutcome::Decided(r) => assert_eq!(r.status, ApprovalStatus::Rejected),
+        other => panic!("expected Decided, got {other:?}"),
+    }
+    let listed = ApprovalStore::list_by_instance(&store, instance_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        vec!["appr-1", "appr-2"]
+    );
+
+    match ApprovalStore::decide(&store, "missing", ApprovalDecision::Approve, "x", None)
+        .await
+        .unwrap_err()
+    {
+        ApprovalError::NotFound { approval_id } => assert_eq!(approval_id, "missing"),
+        other => panic!("expected NotFound, got {other:?}"),
+    }
+}

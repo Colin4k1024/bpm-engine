@@ -79,6 +79,45 @@ created_at
   re-recording a key overwrites the mapping.
 - Index: `idx_idempotency_key_instance (instance_id)`.
 
+### 2.3 `approval_record` (E5-2, ADR-008, migration 0004)
+
+Engine-owned approval records for approval-required external-task steps
+(`engine.approval_required_task_types`): one row per step visit,
+subject-unique on `(instance_id, node_id, token_id)`.
+
+```
+approval_record
+-----------------------------
+id (pk)               -- UUID; the decide endpoint's approval_id
+instance_id (fk)      -- ON DELETE CASCADE
+node_id
+token_id
+task_type
+status                -- 'Pending' | 'Approved' | 'Rejected' (the DECISION)
+effect                -- 'Pending' | 'Applied' (whether the decision's EFFECT ran)
+decided_by            -- actor (verified sub) once decided
+decided_at
+note
+created_at
+```
+
+- `status` is the DECISION, flipped exactly once by the store's conditional
+  `UPDATE ... WHERE status = 'Pending'` (only-once: a concurrent or retried
+  decide reads the original outcome back).
+- `effect` is the re-drivable-unit flag (ADR-008 §7.1): `decide` commits the
+  decision with `effect = 'Pending'`; the effect application (task creation
+  on grant; dead letter + token-terminal on reject) confirms it with
+  `mark_effect_applied` (idempotent). A decided row with a pending effect is
+  re-driven by a retried same-decision decide and by the server's startup
+  sweep (`list_decided_with_pending_effect`).
+- `create` is idempotent by subject (`ON CONFLICT (instance_id, node_id,
+  token_id) DO NOTHING`) — token re-arrival never creates a second approval
+  requirement.
+- Indexes: `idx_approval_subject (instance_id, node_id, token_id)` UNIQUE;
+  `idx_approval_instance (instance_id)`;
+  `idx_approval_pending_effect (effect) WHERE effect = 'Pending'` (the
+  startup-sweep lookup).
+
 ---
 
 ## 3. token
@@ -287,9 +326,10 @@ restore from backup / PITR, never automatic down-migrations).
 
 ```
 crates/adapters/postgres/migrations/
-├── 0001_init.sql             # initial schema (exact inline-migrate-era DDL)
-├── 0002_query_indexes.sql    # hot-path indexes (process_instance.state, token.instance_id)
-└── 0003_idempotency_keys.sql # start-instance idempotency keys (E2-4)
+├── 0001_init.sql              # initial schema (exact inline-migrate-era DDL)
+├── 0002_query_indexes.sql     # hot-path indexes (process_instance.state, token.instance_id)
+├── 0003_idempotency_keys.sql  # start-instance idempotency keys (E2-4)
+└── 0004_approval_records.sql  # engine-owned approval records (E5-2, ADR-008)
 ```
 
 Rules:
@@ -347,14 +387,15 @@ covered by CI (the `migrations` job) and by the dual-mode tests in
 
 - `db_migrations: "ok"` (or `degraded` with pending versions — should not
   happen, since startup validation rejects pending migrations),
-- `db_schema_version: <latest applied version>` (e.g. `3`).
+- `db_schema_version: <latest applied version>` (e.g. `4`).
 
 ### deploy/schema.sql
 
 `deploy/schema.sql` is now a **reference artifact** kept in sync with
-migrations 0001 + 0002 (it no longer drives schema creation). A database
-initialized from it is recognized by the runner as a pre-versioning schema
-and baseline-stamped, converging to the same versioned state.
+migrations 0001 + 0002 + 0003 + 0004 (it no longer drives schema creation).
+A database initialized from it is recognized by the runner as a
+pre-versioning schema and baseline-stamped, converging to the same
+versioned state.
 
 ---
 
