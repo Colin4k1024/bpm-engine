@@ -79,6 +79,9 @@ pub struct MemoryRepo {
     compensation: RwLock<Vec<CompensationRecordRow>>,
     external_tasks: RwLock<HashMap<String, ExternalTaskRow>>,
     history_events: RwLock<Vec<HistoryEventRow>>,
+    /// Start-instance idempotency keys (E2-4): `(tenant_scope, key) ->
+    /// instance_id`. The tenant scope is `""` for no tenant.
+    idempotency_keys: RwLock<HashMap<(String, String), String>>,
 }
 
 impl MemoryRepo {
@@ -91,6 +94,7 @@ impl MemoryRepo {
             compensation: RwLock::new(Vec::new()),
             external_tasks: RwLock::new(HashMap::new()),
             history_events: RwLock::new(Vec::new()),
+            idempotency_keys: RwLock::new(HashMap::new()),
         }
     }
 
@@ -162,6 +166,49 @@ impl ProcessInstanceStore for MemoryRepo {
             .into_iter()
             .map(|i| i.id)
             .collect())
+    }
+
+    async fn list_page(
+        &self,
+        tenant_id: Option<&str>,
+        offset: u64,
+        limit: u64,
+    ) -> anyhow::Result<Vec<String>> {
+        // Same tenant filter and deterministic id ordering as list_all;
+        // the window is applied in-memory.
+        let mut ids = self.list_all(tenant_id).await?;
+        let offset = (offset as usize).min(ids.len());
+        ids.drain(..offset);
+        ids.truncate(limit as usize);
+        Ok(ids)
+    }
+
+    async fn find_idempotency_key(
+        &self,
+        key: &str,
+        tenant_id: Option<&str>,
+    ) -> anyhow::Result<Option<String>> {
+        let scope = tenant_id.unwrap_or("");
+        Ok(self
+            .idempotency_keys
+            .read()
+            .unwrap()
+            .get(&(scope.to_string(), key.to_string()))
+            .cloned())
+    }
+
+    async fn save_idempotency_key(
+        &self,
+        key: &str,
+        tenant_id: Option<&str>,
+        instance_id: &str,
+    ) -> anyhow::Result<()> {
+        let scope = tenant_id.unwrap_or("");
+        self.idempotency_keys.write().unwrap().insert(
+            (scope.to_string(), key.to_string()),
+            instance_id.to_string(),
+        );
+        Ok(())
     }
 }
 

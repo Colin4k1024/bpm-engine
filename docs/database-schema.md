@@ -56,6 +56,29 @@ scheme are specified in `docs/variables-and-artifacts.md` (contract) and
 `docs/adr/ADR-007-structured-variables-and-artifact-uris.md` (decision) —
 no schema change was needed for E2-3.
 
+### 2.2 `idempotency_key` (E2-4, migration 0003)
+
+Start-instance idempotency keys: `Idempotency-Key` → instance mapping,
+recorded by `POST /api/v1/process-instances` when the header is present
+(see `docs/api-spec.md` §5c).
+
+```
+idempotency_key
+-----------------------------
+key          (pk, together with tenant_id)
+tenant_id    (pk) -- TEXT NOT NULL DEFAULT ''; '' = no tenant
+instance_id
+created_at
+```
+
+- `tenant_id` is `NOT NULL DEFAULT ''` rather than NULL: a NULL column
+  value inside a PostgreSQL PRIMARY KEY does not participate in
+  uniqueness, which would silently break the `(key, tenant)` contract.
+  No-tenant keys are stored as the empty string.
+- Writes use an upsert (`ON CONFLICT (key, tenant_id) DO UPDATE`), so
+  re-recording a key overwrites the mapping.
+- Index: `idx_idempotency_key_instance (instance_id)`.
+
 ---
 
 ## 3. token
@@ -265,7 +288,8 @@ restore from backup / PITR, never automatic down-migrations).
 ```
 crates/adapters/postgres/migrations/
 ├── 0001_init.sql             # initial schema (exact inline-migrate-era DDL)
-└── 0002_query_indexes.sql    # hot-path indexes (process_instance.state, token.instance_id)
+├── 0002_query_indexes.sql    # hot-path indexes (process_instance.state, token.instance_id)
+└── 0003_idempotency_keys.sql # start-instance idempotency keys (E2-4)
 ```
 
 Rules:
@@ -323,7 +347,7 @@ covered by CI (the `migrations` job) and by the dual-mode tests in
 
 - `db_migrations: "ok"` (or `degraded` with pending versions — should not
   happen, since startup validation rejects pending migrations),
-- `db_schema_version: <latest applied version>` (e.g. `2`).
+- `db_schema_version: <latest applied version>` (e.g. `3`).
 
 ### deploy/schema.sql
 

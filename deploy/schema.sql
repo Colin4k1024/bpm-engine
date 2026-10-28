@@ -156,3 +156,15 @@ CREATE TABLE IF NOT EXISTS dead_letter (
 );
 CREATE INDEX IF NOT EXISTS idx_dead_letter_instance ON dead_letter(process_instance_id);
 CREATE INDEX IF NOT EXISTS idx_dead_letter_type ON dead_letter(task_type);
+
+-- Idempotency keys for start-instance (E2-4, migration 0003).
+-- tenant_id is NOT NULL DEFAULT '' (no tenant = ''); a NULL would not
+-- participate in the PRIMARY KEY uniqueness.
+CREATE TABLE IF NOT EXISTS idempotency_key (
+    key TEXT NOT NULL,
+    tenant_id TEXT NOT NULL DEFAULT '',
+    instance_id TEXT NOT NULL,
+    created_at TEXT,
+    PRIMARY KEY (key, tenant_id)
+);
+CREATE INDEX IF NOT EXISTS idx_idempotency_key_instance ON idempotency_key(instance_id);

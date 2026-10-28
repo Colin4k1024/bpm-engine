@@ -95,6 +95,39 @@ pub trait ProcessInstanceStore: Send + Sync {
     /// and terminated instances. Implementations must return ids in a
     /// deterministic order (sorted by instance id).
     async fn list_all(&self, tenant_id: Option<&str>) -> anyhow::Result<Vec<String>>;
+
+    /// List one page of instance ids (all states), in the same deterministic
+    /// order as [`ProcessInstanceStore::list_all`] (sorted by instance id).
+    ///
+    /// Returns at most `limit` ids starting at `offset` (an offset beyond the
+    /// end returns an empty vec). Backends with SQL support push the window
+    /// down (`LIMIT`/`OFFSET`); this is the hot listing path for the
+    /// paginated `GET /api/v1/process-instances` endpoint (E2-4).
+    async fn list_page(
+        &self,
+        tenant_id: Option<&str>,
+        offset: u64,
+        limit: u64,
+    ) -> anyhow::Result<Vec<String>>;
+
+    /// Look up the instance id previously recorded for a start-instance
+    /// idempotency key (E2-4). `Ok(None)` when the key is unknown for the
+    /// given tenant scope.
+    async fn find_idempotency_key(
+        &self,
+        key: &str,
+        tenant_id: Option<&str>,
+    ) -> anyhow::Result<Option<String>>;
+
+    /// Record (upsert) the instance id for a start-instance idempotency key
+    /// (E2-4). The key is scoped by tenant: the same key under different
+    /// tenants maps to different instances.
+    async fn save_idempotency_key(
+        &self,
+        key: &str,
+        tenant_id: Option<&str>,
+        instance_id: &str,
+    ) -> anyhow::Result<()>;
 }
 
 /// Stores BPMN process definitions (loaded from XML at deploy time).
