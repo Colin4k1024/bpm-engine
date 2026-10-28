@@ -262,9 +262,30 @@ impl EventHandler for TokenArrivedHandler {
                     instance.tokens[token_idx].status = TokenStatus::Waiting;
                 }
             }
-            NodeType::TimerIntermediateCatch { .. } => {
-                // Timer events are handled via the timer scheduler;
-                // mark the token as waiting until the timer fires.
+            NodeType::TimerIntermediateCatch { timer_definition } => {
+                // Schedule the persistent timer for this catch event: the
+                // token waits until the background scheduler (ADR-004) picks
+                // up the record from TimerStore::list_due and emits
+                // TimerFired. Without the record the token would wait forever.
+                if let Some(ref timer_store) = ctx.timer_store {
+                    let fire_at = parse_duration_to_epoch(timer_definition);
+                    let timer_id = uuid::Uuid::new_v4().to_string();
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()
+                        .to_string();
+                    let record = bpm_engine_storage::TimerRecord {
+                        id: timer_id,
+                        token_id: e.token_id.clone(),
+                        instance_id: e.instance_id.clone(),
+                        node_id: e.node_id.to_string(),
+                        due_at: fire_at.to_string(),
+                        status: "Scheduled".to_string(),
+                        created_at: now,
+                    };
+                    let _ = timer_store.insert(&record).await;
+                }
                 instance.tokens[token_idx].status = TokenStatus::Waiting;
             }
             NodeType::BoundaryTimer { .. } | NodeType::BoundaryError { .. } => {

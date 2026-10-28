@@ -120,7 +120,49 @@ On restart:
 
 ---
 
-## 8. Timer Recovery
+## 8. External Task Side-Effect Semantics (At-Least-Once)
+
+External tasks delegate work to external workers under a lease. The engine guarantees **exactly-once state transitions** but only **at-least-once side-effect execution**.
+
+### 8.1 Lease ownership
+
+- While a task is `LOCKED`, exactly one worker owns it
+- `fetch_and_lock` is atomic: the memory adapter locks in a single write-lock critical section (ADR-001); the PostgreSQL adapter uses a transaction with `FOR UPDATE SKIP LOCKED`
+- `complete` / `fail` verify state, owner, and (for `complete`) lease expiry
+
+### 8.2 Lease expiry
+
+- Locks expire; `lock_expire_at` is persisted (TEXT unix-epoch seconds)
+- An expired task is reclaimed to `READY` on the next fetch sweep and **redelivered to another worker**
+- The original owner's late `complete` is rejected (`LockExpired` / lease-conflict; HTTP 400)
+
+### 8.3 Duplicate completion
+
+- A duplicate `complete` is rejected by the store (the task is no longer `LOCKED`)
+- The REST layer maps this to a 4xx — the rejected request never reaches the engine event loop
+- Token transitions therefore happen exactly once (see `invariants.md` §1 and §3)
+
+### 8.4 Worker crash mid-execution
+
+- A crashed worker never completes; its lease expires; the task is redelivered
+- The same side effect may execute **more than once**
+- Workers must be idempotent — use the `task_id` (or a business key from variables) as an idempotency key; see `crates/worker-sdk/examples/idempotency.rs`
+
+### 8.5 Retry backoff (current limitation)
+
+`fail(retry_after)` resets the task to `READY` with a future `lock_expire_at`, but `READY` tasks are immediately fetchable: the backoff is **not enforced**. Do not rely on `retry_after` to delay re-execution.
+
+### 8.6 The boundary
+
+> The engine guarantees token transitions happen exactly once. Side effects in workers may execute more than once.
+
+Verified at the REST level by `crates/server/rest/tests/scheduler_workers.rs` (memory driver, runs in CI) and `crates/server/rest/tests/scheduler_workers_postgres.rs` (PostgreSQL, Docker).
+
+Cross-references: `adr/ADR-001-fetch-and-lock-race.md` (fetch-and-lock race), `invariants.md` (external task invariants).
+
+---
+
+## 9. Timer Recovery
 
 Timers are persisted with:
 
@@ -134,7 +176,7 @@ On recovery:
 
 ---
 
-## 9. Saga Recovery
+## 10. Saga Recovery
 
 Saga recovery relies on facts:
 
@@ -146,7 +188,7 @@ Saga resumes deterministically.
 
 ---
 
-## 10. Rehydration Process
+## 11. Rehydration Process
 
 Rehydration steps:
 
@@ -157,7 +199,7 @@ Rehydration steps:
 
 ---
 
-## 11. What Recovery Never Does
+## 12. What Recovery Never Does
 
 Recovery does **not**:
 
@@ -169,7 +211,7 @@ If state is unclear, the engine chooses **safety over progress**.
 
 ---
 
-## 12. Operational Guarantees
+## 13. Operational Guarantees
 
 This model guarantees:
 
@@ -179,10 +221,12 @@ This model guarantees:
 
 ---
 
-## 13. Relationship to Other Documents
+## 14. Relationship to Other Documents
 
 - Execution & concurrency: `execution-model.md`
 - Saga & compensation: `saga.md`
+- External task invariants: `invariants.md` §3
+- Fetch-and-lock race fix: `adr/ADR-001-fetch-and-lock-race.md`
 
 ---
 
