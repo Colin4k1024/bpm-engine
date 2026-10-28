@@ -65,6 +65,9 @@ lcov.info
 tarpaulin-report.html
 cobertura.xml
 
+# E6-3 regression-eval harness output (examples/regression_eval.rs)
+regression-report.json
+
 # Documentation build
 docs/book/
 docs/_build/
