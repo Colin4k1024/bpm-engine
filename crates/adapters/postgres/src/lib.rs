@@ -30,6 +30,7 @@
 pub mod approval_store;
 pub mod compensation;
 pub mod dead_letter_store;
+pub mod event_inbox_store;
 pub mod event_store;
 pub mod external_task_store;
 pub mod history;
@@ -44,6 +45,7 @@ pub mod token_store;
 pub use approval_store::PostgresApprovalStore;
 pub use compensation::PostgresCompensationRepo;
 pub use dead_letter_store::PostgresDeadLetterStore;
+pub use event_inbox_store::PostgresEventInboxStore;
 pub use event_store::PostgresOutboxRepo;
 pub use external_task_store::PostgresExternalTaskStore;
 pub use history::PostgresHistoryRepo;
