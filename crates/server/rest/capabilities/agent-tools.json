@@ -2961,8 +2961,8 @@
     {
       "name": "list_compensation",
       "operation": "GET /api/v1/process-instances/{id}/compensation",
-      "summary": "List compensation records for an instance",
-      "description": "Returns every compensation record of the instance, sorted by `order`\nascending (N4-2). A read — every authenticated role may list\ncompensation records.",
+      "summary": "Operator recovery view of an instance's compensation records",
+      "description": "Returns a compensation recovery view (N4-2 list, N4-3 enriched) for\nthe instance: the instance lifecycle state, per-status summary\ncounts, a derived `blocking_reason` when the instance is blocked by\ncompensation, the `available_actions` the operator may take, and the\nfull record list sorted by `order` ascending. A read — every\nauthenticated role may list compensation records.",
       "classification": "read_only",
       "side_effects": "none",
       "auth_required": true,
@@ -2989,8 +2989,8 @@
       "responses": {
         "success": {
           "status": 200,
-          "description": "Compensation records for the instance.",
-          "schema": "CompensationRecordList"
+          "description": "Compensation recovery view for the instance.",
+          "schema": "CompensationView"
         },
         "errors": [
           {

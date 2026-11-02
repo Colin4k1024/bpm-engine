@@ -1474,22 +1474,25 @@ paths:
   /api/v1/process-instances/{id}/compensation:
     get:
       operationId: listCompensation
-      summary: List compensation records for an instance
+      summary: Operator recovery view of an instance's compensation records
       description: |
-        Returns every compensation record of the instance, sorted by `order`
-        ascending (N4-2). A read — every authenticated role may list
-        compensation records.
+        Returns a compensation recovery view (N4-2 list, N4-3 enriched) for
+        the instance: the instance lifecycle state, per-status summary
+        counts, a derived `blocking_reason` when the instance is blocked by
+        compensation, the `available_actions` the operator may take, and the
+        full record list sorted by `order` ascending. A read — every
+        authenticated role may list compensation records.
       tags: [ProcessInstances]
       parameters:
         - $ref: "#/components/parameters/InstanceId"
         - $ref: "#/components/parameters/TenantId"
       responses:
         "200":
-          description: Compensation records for the instance.
+          description: Compensation recovery view for the instance.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CompensationRecordList"
+                $ref: "#/components/schemas/CompensationView"
         "404": { $ref: "#/components/responses/NotFound" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -3405,6 +3408,69 @@ components:
       type: array
       items:
         $ref: "#/components/schemas/CompensationRecordView"
+
+    CompensationSummary:
+      type: object
+      description: |
+        Per-status counts of an instance's compensation records (N4-3).
+        `total` is the record count; the remaining fields partition it by
+        ADR-012 status.
+      required:
+        - total
+        - pending
+        - running
+        - completed
+        - failed
+        - skipped
+      properties:
+        total: { type: integer }
+        pending: { type: integer }
+        running: { type: integer }
+        completed: { type: integer }
+        failed: { type: integer }
+        skipped: { type: integer }
+
+    CompensationView:
+      type: object
+      description: |
+        Operator recovery view of an instance's compensation records (N4-3).
+        Wraps the raw record list with the derived context an operator needs
+        to decide the next recovery action: the instance lifecycle state,
+        per-status summary counts, a human-readable `blocking_reason` when
+        the instance is blocked by compensation, and the `available_actions`
+        the operator may take (`retry`, `skip`, `cancel`).
+      required:
+        - instance_id
+        - instance_state
+        - summary
+        - blocking_reason
+        - available_actions
+        - records
+      properties:
+        instance_id: { type: string }
+        instance_state:
+          type: string
+          enum: [RUNNING, COMPLETED, TERMINATED]
+        summary:
+          $ref: "#/components/schemas/CompensationSummary"
+        blocking_reason:
+          type: [string, "null"]
+          description: |
+            Human-readable reason the instance is blocked by compensation, or
+            `null` when all records are Completed/Skipped (or there are
+            none). `Failed` records take precedence over `Pending` ones.
+        available_actions:
+          type: array
+          items: { type: string }
+          description: |
+            Operator recovery actions currently applicable. `retry` when at
+            least one record is Failed; `skip` when at least one record is
+            Pending/Running; `cancel` when the instance has not reached a
+            terminal state.
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/CompensationRecordView"
 
     CompensationTriggerResponse:
       type: object
