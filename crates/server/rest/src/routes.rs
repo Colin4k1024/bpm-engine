@@ -1265,6 +1265,25 @@ pub async fn start_instance(
         }
     }
 
+    // N1-3 tenant gate: verify the definition belongs to the caller's tenant
+    // (or is global) before starting. Cross-tenant access → same-shape 404
+    // (no existence leak, matching the instance tenant-gate pattern).
+    let (def_key, _) = parse_definition_id_version(&body.process_def_id);
+    let versions = state
+        .storage
+        .def_store
+        .list_versions(&def_key, tenant_id.as_deref())
+        .await
+        .map_err(internal_error_tuple)?;
+    if !versions.iter().any(|v| v.id == body.process_def_id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found(
+                "process definition not found or not accessible in this tenant",
+            )),
+        ));
+    }
+
     let mut ctx = build_ctx(state.as_ref(), tenant_id.clone());
     let instance_id = uuid::Uuid::new_v4().to_string();
     let mut variables = body.variables;
@@ -1706,10 +1725,25 @@ pub async fn get_instance_trace(
 /// GET /api/v1/process-definitions/:id — process definition view for Trace UI diagram.
 pub async fn get_process_definition(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
 ) -> Result<Json<ProcessDefinitionView>, (StatusCode, Json<ErrorResponse>)> {
-    // E2-4 review fix: storage ERROR → 500 internal; only a missing
-    // definition is 404 not_found.
+    // N1-3 tenant gate: verify the definition belongs to the caller's tenant.
+    let (def_key, _) = parse_definition_id_version(&id);
+    let versions = state
+        .storage
+        .def_store
+        .list_versions(&def_key, identity.tenant())
+        .await
+        .map_err(internal_error_tuple)?;
+    if !versions.iter().any(|v| v.id == id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found(
+                "process definition not found or not accessible in this tenant",
+            )),
+        ));
+    }
     let def = state
         .storage
         .def_store
