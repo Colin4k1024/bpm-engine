@@ -1,4 +1,5 @@
 mod dead_letter_store;
+mod definition_audit_store;
 mod event_store;
 mod invariant_checker;
 mod memory_repo;
@@ -8,6 +9,7 @@ mod timer_store;
 mod token_store;
 
 pub use dead_letter_store::*;
+pub use definition_audit_store::*;
 pub use event_store::*;
 pub use invariant_checker::*;
 pub use memory_repo::*;

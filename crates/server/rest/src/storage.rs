@@ -14,11 +14,13 @@
 
 #[cfg(feature = "postgres")]
 use crate::state::ExtraHealthChecks;
-use bpm_engine_adapter_memory::{DeadLetterRepo, MemoryRepo, ProcessDefStore};
+use bpm_engine_adapter_memory::{
+    DeadLetterRepo, MemoryDefinitionAuditStore, MemoryRepo, ProcessDefStore,
+};
 use bpm_engine_storage::{
-    ApprovalStore, CompensationRecordRepo, DeadLetterStore, DefinitionDeployer, ExternalTaskStore,
-    HistoryRepo, InvariantChecker, ParallelJoinRepo, ProcessDefinitionStore, ProcessInstanceStore,
-    StoreInvariantChecker, TimerStore, TokenStore,
+    ApprovalStore, CompensationRecordRepo, DeadLetterStore, DefinitionAuditStore,
+    DefinitionDeployer, ExternalTaskStore, HistoryRepo, InvariantChecker, ParallelJoinRepo,
+    ProcessDefinitionStore, ProcessInstanceStore, StoreInvariantChecker, TimerStore, TokenStore,
 };
 use std::sync::Arc;
 
@@ -49,6 +51,8 @@ pub struct Storage {
     pub approval_store: Arc<dyn ApprovalStore>,
     /// Dead letter queue storage.
     pub dead_letter_store: Arc<dyn DeadLetterStore>,
+    /// Definition lifecycle audit trail (N1-4).
+    pub def_audit_store: Arc<dyn DefinitionAuditStore>,
     /// Invariant checker over the process instance store.
     pub invariant_checker: Arc<dyn InvariantChecker>,
 }
@@ -77,6 +81,8 @@ impl Storage {
             history_repo: Arc::clone(&repo) as Arc<dyn HistoryRepo>,
             approval_store: Arc::clone(&repo) as Arc<dyn ApprovalStore>,
             dead_letter_store: Arc::new(DeadLetterRepo::new()) as Arc<dyn DeadLetterStore>,
+            def_audit_store: Arc::new(MemoryDefinitionAuditStore::new())
+                as Arc<dyn DefinitionAuditStore>,
             invariant_checker: Arc::new(StoreInvariantChecker::new(
                 Arc::clone(&repo) as Arc<dyn ProcessInstanceStore>
             )),
@@ -152,6 +158,15 @@ impl Storage {
             history_repo: Arc::new(PostgresHistoryRepo::new(pool.clone())),
             approval_store: Arc::new(PostgresApprovalStore::new(pool.clone())),
             dead_letter_store: Arc::new(PostgresDeadLetterStore::new(pool.clone())),
+            // N1-4 v1 limitation: the definition audit trail is kept in an
+            // in-memory store even under the postgres driver. Audit records
+            // therefore do NOT survive a restart in postgres mode (they are
+            // lost when the process exits). Postgres-backed audit
+            // persistence (table + migration) is a tracked follow-up; until
+            // then the memory store preserves the API contract and ordering
+            // for a single running server.
+            def_audit_store: Arc::new(MemoryDefinitionAuditStore::new())
+                as Arc<dyn DefinitionAuditStore>,
             invariant_checker: Arc::new(StoreInvariantChecker::new(
                 process_store as Arc<dyn ProcessInstanceStore>,
             )),

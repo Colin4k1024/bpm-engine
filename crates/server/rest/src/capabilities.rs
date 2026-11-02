@@ -137,6 +137,11 @@ const SIDE_EFFECT_NOTES: &[(&str, &str)] = &[
         "Persists the deprecated status on the definition version.",
     ),
     (
+        "retireDefinition",
+        "Persists the deprecated (terminal) status and appends an audit \
+         record with actor and timestamp (N1-4).",
+    ),
+    (
         "fetchAndLockExternalTasks",
         "Persists a lease per delivered task (one owner until the lock \
          expires) and records ExternalTaskLocked history.",

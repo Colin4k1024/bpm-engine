@@ -18,9 +18,9 @@ use bpm_engine_core::{
 };
 use bpm_engine_runtime::EngineContext;
 use bpm_engine_storage::{
-    ApprovalDecideOutcome, ApprovalError, ApprovalStore, CompensationRecordRepo, ExternalTaskStore,
-    HistoryRepo, ParallelJoinRepo, ProcessDefinitionStore, ProcessInstanceStore, TimerStore,
-    TokenStore,
+    ApprovalDecideOutcome, ApprovalError, ApprovalStore, CompensationRecordRepo,
+    DefinitionAuditOperation, DefinitionAuditRecord, ExternalTaskStore, HistoryRepo,
+    ParallelJoinRepo, ProcessDefinitionStore, ProcessInstanceStore, TimerStore, TokenStore,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
@@ -4537,6 +4537,7 @@ pub async fn delete_replay_session(
 pub async fn deploy_bpmn(
     State(state): State<Arc<AppState>>,
     Extension(identity): Extension<Identity>,
+    Query(params): Query<DefinitionReasonParam>,
     body: String,
 ) -> Result<(StatusCode, Json<DeployResponse>), (StatusCode, Json<DeployErrorResponse>)> {
     let def = match bpm_engine_bpmn::parse_and_compile(&body) {
@@ -4597,6 +4598,27 @@ pub async fn deploy_bpmn(
         actor = identity.actor(),
         "process definition deployed"
     );
+    let (dep_key, dep_ver) = parse_definition_id_version(&process_definition_id);
+    let _ = state
+        .storage
+        .def_audit_store
+        .append(DefinitionAuditRecord {
+            sequence: 0,
+            definition_id: process_definition_id.clone(),
+            definition_key: dep_key,
+            version: dep_ver,
+            operation: DefinitionAuditOperation::Deploy,
+            actor: Some(identity.actor().to_string()),
+            content_hash: None,
+            content_size: Some(body.len() as u64),
+            reason: params.reason,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                .to_string(),
+        })
+        .await;
     Ok((
         StatusCode::CREATED,
         Json(DeployResponse {
@@ -4868,6 +4890,17 @@ pub struct DefinitionListResponse {
     pub definitions: Vec<DefinitionVersionView>,
 }
 
+/// Optional `reason` query parameter for definition lifecycle endpoints
+/// (deploy / activate / deprecate / retire, N1-4 review fix B1).
+///
+/// Carries an operator-supplied note into the audit record's `reason`
+/// field. Absent on the query string ⇒ `None` (the audit record records
+/// no reason).
+#[derive(Deserialize)]
+pub struct DefinitionReasonParam {
+    pub reason: Option<String>,
+}
+
 /// GET /api/v1/process-definitions — list every deployed process definition version.
 pub async fn list_process_definitions(
     State(state): State<Arc<AppState>>,
@@ -4959,6 +4992,7 @@ pub async fn activate_definition(
     State(state): State<Arc<AppState>>,
     Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
+    Query(params): Query<DefinitionReasonParam>,
 ) -> Result<Json<ActivateResponse>, (StatusCode, Json<ErrorResponse>)> {
     state
         .storage
@@ -4967,6 +5001,27 @@ pub async fn activate_definition(
         .await
         .map_err(internal_error_tuple)?;
     info!(definition_id = %id, actor = identity.actor(), "process definition activated");
+    let (act_key, act_ver) = parse_definition_id_version(&id);
+    let _ = state
+        .storage
+        .def_audit_store
+        .append(DefinitionAuditRecord {
+            sequence: 0,
+            definition_id: id.clone(),
+            definition_key: act_key,
+            version: act_ver,
+            operation: DefinitionAuditOperation::Activate,
+            actor: Some(identity.actor().to_string()),
+            content_hash: None,
+            content_size: None,
+            reason: params.reason,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                .to_string(),
+        })
+        .await;
     Ok(Json(ActivateResponse {
         id,
         status: "activated".to_string(),
@@ -4980,6 +5035,7 @@ pub async fn deprecate_definition(
     State(state): State<Arc<AppState>>,
     Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
+    Query(params): Query<DefinitionReasonParam>,
 ) -> Result<Json<ActivateResponse>, (StatusCode, Json<ErrorResponse>)> {
     state
         .storage
@@ -4988,10 +5044,90 @@ pub async fn deprecate_definition(
         .await
         .map_err(internal_error_tuple)?;
     info!(definition_id = %id, actor = identity.actor(), "process definition deprecated");
+    let (dep_key, dep_ver) = parse_definition_id_version(&id);
+    let _ = state
+        .storage
+        .def_audit_store
+        .append(DefinitionAuditRecord {
+            sequence: 0,
+            definition_id: id.clone(),
+            definition_key: dep_key,
+            version: dep_ver,
+            operation: DefinitionAuditOperation::Deprecate,
+            actor: Some(identity.actor().to_string()),
+            content_hash: None,
+            content_size: None,
+            reason: params.reason,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                .to_string(),
+        })
+        .await;
     Ok(Json(ActivateResponse {
         id,
         status: "deprecated".to_string(),
     }))
+}
+
+/// PUT /api/v1/process-definitions/:id/retire — retire a version (→ Deprecated, terminal).
+///
+/// N1-4: unlike deprecate (which is the legacy name for the same operation),
+/// retire is the explicit "take out of the activatable pool" action. The
+/// audit record records the actor and reason.
+pub async fn retire_definition(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    Path(id): Path<String>,
+    Query(params): Query<DefinitionReasonParam>,
+) -> Result<Json<ActivateResponse>, (StatusCode, Json<ErrorResponse>)> {
+    state
+        .storage
+        .def_store
+        .deprecate(&id)
+        .await
+        .map_err(internal_error_tuple)?;
+    let (ret_key, ret_ver) = parse_definition_id_version(&id);
+    let _ = state
+        .storage
+        .def_audit_store
+        .append(DefinitionAuditRecord {
+            sequence: 0,
+            definition_id: id.clone(),
+            definition_key: ret_key,
+            version: ret_ver,
+            operation: DefinitionAuditOperation::Retire,
+            actor: Some(identity.actor().to_string()),
+            content_hash: None,
+            content_size: None,
+            reason: params.reason,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                .to_string(),
+        })
+        .await;
+    info!(definition_id = %id, actor = identity.actor(), "process definition retired");
+    Ok(Json(ActivateResponse {
+        id,
+        status: "deprecated".to_string(),
+    }))
+}
+
+/// GET /api/v1/process-definitions/:id/audit — lifecycle audit trail (N1-4).
+pub async fn get_definition_audit(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<DefinitionAuditRecord>>, (StatusCode, Json<ErrorResponse>)> {
+    let records = state
+        .storage
+        .def_audit_store
+        .list_by_definition(&id)
+        .await
+        .map_err(internal_error_tuple)?;
+    Ok(Json(records))
 }
 
 // --- Health check endpoints ---
@@ -5477,6 +5613,18 @@ fn api_v1_router(
         PUT,
         "/process-definitions/:id/deprecate",
         deprecate_definition
+    );
+    let router = api_route!(
+        router,
+        PUT,
+        "/process-definitions/:id/retire",
+        retire_definition
+    );
+    let router = api_route!(
+        router,
+        GET,
+        "/process-definitions/:id/audit",
+        get_definition_audit
     );
     let router = api_route!(router, GET, "/tasks", list_tasks);
     let router = api_route!(router, GET, "/tasks/:task_id/form", get_task_form);
