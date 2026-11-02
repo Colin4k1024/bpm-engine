@@ -34,6 +34,9 @@ jobs:
       - name: Run invariant tests
         run: cargo test --test invariant_token --test invariant_join --test invariant_external_task
 
+      - name: Verify production worker template (N3-4)
+        run: ./scripts/verify-production-template.sh
+
   migrations:
     name: Migrations
     runs-on: ubuntu-latest

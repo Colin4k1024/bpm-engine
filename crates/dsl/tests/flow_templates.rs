@@ -22,6 +22,7 @@ const EXPECTED: &[(&str, &str)] = &[
     ("basic-gateway.json", "basic-gateway"),
     ("ai-approval-flow.json", "ai-approval-flow"),
     ("timer-wait.json", "timer-wait"),
+    ("production-worker-flow.json", "production-worker:1"),
 ];
 
 #[test]
