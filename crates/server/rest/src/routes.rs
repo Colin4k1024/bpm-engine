@@ -806,6 +806,13 @@ pub enum DeployErrorResponse {
         /// Compile errors with stable codes.
         errors: Vec<bpm_engine_bpmn::CompilerError>,
     },
+    /// Static validation failure: Critical findings block publish (400, N1-2).
+    Validation {
+        /// Stable error code.
+        code: String,
+        /// The full validation report with fix suggestions.
+        report: bpm_engine_bpmn::ValidationReport,
+    },
     /// Persistence failure (500, `code: "deploy_failed"`).
     Persist {
         /// Server-side failure message (safe: no internal details).
@@ -1889,7 +1896,8 @@ pub struct AuditDefinitionView {
     pub key: String,
     /// Version number parsed from the id (`1` when the id carries none).
     pub version: u32,
-    /// Current record status (`active` | `deprecated`); absent when the
+    /// Current record status (`activated` | `deprecated` | `draft` |
+    /// `validated` | `published`); absent when the
     /// definition record is gone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
@@ -4513,6 +4521,24 @@ pub async fn deploy_bpmn(
             ))
         }
     };
+    // N1-2 validation gate: invalid definitions (Critical findings) cannot
+    // enter the published state (ADR-009 §5). The fast path validates before
+    // deploy. Callers can pre-check via POST /validate (no side effects).
+    let report = bpm_engine_bpmn::validation_report(&def);
+    if !report.valid {
+        warn!(
+            definition_id = %def.id,
+            critical = report.summary.critical,
+            "process definition deploy rejected: validation failed"
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(DeployErrorResponse::Validation {
+                code: "validation_failed".to_string(),
+                report,
+            }),
+        ));
+    }
     let process_definition_id = def.id.to_string();
     if let Err(e) = state.storage.deployer.deploy(&def, &body).await {
         tracing::error!(error = %e, "process definition deploy failed");
@@ -4596,7 +4622,9 @@ pub enum CompileErrorsView {
 
 /// Response of `POST /api/v1/process-definitions/validate`: either the
 /// compile-phase errors (`valid: false`, `compile_errors`) or the static
-/// findings (`findings`; `valid` = no Critical finding).
+/// findings (`findings`; `valid` = no Critical finding). The `report` field
+/// (N1-2) carries the full structured report with fix suggestions and
+/// required permissions.
 #[derive(Serialize)]
 pub struct ValidateResponse {
     /// False when compilation failed or a Critical finding exists.
@@ -4605,10 +4633,15 @@ pub struct ValidateResponse {
     pub compile_errors: Option<CompileErrorsView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub findings: Option<Vec<bpm_engine_bpmn::ValidationFinding>>,
+    /// Full structured report (N1-2): findings with fix suggestions, required
+    /// permissions, and summary counts. Absent when compilation failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<bpm_engine_bpmn::ValidationReport>,
 }
 
 /// Response of `POST /api/v1/process-definitions/dry-run`: validate plus the
-/// side-effect-free walk report.
+/// side-effect-free walk report. The `report` field (N1-2) carries the full
+/// structured report including simulated branch coverage.
 #[derive(Serialize)]
 pub struct DryRunResponse {
     /// False when compilation failed or a Critical finding exists.
@@ -4619,6 +4652,11 @@ pub struct DryRunResponse {
     pub findings: Option<Vec<bpm_engine_bpmn::ValidationFinding>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dry_run: Option<bpm_engine_bpmn::DryRunReport>,
+    /// Full structured report (N1-2): findings with fix suggestions, required
+    /// permissions, branch coverage, and summary counts. Absent when
+    /// compilation failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<bpm_engine_bpmn::ValidationReport>,
 }
 
 /// Build a 400 response with a stable machine-readable code for a malformed
@@ -4694,22 +4732,22 @@ pub async fn validate_process_definition(
             valid: false,
             compile_errors: Some(compile_errors),
             findings: None,
+            report: None,
         })),
         Ok(def) => {
-            let findings = bpm_engine_bpmn::validate_definition(&def);
-            let valid = !findings
-                .iter()
-                .any(|f| f.severity == bpm_engine_bpmn::Severity::Critical);
+            let report = bpm_engine_bpmn::validation_report(&def);
+            let valid = report.valid;
             info!(
                 definition_id = %def.id,
                 valid,
-                findings = findings.len(),
+                findings = report.findings.len(),
                 "process definition validated (pre-deploy, no persistence)"
             );
             Ok(Json(ValidateResponse {
                 valid,
                 compile_errors: None,
-                findings: Some(findings),
+                findings: Some(report.findings.iter().map(|f| f.finding.clone()).collect()),
+                report: Some(report),
             }))
         }
     }
@@ -4731,26 +4769,33 @@ pub async fn dry_run_process_definition(
             compile_errors: Some(compile_errors),
             findings: None,
             dry_run: None,
+            report: None,
         })),
         Ok(def) => {
-            let findings = bpm_engine_bpmn::validate_definition(&def);
-            let valid = !findings
-                .iter()
-                .any(|f| f.severity == bpm_engine_bpmn::Severity::Critical);
-            // Pure function over the compiled definition: no stores touched.
-            let report =
+            // N1-2: combined report with findings + branch coverage (no
+            // persistence, pure function over the compiled definition).
+            let vreport = bpm_engine_bpmn::validation_report_with_dry_run(
+                &def,
+                &req.variables,
+                bpm_engine_bpmn::DEFAULT_MAX_STEPS,
+            );
+            let valid = vreport.valid;
+            // The dry_run report is inside vreport.branch_coverage; also
+            // surface the raw DryRunReport for backward compatibility.
+            let dry =
                 bpm_engine_bpmn::dry_run(&def, &req.variables, bpm_engine_bpmn::DEFAULT_MAX_STEPS);
             info!(
                 definition_id = %def.id,
                 valid,
-                steps = report.steps.len(),
+                steps = dry.steps.len(),
                 "process definition dry-run (no persistence)"
             );
             Ok(Json(DryRunResponse {
                 valid,
                 compile_errors: None,
-                findings: Some(findings),
-                dry_run: Some(report),
+                findings: Some(vreport.findings.iter().map(|f| f.finding.clone()).collect()),
+                dry_run: Some(dry),
+                report: Some(vreport),
             }))
         }
     }
@@ -4882,7 +4927,7 @@ pub async fn activate_definition(
     info!(definition_id = %id, actor = identity.actor(), "process definition activated");
     Ok(Json(ActivateResponse {
         id,
-        status: "active".to_string(),
+        status: "activated".to_string(),
     }))
 }
 

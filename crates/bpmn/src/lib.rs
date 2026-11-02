@@ -26,7 +26,10 @@ pub mod validation;
 pub use simulation::{
     dry_run, DryRunReport, DryRunRequest, DryRunStep, Terminus, DEFAULT_MAX_STEPS,
 };
-pub use validation::{validate_definition, Severity, ValidationFinding};
+pub use validation::{
+    fix_suggestion_for, validate_definition, validation_report, validation_report_with_dry_run,
+    BranchCoverage, ReportFinding, ReportSummary, Severity, ValidationFinding, ValidationReport,
+};
 
 /// Parse BPMN XML and compile to engine ProcessDefinition in one step.
 /// Returns Parse error or list of CompilerErrors (03.md).
@@ -819,7 +822,7 @@ mod tests {
         let versions = store.list_versions(&id).await.unwrap();
         assert_eq!(versions.len(), 1);
         assert_eq!(versions[0].id, id);
-        assert_eq!(versions[0].status, DefinitionStatus::Active);
+        assert_eq!(versions[0].status, DefinitionStatus::Activated);
     }
 
     #[tokio::test]
@@ -853,11 +856,11 @@ mod tests {
         let versions = store.list_versions("order-flow").await.unwrap();
         assert_eq!(versions.len(), 2);
 
-        // v2 should be active, v1 should be deprecated
+        // v2 should be activated, v1 auto-deactivated to Published (ADR-009 §3)
         let v1 = versions.iter().find(|v| v.id == "order-flow:1").unwrap();
         let v2 = versions.iter().find(|v| v.id == "order-flow:2").unwrap();
-        assert_eq!(v1.status, DefinitionStatus::Deprecated);
-        assert_eq!(v2.status, DefinitionStatus::Active);
+        assert_eq!(v1.status, DefinitionStatus::Published);
+        assert_eq!(v2.status, DefinitionStatus::Activated);
     }
 
     #[tokio::test]
@@ -912,12 +915,12 @@ mod tests {
 
         let active = store.get_active("flow").await.unwrap().unwrap();
         assert_eq!(active.id, "flow:1");
-        assert_eq!(active.status, DefinitionStatus::Active);
+        assert_eq!(active.status, DefinitionStatus::Activated);
 
-        // v2 should be deprecated
+        // v2 auto-deactivated to Published (ADR-009 §3: prior Activated → Published)
         let versions = store.list_versions("flow").await.unwrap();
         let v2 = versions.iter().find(|v| v.id == "flow:2").unwrap();
-        assert_eq!(v2.status, DefinitionStatus::Deprecated);
+        assert_eq!(v2.status, DefinitionStatus::Published);
     }
 
     #[tokio::test]

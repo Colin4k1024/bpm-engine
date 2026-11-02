@@ -591,3 +591,104 @@ async fn deploy_parse_error_shape_is_unchanged() {
 
     server.stop().await;
 }
+
+#[tokio::test]
+async fn deploy_validation_gate_rejects_invalid_definition() {
+    // N1-2: a definition with a Critical finding (unreachable node) is
+    // rejected at deploy time with 400 + Validation error response.
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    // A definition with a Critical finding: exclusive gateway with only
+    // conditional edges and no default (missing_default_branch). The two
+    // conditions compare the same variable against different literals, so
+    // they are NOT an exhaustive complement pair.
+    let invalid_bpmn = r#"<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL">
+  <process id="invalid-probe" isExecutable="true">
+    <startEvent id="start"/>
+    <exclusiveGateway id="gw"/>
+    <endEvent id="a"/>
+    <endEvent id="b"/>
+    <sequenceFlow id="f1" sourceRef="start" targetRef="gw"/>
+    <sequenceFlow id="f2" sourceRef="gw" targetRef="a">
+      <conditionExpression>x == "yes"</conditionExpression>
+    </sequenceFlow>
+    <sequenceFlow id="f3" sourceRef="gw" targetRef="b">
+      <conditionExpression>x == "no"</conditionExpression>
+    </sequenceFlow>
+  </process>
+</definitions>"#;
+
+    let resp = client
+        .post(format!(
+            "{}/api/v1/process-definitions/deploy",
+            server.base_url
+        ))
+        .header("content-type", "application/xml")
+        .body(invalid_bpmn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "invalid definition must be rejected at deploy: {}",
+        resp.text().await.unwrap_or_default()
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "validation_failed");
+    assert_eq!(body["report"]["valid"], false);
+    assert!(body["report"]["summary"]["critical"].as_u64().unwrap() >= 1);
+    // Fix suggestion present for missing_default_branch.
+    let findings = body["report"]["findings"]
+        .as_array()
+        .expect("findings array");
+    let missing = findings
+        .iter()
+        .find(|f| f["code"] == "missing_default_branch")
+        .expect("missing_default_branch finding");
+    assert!(
+        missing["fix_suggestion"].as_str().is_some(),
+        "fix suggestion must be present"
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn validate_endpoint_returns_structured_report() {
+    // N1-2: the validate endpoint returns a `report` field with fix
+    // suggestions, required permissions, and summary counts.
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!(
+            "{}/api/v1/process-definitions/validate",
+            server.base_url
+        ))
+        .json(&serde_json::json!({
+            "format": "bpmn",
+            "source": USER_TASK_BPMN,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["valid"], true);
+    assert!(body["report"].is_object(), "report field must be present");
+    assert_eq!(body["report"]["valid"], true);
+    assert_eq!(body["report"]["summary"]["critical"], 0);
+    // Required permissions derived from the user task.
+    let perms = body["report"]["required_permissions"]
+        .as_array()
+        .expect("required_permissions array");
+    assert!(
+        perms.iter().any(|p| p == "usertask:complete"),
+        "should include usertask:complete permission"
+    );
+
+    server.stop().await;
+}

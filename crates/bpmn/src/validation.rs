@@ -74,6 +74,193 @@ pub struct ValidationFinding {
     pub message: String,
 }
 
+/// Look up an actionable fix suggestion for a finding code (N1-2).
+///
+/// Returns `None` for purely informational findings. The suggestion is a
+/// stable string — agents can rely on it to auto-remediate candidates.
+pub fn fix_suggestion_for(code: &str) -> Option<&'static str> {
+    match code {
+        "unreachable_node" => {
+            Some("Remove the unreachable node or add a sequence flow connecting it to the reachable graph")
+        }
+        "missing_default_branch" => Some(
+            "Add a default or unconditional outgoing edge, or make conditions exhaustive (e.g. x == \"a\" / x != \"a\")",
+        ),
+        "dead_branch_after_unconditional" => {
+            Some("Reorder sequence flows so the unconditional edge comes last")
+        }
+        "join_in_cycle" => Some(
+            "Ensure all parallel branches reach the join in each iteration, or restructure the cycle",
+        ),
+        "cycle_detected" => {
+            Some("Ensure exit conditions are reachable; loops are legal but unbounded traversal is a hazard")
+        }
+        "invalid_task_config" => {
+            Some("Set a non-empty task_type and retries >= 0 on the external task node")
+        }
+        "task_timeout_zero" => {
+            Some("Set timeout_secs > 0 (e.g. 60) so the lease does not expire immediately")
+        }
+        "duplicate_form_field" => {
+            Some("Rename the duplicate form field id to be unique within the user task")
+        }
+        "condition_variable_scope" => None, // informational, no fix
+        _ => None,
+    }
+}
+
+/// A finding enriched with its fix suggestion, for the validation report.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportFinding {
+    #[serde(flatten)]
+    pub finding: ValidationFinding,
+    /// Actionable fix suggestion (absent for informational findings).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix_suggestion: Option<&'static str>,
+}
+
+/// Branch-coverage summary from a dry-run simulation (N1-2).
+///
+/// Reports which nodes were reached, which conditional branches were
+/// unresolved (never taken in the simulation), and where the simulation
+/// terminated. This is a *single-path* coverage report — it does not
+/// exhaustively explore all variable combinations.
+#[derive(Debug, Clone, Serialize)]
+pub struct BranchCoverage {
+    /// Nodes reached by the dry-run simulation, in execution order.
+    pub reached_nodes: Vec<String>,
+    /// Conditional branches that were never taken (the condition could not
+    /// be resolved with the provided variables).
+    pub unresolved_branches: Vec<String>,
+    /// Where the simulation ended: "completed", "waiting", "stuck", etc.
+    pub terminus: String,
+    /// Total steps executed before termination.
+    pub step_count: usize,
+}
+
+/// A complete validation report combining static findings with simulated
+/// branch coverage and required permissions (N1-2).
+///
+/// `valid` is true iff there are no Critical findings. An invalid definition
+/// cannot enter the `Published` state (ADR-009 §5).
+#[derive(Debug, Clone, Serialize)]
+pub struct ValidationReport {
+    /// Whether the definition has no Critical findings.
+    pub valid: bool,
+    /// Count of findings by severity.
+    pub summary: ReportSummary,
+    /// All static-validation findings, enriched with fix suggestions.
+    pub findings: Vec<ReportFinding>,
+    /// Simulated branch coverage (absent if dry-run was not run).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_coverage: Option<BranchCoverage>,
+    /// Permissions/capabilities required to deploy and operate this
+    /// definition, derived from its node types (e.g. `worker:{task_type}`,
+    /// `usertask:complete`).
+    pub required_permissions: Vec<String>,
+}
+
+/// Finding counts by severity.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ReportSummary {
+    /// Number of Critical findings (make the definition invalid).
+    pub critical: usize,
+    /// Number of Warning findings.
+    pub warnings: usize,
+    /// Number of Info findings.
+    pub info: usize,
+}
+
+impl ReportSummary {
+    fn from_findings(findings: &[ValidationFinding]) -> Self {
+        let mut s = Self::default();
+        for f in findings {
+            match f.severity {
+                Severity::Critical => s.critical += 1,
+                Severity::Warning => s.warnings += 1,
+                Severity::Info => s.info += 1,
+            }
+        }
+        s
+    }
+}
+
+/// Produce a full validation report: static findings + required permissions.
+///
+/// Does not run a dry-run (branch coverage is `None`). Call
+/// [`validation_report_with_dry_run`] for the combined report.
+pub fn validation_report(def: &ProcessDefinition) -> ValidationReport {
+    let findings = validate_definition(def);
+    build_report(findings, None, def)
+}
+
+/// Produce a full validation report including simulated branch coverage.
+///
+/// Runs [`validate_definition`] then [`dry_run`](crate::dry_run) with the
+/// given variables and combines the results.
+pub fn validation_report_with_dry_run(
+    def: &ProcessDefinition,
+    variables: &HashMap<String, String>,
+    max_steps: usize,
+) -> ValidationReport {
+    let findings = validate_definition(def);
+    let dry = crate::dry_run(def, variables, max_steps);
+    let coverage = BranchCoverage {
+        reached_nodes: dry.steps.iter().map(|s| s.node_id.to_string()).collect(),
+        unresolved_branches: dry.unresolved_conditions.clone(),
+        terminus: dry.terminus.label().to_string(),
+        step_count: dry.steps.len(),
+    };
+    build_report(findings, Some(coverage), def)
+}
+
+fn build_report(
+    findings: Vec<ValidationFinding>,
+    coverage: Option<BranchCoverage>,
+    def: &ProcessDefinition,
+) -> ValidationReport {
+    let summary = ReportSummary::from_findings(&findings);
+    let valid = !findings.iter().any(|f| f.severity == Severity::Critical);
+    let findings = findings
+        .into_iter()
+        .map(|f| ReportFinding {
+            fix_suggestion: fix_suggestion_for(f.code),
+            finding: f,
+        })
+        .collect();
+    ValidationReport {
+        valid,
+        summary,
+        findings,
+        branch_coverage: coverage,
+        required_permissions: required_permissions(def),
+    }
+}
+
+/// Derive the permissions/capabilities required to deploy and operate a
+/// definition from its node types (N1-2 "所需权限").
+fn required_permissions(def: &ProcessDefinition) -> Vec<String> {
+    let mut perms: BTreeSet<String> = BTreeSet::new();
+    for node in def.nodes.values() {
+        match &node.node_type {
+            NodeType::ExternalTask { task_type, .. } => {
+                perms.insert(format!("worker:{}", task_type));
+            }
+            NodeType::UserTask { .. } => {
+                perms.insert("usertask:complete".to_string());
+            }
+            NodeType::MessageIntermediateCatch { message_name } => {
+                perms.insert(format!("message:deliver:{}", message_name));
+            }
+            NodeType::SignalIntermediateCatch { signal_name } => {
+                perms.insert(format!("signal:deliver:{}", signal_name));
+            }
+            _ => {}
+        }
+    }
+    perms.into_iter().collect()
+}
+
 /// Statically validate a compiled process definition.
 ///
 /// Always returns findings (empty = clean); never fails. Findings are
@@ -1140,5 +1327,73 @@ mod tests {
             "expected clean validation, got {:?}",
             findings
         );
+    }
+
+    // --- N1-2: structured validation report tests ---
+
+    #[test]
+    fn validation_report_includes_fix_suggestions_and_permissions() {
+        let def = make_def(vec![
+            ("start", NodeType::Start, vec![("gw", None)]),
+            (
+                "gw",
+                NodeType::ExclusiveGateway,
+                vec![("a", Some(EdgeCondition::Expression("x == \"a\"".into())))],
+            ),
+            ("a", external_task("orders", 3, 60), vec![("end", None)]),
+            ("end", NodeType::End, vec![]),
+        ]);
+        let report = validation_report(&def);
+        assert!(!report.valid);
+        assert_eq!(report.summary.critical, 1);
+        let f = report
+            .findings
+            .iter()
+            .find(|f| f.finding.code == "missing_default_branch")
+            .unwrap();
+        assert!(f.fix_suggestion.is_some());
+        assert!(f.fix_suggestion.unwrap().contains("default"));
+        assert!(report
+            .required_permissions
+            .contains(&"worker:orders".to_string()));
+        assert!(report.branch_coverage.is_none());
+    }
+
+    #[test]
+    fn validation_report_with_dry_run_includes_branch_coverage() {
+        let def = make_def(vec![
+            ("start", NodeType::Start, vec![("work", None)]),
+            ("work", external_task("orders", 3, 60), vec![("end", None)]),
+            ("end", NodeType::End, vec![]),
+        ]);
+        let vars = HashMap::new();
+        let report = validation_report_with_dry_run(&def, &vars, 100);
+        assert!(report.valid);
+        let coverage = report.branch_coverage.expect("dry-run coverage");
+        assert!(coverage.reached_nodes.contains(&"start".to_string()));
+        assert!(coverage.reached_nodes.contains(&"end".to_string()));
+        assert_eq!(coverage.terminus, "completed");
+        assert!(coverage.step_count > 0);
+    }
+
+    #[test]
+    fn fix_suggestion_for_known_codes() {
+        assert!(fix_suggestion_for("unreachable_node").is_some());
+        assert!(fix_suggestion_for("missing_default_branch").is_some());
+        assert!(fix_suggestion_for("invalid_task_config").is_some());
+        assert!(fix_suggestion_for("condition_variable_scope").is_none());
+        assert!(fix_suggestion_for("unknown_code").is_none());
+    }
+
+    #[test]
+    fn valid_definition_report_has_no_critical() {
+        let def = make_def(vec![
+            ("start", NodeType::Start, vec![("work", None)]),
+            ("work", external_task("orders", 3, 60), vec![("end", None)]),
+            ("end", NodeType::End, vec![]),
+        ]);
+        let report = validation_report(&def);
+        assert!(report.valid);
+        assert_eq!(report.summary.critical, 0);
     }
 }

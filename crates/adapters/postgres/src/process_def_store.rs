@@ -23,16 +23,17 @@ impl PostgresProcessDefStore {
         client
             .execute(
                 "INSERT INTO process_definition (id, def_key, version, status, bpmn_xml, created_at)
-                 VALUES ($1, $2, $3, 'active', $4, NOW()::TEXT)
+                 VALUES ($1, $2, $3, 'activated', $4, NOW()::TEXT)
                  ON CONFLICT (id) DO UPDATE SET bpmn_xml = $4",
                 &[&id, &key, &version, &bpmn_xml],
             )
             .await?;
-        // Deprecate previous active version for the same key
+        // Auto-deactivate prior Activated version for the same key (→ Published,
+        // still in the activatable pool — ADR-009 §3).
         client
             .execute(
-                "UPDATE process_definition SET status = 'deprecated'
-                 WHERE def_key = $1 AND id != $2 AND status = 'active'",
+                "UPDATE process_definition SET status = 'published'
+                 WHERE def_key = $1 AND id != $2 AND status = 'activated'",
                 &[&key, &id],
             )
             .await?;
@@ -51,11 +52,7 @@ fn parse_id_and_version(id: &str) -> (String, i32) {
 }
 
 fn parse_status(s: &str) -> DefinitionStatus {
-    match s {
-        "active" => DefinitionStatus::Active,
-        "deprecated" => DefinitionStatus::Deprecated,
-        _ => DefinitionStatus::Active,
-    }
+    DefinitionStatus::from_db_str(s)
 }
 
 #[async_trait]
@@ -106,7 +103,7 @@ impl ProcessDefinitionStore for PostgresProcessDefStore {
         let row = client
             .query_opt(
                 "SELECT id, def_key, version, status, created_at
-                 FROM process_definition WHERE def_key = $1 AND status = 'active'
+                 FROM process_definition WHERE def_key = $1 AND status = 'activated'
                  ORDER BY version DESC LIMIT 1",
                 &[&key],
             )
@@ -133,18 +130,18 @@ impl ProcessDefinitionStore for PostgresProcessDefStore {
             Some(r) => r.get(0),
             None => return Err(anyhow::anyhow!("process definition not found: {}", id)),
         };
-        // Deprecate all other active versions for the same key
+        // Auto-deactivate prior Activated → Published (ADR-009 §3).
         client
             .execute(
-                "UPDATE process_definition SET status = 'deprecated'
-                 WHERE def_key = $1 AND id != $2 AND status = 'active'",
+                "UPDATE process_definition SET status = 'published'
+                 WHERE def_key = $1 AND id != $2 AND status = 'activated'",
                 &[&key, &id],
             )
             .await?;
-        // Activate the target
+        // Activate the target.
         client
             .execute(
-                "UPDATE process_definition SET status = 'active' WHERE id = $1",
+                "UPDATE process_definition SET status = 'activated' WHERE id = $1",
                 &[&id],
             )
             .await?;
