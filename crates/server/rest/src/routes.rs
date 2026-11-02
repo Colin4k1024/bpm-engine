@@ -19,8 +19,9 @@ use bpm_engine_core::{
 use bpm_engine_runtime::EngineContext;
 use bpm_engine_storage::{
     ApprovalDecideOutcome, ApprovalError, ApprovalStore, CompensationRecordRepo,
-    DefinitionAuditOperation, DefinitionAuditRecord, ExternalTaskStore, HistoryRepo,
-    ParallelJoinRepo, ProcessDefinitionStore, ProcessInstanceStore, TimerStore, TokenStore,
+    DefinitionAuditOperation, DefinitionAuditRecord, DeliveryStatus, DeliveryType,
+    ExternalTaskStore, HistoryRepo, ParallelJoinRepo, PendingDelivery, ProcessDefinitionStore,
+    ProcessInstanceStore, TimerStore, TokenStore,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
@@ -5404,6 +5405,292 @@ async fn invariant_check(
         .map_err(internal_error_tuple)
 }
 
+// --- Message/signal delivery API (N2-3, ADR-010) -----------------------------
+//
+// REST delivery endpoints over the EventInboxStore from N2-2. A delivery is
+// accepted (202) the moment it arrives and persisted as a PendingDelivery;
+// the runtime consumes pending deliveries when a catch token reaches its
+// waiting steady state (the inbox therefore also buffers deliveries that
+// arrive before the catch is ready).
+
+/// Body of `POST /api/v1/process-instances/:id/messages` and
+/// `POST /api/v1/messages` (N2-3).
+#[derive(Deserialize)]
+pub struct DeliverMessageRequest {
+    /// Message name (matches a `messageEventDefinition/@messageRef` name).
+    pub message_name: String,
+    /// Correlation predicates (message only): variable key → expected value.
+    #[serde(default)]
+    pub correlation: Option<HashMap<String, String>>,
+    /// Variables to inject on consumption.
+    #[serde(default)]
+    pub payload: Option<HashMap<String, String>>,
+    /// Caller-supplied delivery id (idempotency: same id → same dedup key →
+    /// no duplicate). When absent a UUID is generated.
+    #[serde(default)]
+    pub delivery_id: Option<String>,
+    /// TTL in seconds: when set, the delivery expires (and is swept) after
+    /// `created_at + ttl_secs`. `None` = never expires.
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
+}
+
+/// Body of `POST /api/v1/signals` (N2-3).
+#[derive(Deserialize)]
+pub struct DeliverSignalRequest {
+    /// Signal name (matches a `signalEventDefinition/@signalRef` name).
+    pub signal_name: String,
+    /// Correlation predicates (usually empty for broadcast signals).
+    #[serde(default)]
+    pub correlation: Option<HashMap<String, String>>,
+    /// Variables to inject on consumption.
+    #[serde(default)]
+    pub payload: Option<HashMap<String, String>>,
+    /// Caller-supplied delivery id (idempotency). When absent a UUID is
+    /// generated.
+    #[serde(default)]
+    pub delivery_id: Option<String>,
+    /// TTL in seconds (`None` = never expires).
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
+}
+
+/// 202 response body for the three delivery-accepting endpoints.
+#[derive(Serialize)]
+pub struct DeliveryAcceptedResponse {
+    pub delivery_id: String,
+    pub status: String,
+}
+
+/// Normalized inputs for [`insert_pending_delivery`] — the request-derived
+/// fields common to message and signal delivery, bundled to keep the helper
+/// under the argument-count lint.
+struct DeliveryInput {
+    delivery_type: DeliveryType,
+    name: String,
+    target_instance_id: Option<String>,
+    correlation: HashMap<String, String>,
+    payload: HashMap<String, String>,
+    delivery_id: Option<String>,
+    ttl_secs: Option<u64>,
+}
+
+/// Build the dedup key for a delivery: the caller-supplied `delivery_id`
+/// when present, otherwise a stable SHA-256 over `(tenant, name,
+/// target_instance_id, payload)` so an identical retry without a delivery
+/// id is a no-op (the store's `insert` is idempotent by `dedup_key`).
+fn delivery_dedup_key(
+    tenant_id: Option<&str>,
+    name: &str,
+    target_instance_id: Option<&str>,
+    payload: &HashMap<String, String>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(tenant_id.unwrap_or("").as_bytes());
+    hasher.update([0]);
+    hasher.update(name.as_bytes());
+    hasher.update([0]);
+    hasher.update(target_instance_id.unwrap_or("").as_bytes());
+    hasher.update([0]);
+    // Deterministic payload ordering (HashMap iteration is not ordered).
+    let mut entries: Vec<(&String, &String)> = payload.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (k, v) in entries {
+        hasher.update(k.as_bytes());
+        hasher.update([0]);
+        hasher.update(v.as_bytes());
+        hasher.update([0]);
+    }
+    let digest = hasher.finalize();
+    format!("{:x}", digest)
+}
+
+/// Build, persist, and log a pending delivery; returns the `(delivery_id,
+/// status)` pair for the 202 response. Shared by the three delivery
+/// handlers so the dedup/expiry/id generation rules stay in one place.
+async fn insert_pending_delivery(
+    state: &AppState,
+    identity: &Identity,
+    input: DeliveryInput,
+) -> Result<(String, String), (StatusCode, Json<ErrorResponse>)> {
+    let tenant_id = tenant_from_identity(identity);
+    let created_at = occurred_at_now();
+    let caller_delivery_id = input.delivery_id.filter(|id| !id.is_empty());
+    let delivery_id = caller_delivery_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let dedup_key = match &caller_delivery_id {
+        Some(id) => id.clone(),
+        None => delivery_dedup_key(
+            tenant_id.as_deref(),
+            &input.name,
+            input.target_instance_id.as_deref(),
+            &input.payload,
+        ),
+    };
+    let expires_at = input.ttl_secs.map(|secs| {
+        let created_secs = created_at.parse::<u64>().unwrap_or(0);
+        (created_secs + secs).to_string()
+    });
+    let record = PendingDelivery {
+        id: delivery_id.clone(),
+        tenant_id,
+        target_instance_id: input.target_instance_id,
+        delivery_type: input.delivery_type,
+        name: input.name,
+        correlation: input.correlation,
+        payload: input.payload,
+        status: DeliveryStatus::Pending,
+        dedup_key,
+        created_at,
+        expires_at,
+    };
+    state
+        .storage
+        .event_inbox_store
+        .insert(&record)
+        .await
+        .map_err(internal_error_tuple)?;
+    info!(
+        delivery_id = %record.id,
+        delivery_type = ?record.delivery_type,
+        name = %record.name,
+        actor = identity.actor(),
+        "delivery accepted"
+    );
+    Ok((delivery_id, "pending".to_string()))
+}
+
+/// POST /api/v1/process-instances/:id/messages — deliver a message to a
+/// specific instance (N2-3, ADR-010).
+///
+/// Persists a `PendingDelivery` with `target_instance_id` set to the path
+/// id and `delivery_type = Message`. The delivery is consumed later by the
+/// runtime when a matching message-catch token reaches its waiting state
+/// (deliveries that arrive before the catch is ready are buffered). Returns
+/// 202 `{delivery_id, status: "pending"}`.
+pub async fn deliver_message_to_instance(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    Path(id): Path<String>,
+    ValidatedJson(body): ValidatedJson<DeliverMessageRequest>,
+) -> Result<(StatusCode, Json<DeliveryAcceptedResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let (delivery_id, status) = insert_pending_delivery(
+        state.as_ref(),
+        &identity,
+        DeliveryInput {
+            delivery_type: DeliveryType::Message,
+            name: body.message_name,
+            target_instance_id: Some(id),
+            correlation: body.correlation.unwrap_or_default(),
+            payload: body.payload.unwrap_or_default(),
+            delivery_id: body.delivery_id,
+            ttl_secs: body.ttl_secs,
+        },
+    )
+    .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(DeliveryAcceptedResponse {
+            delivery_id,
+            status,
+        }),
+    ))
+}
+
+/// POST /api/v1/messages — deliver a message by correlation, not yet
+/// bound to a specific instance (N2-3, ADR-010).
+///
+/// `target_instance_id` is `None`: the runtime matches the delivery to an
+/// instance whose variables satisfy the `correlation` predicates. Returns
+/// 202 `{delivery_id, status: "pending"}`.
+pub async fn deliver_message_by_correlation(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    ValidatedJson(body): ValidatedJson<DeliverMessageRequest>,
+) -> Result<(StatusCode, Json<DeliveryAcceptedResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let (delivery_id, status) = insert_pending_delivery(
+        state.as_ref(),
+        &identity,
+        DeliveryInput {
+            delivery_type: DeliveryType::Message,
+            name: body.message_name,
+            target_instance_id: None,
+            correlation: body.correlation.unwrap_or_default(),
+            payload: body.payload.unwrap_or_default(),
+            delivery_id: body.delivery_id,
+            ttl_secs: body.ttl_secs,
+        },
+    )
+    .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(DeliveryAcceptedResponse {
+            delivery_id,
+            status,
+        }),
+    ))
+}
+
+/// POST /api/v1/signals — deliver (broadcast) a signal (N2-3, ADR-010).
+///
+/// `target_instance_id` is `None` and `delivery_type = Signal`: the
+/// runtime delivers the signal to every matching signal-catch token.
+/// Returns 202 `{delivery_id, status: "pending"}`.
+pub async fn deliver_signal(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    ValidatedJson(body): ValidatedJson<DeliverSignalRequest>,
+) -> Result<(StatusCode, Json<DeliveryAcceptedResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let (delivery_id, status) = insert_pending_delivery(
+        state.as_ref(),
+        &identity,
+        DeliveryInput {
+            delivery_type: DeliveryType::Signal,
+            name: body.signal_name,
+            target_instance_id: None,
+            correlation: body.correlation.unwrap_or_default(),
+            payload: body.payload.unwrap_or_default(),
+            delivery_id: body.delivery_id,
+            ttl_secs: body.ttl_secs,
+        },
+    )
+    .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(DeliveryAcceptedResponse {
+            delivery_id,
+            status,
+        }),
+    ))
+}
+
+/// GET /api/v1/process-instances/:id/deliveries — list pending deliveries
+/// for an instance (N2-3).
+///
+/// Returns the pending (not yet consumed, not expired) deliveries targeting
+/// the instance, oldest first. A read — every authenticated role.
+pub async fn list_pending_deliveries(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<PendingDelivery>>, (StatusCode, Json<ErrorResponse>)> {
+    let deliveries = state
+        .storage
+        .event_inbox_store
+        .list_pending_for_instance(&id)
+        .await
+        .map_err(internal_error_tuple)?;
+    info!(
+        instance_id = %id,
+        actor = identity.actor(),
+        count = deliveries.len(),
+        "listed pending deliveries"
+    );
+    Ok(Json(deliveries))
+}
+
 // --- Route registration registry (E2-4 review fix) ---------------------------
 //
 // The OpenAPI route-consistency contract must compare the spec against
@@ -5707,6 +5994,21 @@ fn api_v1_router(
     );
     let router = api_route!(router, DELETE, "/dead-letters/:id", delete_dead_letter);
     let router = api_route!(router, GET, "/invariants/check", invariant_check);
+    // Message/signal delivery endpoints (N2-3, ADR-010).
+    let router = api_route!(
+        router,
+        POST,
+        "/process-instances/:id/messages",
+        deliver_message_to_instance
+    );
+    let router = api_route!(router, POST, "/messages", deliver_message_by_correlation);
+    let router = api_route!(router, POST, "/signals", deliver_signal);
+    let router = api_route!(
+        router,
+        GET,
+        "/process-instances/:id/deliveries",
+        list_pending_deliveries
+    );
     router
         .layer(axum_mw::from_fn(middleware::authenticate))
         .layer(axum_mw::from_fn_with_state(

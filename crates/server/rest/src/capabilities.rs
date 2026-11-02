@@ -197,6 +197,27 @@ const SIDE_EFFECT_NOTES: &[(&str, &str)] = &[
         "Deletes the dead-letter entry permanently.",
     ),
     (
+        "deliverMessageToInstance",
+        "Persists a pending message delivery targeted at the instance in the \
+         event inbox (PendingDelivery, status pending); the runtime consumes \
+         it when a matching message-catch token reaches its waiting state. \
+         Idempotent by the caller-supplied delivery_id (or a derived \
+         tenant/name/instance/payload hash).",
+    ),
+    (
+        "deliverMessageByCorrelation",
+        "Persists a pending message delivery (no target instance) in the \
+         event inbox; the runtime matches it to an instance whose variables \
+         satisfy the correlation predicates. Idempotent by delivery_id or \
+         the derived dedup hash.",
+    ),
+    (
+        "deliverSignal",
+        "Persists a pending signal delivery (broadcast) in the event inbox; \
+         the runtime delivers it to every matching signal-catch token. \
+         Idempotent by delivery_id or the derived dedup hash.",
+    ),
+    (
         "createReplaySession",
         "Ephemeral only: snapshots the instance history into an in-memory \
          session that expires on inactivity; nothing is persisted and no \

@@ -487,6 +487,17 @@ const PERMISSIONS: &[(&str, &[&str], &[Role])] = &[
     ),
     ("POST", &["dead-letters", ANY, "requeue"], &[Role::Operator]),
     ("DELETE", &["dead-letters", ANY], &[Role::Operator]),
+    // Message/signal delivery (N2-3): delivering a message or signal mutates
+    // the event inbox (operator action); listing pending deliveries is a
+    // read (every authenticated role).
+    (
+        "POST",
+        &["process-instances", ANY, "messages"],
+        &[Role::Operator],
+    ),
+    ("POST", &["messages"], &[Role::Operator]),
+    ("POST", &["signals"], &[Role::Operator]),
+    ("GET", &["process-instances", ANY, "deliveries"], ROLES),
     // External-task lease operations: worker ONLY (E5-1 decision — the
     // worker role owns the lease lifecycle; operators administrate via the
     // DLQ, not by completing workers' tasks).

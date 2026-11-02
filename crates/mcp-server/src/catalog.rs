@@ -216,8 +216,9 @@ mod tests {
         // The catalog count is pinned so adding an engine operation without
         // regenerating the catalog fails loudly (E4-1 shipped 35; E5-2's
         // approval endpoints took it to 40; E5-3's audit endpoint to 41;
-        // N1-4's retire + definition-audit endpoints took it to 43).
-        assert_eq!(catalog.tools.len(), 43);
+        // N1-4's retire + definition-audit endpoints took it to 43;
+        // N2-3's message/signal delivery endpoints took it to 47).
+        assert_eq!(catalog.tools.len(), 47);
     }
 
     #[test]
