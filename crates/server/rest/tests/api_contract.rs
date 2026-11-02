@@ -8,6 +8,9 @@ use bpm_engine_server_rest::bpm_config::{
     BpmConfig, DatabaseConfig, RateLimitConfig, ServerConfig,
 };
 use bpm_engine_server_rest::build_app;
+use bpm_engine_server_rest::state::AppState;
+use bpm_engine_storage::CompensationRecordRow;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -43,6 +46,7 @@ struct TestServer {
     base_url: String,
     serve_task: tokio::task::JoinHandle<()>,
     timer_cancel: CancellationToken,
+    state: Arc<AppState>,
 }
 
 fn memory_config() -> BpmConfig {
@@ -77,6 +81,7 @@ async fn spawn_server() -> TestServer {
         base_url: format!("http://{}", addr),
         serve_task,
         timer_cancel,
+        state: app.state,
     }
 }
 
@@ -932,6 +937,99 @@ async fn deliver_signal_works() {
     assert_eq!(body["status"], "pending", "{body}");
     // The caller-supplied delivery_id is echoed back.
     assert_eq!(body["delivery_id"].as_str(), Some("sig-1"));
+
+    server.stop().await;
+}
+
+// --- Compensation executor (N4-2) --------------------------------------------
+
+#[tokio::test]
+async fn compensation_trigger_and_list() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    // Deploy a flow with a user task so the instance stays RUNNING.
+    deploy(&client, &server).await;
+    let (status, body) = start(&client, &server, None, None).await;
+    assert_eq!(status, 201, "start should return 201: {body}");
+    let instance_id = body["instance_id"].as_str().unwrap().to_string();
+
+    // Manually add a Pending compensation record via the store.
+    let record = CompensationRecordRow {
+        id: "comp-test-1".to_string(),
+        instance_id: instance_id.clone(),
+        node_id: "review".to_string(),
+        handler_ref: "undo-review".to_string(),
+        order: 1,
+        status: "Pending".to_string(),
+        created_at: "1000".to_string(),
+    };
+    server
+        .state
+        .storage
+        .compensation_repo
+        .add(&record)
+        .await
+        .unwrap();
+
+    // POST /compensation/trigger → 200 with triggered > 0.
+    let resp = client
+        .post(format!(
+            "{}/api/v1/process-instances/{}/compensation/trigger",
+            server.base_url, instance_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "trigger should return 200");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["triggered"], 1, "one record triggered: {body}");
+    let records = body["records"].as_array().expect("records array");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["status"], "Running");
+    assert_eq!(records[0]["handler_ref"], "undo-review");
+
+    // GET /compensation → records present with status "Running".
+    let resp = client
+        .get(format!(
+            "{}/api/v1/process-instances/{}/compensation",
+            server.base_url, instance_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "list should return 200");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let records = body.as_array().expect("records array");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["status"], "Running");
+    assert_eq!(records[0]["id"], "comp-test-1");
+
+    // POST /compensation/skip/:record_id → 200.
+    let resp = client
+        .post(format!(
+            "{}/api/v1/process-instances/{}/compensation/skip/comp-test-1",
+            server.base_url, instance_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "skip should return 200");
+
+    // GET /compensation → status "Skipped".
+    let resp = client
+        .get(format!(
+            "{}/api/v1/process-instances/{}/compensation",
+            server.base_url, instance_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "list should return 200");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let records = body.as_array().expect("records array");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["status"], "Skipped");
 
     server.stop().await;
 }

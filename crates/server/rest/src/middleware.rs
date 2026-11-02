@@ -498,6 +498,24 @@ const PERMISSIONS: &[(&str, &[&str], &[Role])] = &[
     ("POST", &["messages"], &[Role::Operator]),
     ("POST", &["signals"], &[Role::Operator]),
     ("GET", &["process-instances", ANY, "deliveries"], ROLES),
+    // Compensation executor (N4-2, ADR-012): triggering, retrying, and
+    // skipping compensation records are operator actions; listing is a read.
+    (
+        "POST",
+        &["process-instances", ANY, "compensation", "trigger"],
+        &[Role::Operator],
+    ),
+    ("GET", &["process-instances", ANY, "compensation"], ROLES),
+    (
+        "POST",
+        &["process-instances", ANY, "compensation", "retry", ANY],
+        &[Role::Operator],
+    ),
+    (
+        "POST",
+        &["process-instances", ANY, "compensation", "skip", ANY],
+        &[Role::Operator],
+    ),
     // External-task lease operations: worker ONLY (E5-1 decision — the
     // worker role owns the lease lifecycle; operators administrate via the
     // DLQ, not by completing workers' tasks).

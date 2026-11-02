@@ -2959,6 +2959,320 @@
       }
     },
     {
+      "name": "list_compensation",
+      "operation": "GET /api/v1/process-instances/{id}/compensation",
+      "summary": "List compensation records for an instance",
+      "description": "Returns every compensation record of the instance, sorted by `order`\nascending (N4-2). A read — every authenticated role may list\ncompensation records.",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        },
+        {
+          "name": "X-Tenant-Id",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Tenant scope for the request (optional). DEPRECATED for\nJWT-authenticated requests (E5-1): the tenant comes from the\nverified `tenant` claim, an absent or agreeing header is accepted,\nand a CONFLICTING header is rejected with 403 `forbidden`. In open\nand API-key modes the header keeps its pre-E5-1 meaning: untrusted\nclient input that scopes listings and instance starts (dev-mode\naffordance)."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Compensation records for the instance.",
+          "schema": "CompensationRecordList"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "retry_compensation",
+      "operation": "POST /api/v1/process-instances/{id}/compensation/retry/{record_id}",
+      "summary": "Retry a Failed compensation record",
+      "description": "Operator action (N4-2, ADR-012): flips a Failed compensation record\nback to Pending so a subsequent trigger can re-materialize its\nexternal task. Only records currently in the Failed state can be\nretried (a non-Failed record answers 400 `invalid_request`). The\noptional `reason` query parameter is recorded in history for audit.\nRecords a `CompensationRetried` history event.",
+      "classification": "mutating",
+      "side_effects": "Flips a Failed compensation record back to Pending so a subsequent trigger can re-materialize its external task; records a CompensationRetried history event with the actor and optional reason.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        },
+        {
+          "name": "record_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Compensation record id."
+        },
+        {
+          "name": "reason",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Operator-supplied reason, recorded in the audit history."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Record flipped back to Pending."
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "skip_compensation",
+      "operation": "POST /api/v1/process-instances/{id}/compensation/skip/{record_id}",
+      "summary": "Skip a compensation record",
+      "description": "Operator action (N4-2, ADR-012): marks a compensation record as\nSkipped (terminal in the ADR-012 state machine) so it is excluded\nfrom future triggers. Used when a compensation handler is unavailable\nor the side effect is deemed unnecessary. Records a\n`CompensationSkipped` history event.",
+      "classification": "mutating",
+      "side_effects": "Marks a compensation record as Skipped (terminal in the ADR-012 state machine) so it is excluded from future triggers; records a CompensationSkipped history event.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        },
+        {
+          "name": "record_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Compensation record id."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Record marked as Skipped."
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "trigger_compensation",
+      "operation": "POST /api/v1/process-instances/{id}/compensation/trigger",
+      "summary": "Trigger compensation for a process instance",
+      "description": "Operator action (N4-2, ADR-012): materializes every Pending\ncompensation record of the instance as an external task\n(`task_type` = the record's `handler_ref`, carrying a\n`__compensation_record_id` variable) and flips each record to\nRunning. Records are processed in reverse completion order (highest\n`order` first — last completed is compensated first, the saga\nrollback invariant). An instance with no Pending records answers 200\nwith `triggered: 0`. Records a `CompensationTriggered` history event.",
+      "classification": "mutating",
+      "side_effects": "Materializes every Pending compensation record of the instance as an external task (task_type = handler_ref, carrying __compensation_record_id) and flips each record to Running, in reverse completion order (highest order first). Records a CompensationTriggered history event.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Compensation trigger summary.",
+          "schema": "CompensationTriggerResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
       "name": "list_pending_deliveries",
       "operation": "GET /api/v1/process-instances/{id}/deliveries",
       "summary": "List pending deliveries for an instance",

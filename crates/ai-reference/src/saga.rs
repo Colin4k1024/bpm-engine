@@ -204,6 +204,16 @@ mod tests {
             rows.sort_by_key(|r| r.order);
             rows
         }
+
+        async fn update_status(&self, id: &str, status: &str) -> anyhow::Result<()> {
+            let mut guard = self.rows.lock().unwrap();
+            let record = guard
+                .iter_mut()
+                .find(|r| r.id == id)
+                .ok_or_else(|| anyhow::anyhow!("compensation record not found: {}", id))?;
+            record.status = status.to_string();
+            Ok(())
+        }
     }
 
     fn repo() -> Arc<FakeRepo> {
