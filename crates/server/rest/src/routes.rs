@@ -5792,13 +5792,47 @@ pub async fn trigger_compensation(
     }))
 }
 
-/// GET /api/v1/process-instances/:id/compensation — list compensation records
-/// for an instance (N4-2). A read — every authenticated role.
+/// Summary counts of an instance's compensation records by status (N4-3).
+#[derive(Serialize)]
+pub struct CompensationSummary {
+    pub total: usize,
+    pub pending: usize,
+    pub running: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub skipped: usize,
+}
+
+/// Operator recovery view returned by `GET /:id/compensation` (N4-3).
+///
+/// Wraps the raw compensation records with the derived context an operator
+/// needs to decide the next recovery action: the instance lifecycle state,
+/// per-status summary counts, a human-readable `blocking_reason` when the
+/// instance is blocked by compensation, and the `available_actions` the
+/// operator may take.
+#[derive(Serialize)]
+pub struct CompensationView {
+    pub instance_id: String,
+    pub instance_state: String,
+    pub summary: CompensationSummary,
+    pub blocking_reason: Option<String>,
+    pub available_actions: Vec<String>,
+    pub records: Vec<CompensationRecordRow>,
+}
+
+/// GET /api/v1/process-instances/:id/compensation — operator recovery view of
+/// an instance's compensation records (N4-2 list, N4-3 enriched view).
+///
+/// A read — every authenticated role may list compensation records. Returns a
+/// [`CompensationView`] carrying the instance lifecycle state, per-status
+/// summary counts, a derived `blocking_reason` (when any record is Failed or
+/// Pending), the `available_actions` the operator may take, and the full
+/// record list sorted by `order` ascending.
 pub async fn list_compensation(
     State(state): State<Arc<AppState>>,
     Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<CompensationRecordRow>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<CompensationView>, (StatusCode, Json<ErrorResponse>)> {
     let inst = state
         .storage
         .process_store
@@ -5818,7 +5852,67 @@ pub async fn list_compensation(
         return Err(tenant_gate_not_found(&id));
     }
     let records = state.storage.compensation_repo.list_by_instance(&id).await;
-    Ok(Json(records))
+
+    // Summary counts by status (ADR-012 state machine).
+    let mut pending = 0usize;
+    let mut running = 0usize;
+    let mut completed = 0usize;
+    let mut failed = 0usize;
+    let mut skipped = 0usize;
+    for r in &records {
+        match r.status.as_str() {
+            "Pending" => pending += 1,
+            "Running" => running += 1,
+            "Completed" => completed += 1,
+            "Failed" => failed += 1,
+            "Skipped" => skipped += 1,
+            _ => {}
+        }
+    }
+    let total = records.len();
+    let summary = CompensationSummary {
+        total,
+        pending,
+        running,
+        completed,
+        failed,
+        skipped,
+    };
+
+    // blocking_reason: Failed takes precedence over Pending; an instance whose
+    // records are all Completed/Skipped (or which has none) is not blocked.
+    let blocking_reason = if failed > 0 {
+        Some(format!("{} compensation step(s) failed", failed))
+    } else if pending > 0 {
+        Some(format!("{} step(s) pending execution", pending))
+    } else {
+        None
+    };
+
+    // available_actions: the operator recovery actions currently applicable.
+    //   - retry: at least one Failed record can be flipped back to Pending.
+    //   - skip:  at least one Pending/Running record can be skipped.
+    //   - cancel: the instance has not reached a terminal state, so an
+    //             operator may still terminate it.
+    let mut available_actions = Vec::new();
+    if failed > 0 {
+        available_actions.push("retry".to_string());
+    }
+    if pending > 0 || running > 0 {
+        available_actions.push("skip".to_string());
+    }
+    if inst.state == InstanceState::Running {
+        available_actions.push("cancel".to_string());
+    }
+
+    Ok(Json(CompensationView {
+        instance_id: inst.id.clone(),
+        instance_state: status_str(inst.state).to_string(),
+        summary,
+        blocking_reason,
+        available_actions,
+        records,
+    }))
 }
 
 /// POST /api/v1/process-instances/:id/compensation/retry/:record_id — retry a

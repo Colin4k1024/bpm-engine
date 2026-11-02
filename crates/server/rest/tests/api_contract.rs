@@ -1000,7 +1000,12 @@ async fn compensation_trigger_and_list() {
         .unwrap();
     assert_eq!(resp.status(), 200, "list should return 200");
     let body: serde_json::Value = resp.json().await.unwrap();
-    let records = body.as_array().expect("records array");
+    // N4-3: the response is now the enriched CompensationView object.
+    assert_eq!(body["instance_id"], instance_id);
+    assert_eq!(body["instance_state"], "RUNNING");
+    assert_eq!(body["summary"]["total"], 1);
+    assert_eq!(body["summary"]["running"], 1);
+    let records = body["records"].as_array().expect("records array");
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["status"], "Running");
     assert_eq!(records[0]["id"], "comp-test-1");
@@ -1027,9 +1032,229 @@ async fn compensation_trigger_and_list() {
         .unwrap();
     assert_eq!(resp.status(), 200, "list should return 200");
     let body: serde_json::Value = resp.json().await.unwrap();
-    let records = body.as_array().expect("records array");
+    assert_eq!(body["summary"]["skipped"], 1);
+    let records = body["records"].as_array().expect("records array");
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["status"], "Skipped");
+
+    server.stop().await;
+}
+
+// --- Compensation operator recovery view (N4-3) ------------------------------
+
+/// End-to-end fault simulation: drive two compensation records through the
+/// full recovery lifecycle (trigger → fail → retry → skip) and assert the
+/// `CompensationView` summary, `blocking_reason`, and `available_actions`
+/// evolve correctly at every step.
+#[tokio::test]
+async fn compensation_fault_simulation_e2e() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    // 1. Deploy a flow with a user task so the instance stays RUNNING.
+    deploy(&client, &server).await;
+    let (_status, body) = start(&client, &server, None, None).await;
+    let instance_id = body["instance_id"].as_str().unwrap().to_string();
+
+    // 2. Add 2 Pending compensation records via the store.
+    for (rid, order) in [("comp-fault-a", 2u32), ("comp-fault-b", 1u32)] {
+        let record = CompensationRecordRow {
+            id: rid.to_string(),
+            instance_id: instance_id.clone(),
+            node_id: "review".to_string(),
+            handler_ref: "compensate:test".to_string(),
+            order,
+            status: "Pending".to_string(),
+            created_at: "1000".to_string(),
+        };
+        server
+            .state
+            .storage
+            .compensation_repo
+            .add(&record)
+            .await
+            .unwrap();
+    }
+
+    // Helper: GET the compensation view.
+    let get_view = || async {
+        let resp = client
+            .get(format!(
+                "{}/api/v1/process-instances/{}/compensation",
+                server.base_url, instance_id
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "list should return 200");
+        resp.json::<serde_json::Value>().await.unwrap()
+    };
+
+    // 3. GET /compensation → summary: total=2, pending=2; the instance is
+    //    blocked by pending execution; skip + cancel are available.
+    let view = get_view().await;
+    assert_eq!(
+        view["instance_state"], "RUNNING",
+        "instance is running: {view}"
+    );
+    assert_eq!(view["summary"]["total"], 2, "total=2: {view}");
+    assert_eq!(view["summary"]["pending"], 2, "pending=2: {view}");
+    assert_eq!(
+        view["blocking_reason"].as_str().unwrap(),
+        "2 step(s) pending execution",
+        "blocking_reason: {view}"
+    );
+    let actions = view["available_actions"]
+        .as_array()
+        .expect("available_actions array");
+    assert!(
+        actions.iter().any(|a| a == "skip"),
+        "skip available while Pending records exist: {view}"
+    );
+    assert!(
+        actions.iter().any(|a| a == "cancel"),
+        "cancel available while instance is RUNNING: {view}"
+    );
+    assert!(
+        !actions.iter().any(|a| a == "retry"),
+        "retry NOT available with no Failed records: {view}"
+    );
+
+    // 4. POST /trigger → triggered=2, both records Running.
+    let resp = client
+        .post(format!(
+            "{}/api/v1/process-instances/{}/compensation/trigger",
+            server.base_url, instance_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "trigger should return 200");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["triggered"], 2, "two records triggered: {body}");
+    let triggered = body["records"].as_array().expect("records array");
+    assert_eq!(triggered.len(), 2);
+    assert!(triggered.iter().all(|r| r["status"] == "Running"));
+
+    // 5. Manually set one record to Failed (simulating a crashed handler).
+    server
+        .state
+        .storage
+        .compensation_repo
+        .update_status("comp-fault-a", "Failed")
+        .await
+        .unwrap();
+
+    // 6. GET /compensation → failed=1; blocking_reason mentions "failed";
+    //    available_actions now includes "retry".
+    let view = get_view().await;
+    assert_eq!(view["summary"]["failed"], 1, "failed=1: {view}");
+    assert_eq!(view["summary"]["running"], 1, "one still running: {view}");
+    let blocking = view["blocking_reason"].as_str().expect("blocking_reason");
+    assert!(
+        blocking.contains("failed"),
+        "blocking_reason mentions failed: {view}"
+    );
+    let actions = view["available_actions"]
+        .as_array()
+        .expect("available_actions array");
+    assert!(
+        actions.iter().any(|a| a == "retry"),
+        "retry available with a Failed record: {view}"
+    );
+
+    // 7. POST /retry/:failed_record_id → 200 (Failed → Pending).
+    let resp = client
+        .post(format!(
+            "{}/api/v1/process-instances/{}/compensation/retry/comp-fault-a",
+            server.base_url, instance_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "retry should return 200");
+
+    // 8. GET /compensation → the retried record is Pending again; no Failed.
+    let view = get_view().await;
+    assert_eq!(
+        view["summary"]["pending"], 1,
+        "retried record is Pending: {view}"
+    );
+    assert_eq!(
+        view["summary"]["failed"], 0,
+        "no Failed records after retry: {view}"
+    );
+    assert_eq!(
+        view["summary"]["running"], 1,
+        "the other still running: {view}"
+    );
+    let actions = view["available_actions"]
+        .as_array()
+        .expect("available_actions array");
+    assert!(
+        !actions.iter().any(|a| a == "retry"),
+        "retry NOT available after the Failed record was retried: {view}"
+    );
+
+    // 9. POST /skip/:record_id → 200 (skip the still-Running record).
+    let resp = client
+        .post(format!(
+            "{}/api/v1/process-instances/{}/compensation/skip/comp-fault-b",
+            server.base_url, instance_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "skip should return 200");
+
+    // 10. GET /compensation → skipped=1. The retried record is still Pending,
+    //     so skip remains available — but retry is gone. Skip the last
+    //     Pending record too, then assert "skip" disappears from
+    //     available_actions once no Pending/Running records remain.
+    let view = get_view().await;
+    assert_eq!(view["summary"]["skipped"], 1, "skipped=1: {view}");
+    assert_eq!(
+        view["summary"]["pending"], 1,
+        "retried record still pending: {view}"
+    );
+
+    // Skip the last remaining Pending record (the retried comp-fault-a).
+    let resp = client
+        .post(format!(
+            "{}/api/v1/process-instances/{}/compensation/skip/comp-fault-a",
+            server.base_url, instance_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "skip should return 200");
+
+    // Now every record is terminal (Skipped): no Pending/Running/Failed, so
+    // neither "skip" nor "retry" is available — only "cancel" remains.
+    let view = get_view().await;
+    assert_eq!(view["summary"]["skipped"], 2, "both skipped: {view}");
+    assert_eq!(view["summary"]["pending"], 0, "no pending: {view}");
+    assert_eq!(view["summary"]["running"], 0, "no running: {view}");
+    assert_eq!(view["summary"]["failed"], 0, "no failed: {view}");
+    assert!(
+        view["blocking_reason"].is_null(),
+        "no blocking_reason once all records are terminal: {view}"
+    );
+    let actions = view["available_actions"]
+        .as_array()
+        .expect("available_actions array");
+    assert!(
+        !actions.iter().any(|a| a == "skip"),
+        "skip NOT available with no Pending/Running records: {view}"
+    );
+    assert!(
+        !actions.iter().any(|a| a == "retry"),
+        "retry NOT available with no Failed records: {view}"
+    );
+    assert!(
+        actions.iter().any(|a| a == "cancel"),
+        "cancel still available while instance is RUNNING: {view}"
+    );
 
     server.stop().await;
 }
