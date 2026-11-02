@@ -230,6 +230,17 @@ pub async fn build_app(config: &BpmConfig) -> anyhow::Result<AppHandle> {
     if !config.auth.api_key.is_empty() {
         std::env::set_var("BPM_API_KEY", &config.auth.api_key);
     }
+    // N5-2 (ADR-013): JWT trust-boundary config — iss/aud validation and the
+    // comma-separated key-rotation list. The middleware reads these directly.
+    if !config.auth.jwt_issuer.is_empty() {
+        std::env::set_var("BPM_JWT_ISSUER", &config.auth.jwt_issuer);
+    }
+    if !config.auth.jwt_audience.is_empty() {
+        std::env::set_var("BPM_JWT_AUDIENCE", &config.auth.jwt_audience);
+    }
+    if !config.auth.jwt_secrets.is_empty() {
+        std::env::set_var("BPM_JWT_SECRETS", &config.auth.jwt_secrets);
+    }
 
     let (storage, extra_health_checks) = build_storage(config).await?;
 

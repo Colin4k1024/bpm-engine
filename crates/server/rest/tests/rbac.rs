@@ -72,6 +72,7 @@ fn config() -> BpmConfig {
         auth: AuthConfig {
             jwt_secret: TEST_SECRET.to_string(),
             api_key: TEST_API_KEY.to_string(),
+            ..Default::default()
         },
         rate_limit: RateLimitConfig {
             requests_per_minute: 1_000_000,
@@ -117,7 +118,7 @@ fn soon() -> u64 {
 
 /// Mint a TEST_SECRET-signed token for `role` @ `tenant`.
 fn token(role: &str, tenant: &str) -> String {
-    mint_jwt(TEST_SECRET, "test-actor", tenant, role, soon()).expect("mint token")
+    mint_jwt(TEST_SECRET, "test-actor", tenant, role, soon(), None, None).expect("mint token")
 }
 
 /// The `Authorization` header value authenticating as `role` @ `tenant`.
@@ -230,7 +231,16 @@ async fn jwt_is_required_and_rejections_carry_invalid_token() {
     assert_error(resp, 401, "invalid_token").await;
 
     // Token signed with the WRONG secret.
-    let wrong_secret = mint_jwt("other-secret", "a", TENANT_A, "operator", soon()).expect("mint");
+    let wrong_secret = mint_jwt(
+        "other-secret",
+        "a",
+        TENANT_A,
+        "operator",
+        soon(),
+        None,
+        None,
+    )
+    .expect("mint");
     let resp = client
         .get(format!("{}/api/v1/process-instances", server.base_url))
         .header("Authorization", format!("Bearer {wrong_secret}"))
@@ -240,7 +250,7 @@ async fn jwt_is_required_and_rejections_carry_invalid_token() {
     assert_error(resp, 401, "invalid_token").await;
 
     // Expired token (strict expiry, zero leeway).
-    let expired = mint_jwt(TEST_SECRET, "a", TENANT_A, "operator", 1).expect("mint");
+    let expired = mint_jwt(TEST_SECRET, "a", TENANT_A, "operator", 1, None, None).expect("mint");
     let resp = client
         .get(format!("{}/api/v1/process-instances", server.base_url))
         .header("Authorization", format!("Bearer {expired}"))

@@ -14,7 +14,7 @@ The two configuration credentials define three modes (see
 
 | Mode | Configured | Request credential | Identity |
 |------|-----------|--------------------|----------|
-| **JWT** (production) | `auth.jwt_secret` (`BPM_AUTH__JWT_SECRET` / `BPM_JWT_SECRET`) | `Authorization: Bearer <jwt>` | verified principal: `actor`, `tenant`, `role` from claims |
+| **JWT** (production) | `auth.jwt_secret` and/or `auth.jwt_secrets` (`BPM_AUTH__JWT_SECRET` / `BPM_JWT_SECRET`, `BPM_AUTH__JWT_SECRETS` / `BPM_JWT_SECRETS`; N5-2) | `Authorization: Bearer <jwt>` | verified principal: `actor`, `tenant`, `role` from claims |
 | **API key** (bootstrap) | `auth.api_key` (`BPM_AUTH__API_KEY` / `BPM_API_KEY`) | `X-API-Key: <key>` | admin: FULL access, no role checks |
 | **Open** (PoC/dev) | neither | none | anonymous |
 
@@ -38,7 +38,8 @@ The unauthenticated top-level routes (`/health`, `/ready`,
 
 ## JWT token
 
-HS256, signed with `auth.jwt_secret`. Claims:
+HS256, signed with `auth.jwt_secret` (single) and/or `auth.jwt_secrets`
+(rotation list, N5-2/ADR-013). Claims:
 
 | Claim | Type | Meaning |
 |-------|------|---------|
@@ -47,9 +48,29 @@ HS256, signed with `auth.jwt_secret`. Claims:
 | `role` | string | `deployer` \| `operator` \| `worker` \| `auditor` (anything else → 401 `invalid_token`) |
 | `exp` | u64 | unix-seconds expiry, enforced with ZERO leeway |
 | `iat` | u64, optional | issued-at (metadata; not required, not validated) |
+| `iss` | string, optional | issuer (N5-2); validated against `auth.jwt_issuer` when configured |
+| `aud` | string, optional | audience (N5-2); validated against `auth.jwt_audience` when configured |
 
 Signature, expiry, and claims are verified by the middleware; a failure
 answers 401 `invalid_token` with the standard `ErrorResponse` body.
+
+### Trust boundary config (N5-2, ADR-013)
+
+| Config (env) | Effect |
+|--------------|--------|
+| `auth.jwt_secret` (`BPM_AUTH__JWT_SECRET` / `BPM_JWT_SECRET`) | single accepted signing secret (the E5-1 shorthand) |
+| `auth.jwt_secrets` (`BPM_AUTH__JWT_SECRETS` / `BPM_JWT_SECRETS`) | comma-separated accepted secrets for **key rotation**; signature verification tries each (plus `jwt_secret` when also set), any match succeeds |
+| `auth.jwt_issuer` (`BPM_AUTH__JWT_ISSUER` / `BPM_JWT_ISSUER`) | when set, the token's `iss` claim MUST equal it (absent or mismatched → 401 `invalid_token`) |
+| `auth.jwt_audience` (`BPM_AUTH__JWT_AUDIENCE` / `BPM_JWT_AUDIENCE`) | when set, the token's `aud` claim MUST equal it (absent or mismatched → 401 `invalid_token`) |
+
+Unset `iss`/`aud` = not validated (backward compatible with pre-N5-2
+tokens). At least one signing secret must be set for JWT mode; with none
+configured the server runs in open/API-key mode.
+
+**Key rotation flow:** add the new secret to `jwt_secrets` (keep the old
+one), mint new tokens with the new secret, then remove the old secret from
+the list after the transition window — old tokens then fail with
+`InvalidSignature`.
 
 ### Minting tokens
 
@@ -59,9 +80,10 @@ server):
 ```sh
 export BPM_JWT_SECRET=$(...the server's auth.jwt_secret...)
 cargo run -p bpm-engine-server-rest --example mint_jwt -- \
-    --sub alice --tenant acme --role operator
+    --sub alice --tenant acme --role operator [--iss bpm-engine] [--aud bpm-api]
 # → prints the token (default expiry: now + 1h; --exp <unix-secs> or
-#   --exp-in <secs> to override)
+#   --exp-in <secs> to override; --iss/--aud set the N5-2 claims when the
+#   server validates them)
 ```
 
 Send it as `Authorization: Bearer <token>` on `/api/v1` requests, e.g.:
@@ -76,8 +98,10 @@ curl -H "Authorization: Bearer $TOKEN" \
 ```
 
 In Rust, `bpm_engine_server_rest::middleware::mint_jwt(secret, sub, tenant,
-role, exp)` is the programmatic helper (also used by the tests). The
-server never issues tokens itself — minting is an operator concern.
+role, exp, iss, aud)` is the programmatic helper (also used by the tests);
+`iss`/`aud` are `Option<&str>` (pass `None` when the server does not
+validate them). The server never issues tokens itself — minting is an
+operator concern.
 
 ### The operations console and the worker SDK
 
