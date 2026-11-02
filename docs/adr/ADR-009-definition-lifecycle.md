@@ -101,34 +101,36 @@ Deprecated 的版本号；否则拒绝（`definition_version_not_monotonic`）�
 | 状态 | 含义 | 可启动新实例？ | 内容可变？ |
 |------|------|:-:|:-:|
 | `Draft` | 候选草稿，可反复上传覆盖 | 否 | 是 |
-| `Validated` | 通过结构+语义校验，校验报告已持久化 | 否 | 否（冻结为可发布候选） |
-| `Published` | 已发布不可变版本，可被激活 | 否（需先 Activated） | 否 |
+| `Validated` | 通过校验，报告已持久化；重新上传回 Draft 再迭代 | 否 | 是（重新上传回 Draft，清除报告） |
+| `Published` | 已发布不可变版本，分配版本号，在可激活池中 | 否（需先 Activated） | 否 |
 | `Activated` | 该 key 的当前激活版本，唯一可启动 | 是 | 否 |
-| `Deprecated` | 已退役（被新版本取代或手动废弃） | 否 | 否 |
+| `Deprecated` | 显式退役（从可激活池移除），终态 | 否 | 否 |
+
+**内容冻结点**：不可变性从 `Published` 开始（含 `Activated`、`Deprecated`）。
+`Draft`/`Validated` 可重新上传——`Validated` 重新上传回 `Draft`（清除校验报告，
+允许 Agent 按报告迭代后再校验）。`Published`+ 不可覆盖。
 
 合法跃迁（非法跃迁拒绝，返回 `definition_invalid_transition`）：
-
-```
-Draft ──validate──▶ Validated ──publish──▶ Published ──activate──▶ Activated
-  │                    │                       │                       │
-  └──(重新上传)──▶ Draft     └──(retire)──▶ Deprecated ◀──(retire)───┘
-                                              ▲
-                          Published ──(retire)──┘
-                          Activated ──(deprecate/被新激活取代)──▶ Deprecated
-```
-
-跃迁规则：
 
 - `Draft → Validated`：执行 `validate_definition` + `dry_run`，无 Critical finding
   时持久化校验报告并跃迁。有 Critical finding 时保持 Draft，报告仍持久化（N1-2 的
   修复建议载体）。
+- `Validated → Draft`：重新上传覆盖（清除校验报告，允许迭代）。
 - `Validated → Published`：分配不可变版本号（单调性校验，§2），冻结 XML 与编译图。
-  `Validated` 是可选中间态——草稿可直接走快路径发布，不必停留。
-- `Published → Activated`：CAS 激活（§3）。
-- `Activated → Deprecated`：手动 deprecate，或被同 key 新版本激活时自动翻转。
-- 任何非终态 → `Deprecated`：手动 retire。
-- `Deprecated` 是终态，不可回退到任何活跃态。"回退"（N1-4）= 重新激活一个已
-  Published 的旧版本（§4）。
+- `Validated → Deprecated`：退役候选（不经发布直接退役）。
+- `Published → Activated`：CAS 激活（§3）。可多次发生（回退 = 重新激活一个
+  `Published` 版本，§4）。
+- `Published → Deprecated`：手动退役已发布版本。
+- `Activated → Published`：**自动**——同 key 另一版本激活时，当前 Activated 自动
+  回退为 `Published`（仍在可激活池中，可被再次激活=回退）。不是终态。
+- `Activated → Deprecated`：手动退役当前激活版本（之后该 key 无 Activated，直到
+  另一版本被激活）。
+- `Deprecated` 是**终态**，不可回退。要"恢复"一个已 Deprecated 版本，需以新版本号
+  重新发布其 XML。
+
+`Activated` 不是终态——它表示"当前是该 key 的激活版本"，可被取代（→ Published）
+或退役（→ Deprecated）。这使"回退 = 重新激活旧版本"成为 `Published → Activated`
+的普通跃迁，无需破例。
 
 DB 迁移 `0005_definition_lifecycle.sql`（前向 only，ADR-005）：
 
@@ -153,43 +155,65 @@ UPDATE process_definition SET status = 'activated' WHERE status = 'active';
   BPMN XML 与编译图不可修改。对已发布版本 id 重新 deploy →
   `definition_version_immutable`（409），不再静默覆盖（关闭现行
   `ON CONFLICT DO UPDATE SET bpmn_xml` 的覆盖路径）。
-- 仅 `Draft` 状态的 id 可重新上传（覆盖 XML 与编译图，不触发单调性校验）。
-- 快路径 `POST /deploy` 对已存在的 id：若该 id 当前为 `Draft` → 覆盖草稿后走完
-  快路径；若已 `Published`+ → `definition_version_immutable`（409，要求新版本号）。
+- `Draft`/`Validated` 可重新上传：`Draft` 覆盖后仍为 Draft；`Validated` 覆盖后
+  回退为 Draft（清除校验报告，允许 Agent 按报告迭代后再校验）。重新上传不触发
+  单调性校验（尚未发布，无版本号约束）。
+- 快路径 `POST /deploy` 对已存在的 id：若该 id 当前为 `Draft`/`Validated` →
+  覆盖为 Draft 后走完快路径；若已 `Published`+ →
+  `definition_version_immutable`（409，要求新版本号）。
 
-### 3. 同 key 并发发布与激活（CAS）
+### 3. 同 key 并发发布与激活
 
-**至多一个 Activated per key**——激活是 CAS 操作：
+**至多一个 Activated per key**——激活时先把同 key 的当前 Activated 回退为
+`Published`，再把目标从 `Published` 置为 `Activated`：
 
 - **Postgres**（N1-3 实现）：单事务内
-  `UPDATE process_definition SET status='deprecated' WHERE def_key=$1 AND status='activated' AND id<>$2`
+  `UPDATE process_definition SET status='published' WHERE def_key=$1 AND status='activated' AND id<>$2`
   再 `UPDATE process_definition SET status='activated' WHERE id=$2 AND status='published'`
-  （`RETURNING` 验证行数；0 行 = 已被并发改变，返回当前状态）。参数绑定，符合
-  Mimosa 约束。
-- **Memory**：写锁内完成同一段 check-then-act（现行 `register` 已在写锁内做
-  "翻转旧 active"，扩展为仅从 `Published` 跃迁到 `Activated`）。
+  （参数绑定，符合 Mimosa 约束）。第二条 `UPDATE` 的 `WHERE status='published'`
+  保证只能激活处于可激活池的版本——对 `Draft`/`Validated`/`Deprecated` 的激活
+  尝试命中 0 行 → 409 `definition_invalid_transition`。
+- **Memory**：写锁内完成同一段 check-then-act。
+
+**并发激活是 last-writer-wins，不是"败者 409"**（诚实取舍）。两个不同版本并发
+activate 时，两条事务串行提交：先提交者的目标成为 Activated、当前 Activated 回退
+为 Published；后提交者的目标成为 Activated、先者的目标回退为 Published。**两者都
+返回 200**，最终 Activated 是最后提交的版本。这是"激活 = 让此版本成为当前版本"
+的自然语义——两个操作员竞相激活不同版本，最后操作生效，先前版本仍在可激活池中
+可被再次激活（回退）。CAS 的作用是保证**至多一个 Activated**（不会出现两个
+Activated），而非阻止并发激活本身。
 
 并发场景预期（验收）：
 
 | 场景 | 结果 |
 |------|------|
-| 同 key 两个不同版本并发 activate | CAS 串行化：先到者激活、另一者被翻转为 Deprecated；后到者的 `UPDATE ... WHERE status='published'` 命中 0 行 → 409 `definition_activation_conflict`（附当前激活版本 id） |
-| 同版本并发 activate（重复请求） | 幂等：已 Activated → 200 回放当前状态 |
+| 同 key 两个不同版本并发 activate | last-writer-wins：两者都 200，最后提交者的版本成为 Activated，先者的回退为 Published（可再激活=回退） |
+| 同版本并发 activate（重复请求） | 幂等：已 Activated → 200 回放；第二条事务的 deprecate-other 命中 0 行（无其他 Activated），activate 命中自身（已 Activated，0 行更新，无副作用）→ 200 |
+| activate 一个 `Draft`/`Validated`/`Deprecated` 版本 | 409 `definition_invalid_transition`（`WHERE status='published'` 命中 0 行） |
 | 同 key 并发 publish 两个不同版本号 | 单调性校验串行化：版本号大的成功；版本号小的若不大于既有最大值 → 409 `definition_version_not_monotonic` |
 | 同 id（同版本号）并发 publish | 第二个命中 `definition_version_immutable`（409） |
 
-**多副本部署**（同 DB 多进程）的 CAS 安全性依赖 DB 行级锁（`FOR UPDATE`），但
-v1 产品承诺单服务进程（ADR-008 §7 已记录）。多副本显式推迟。
+> ~~`definition_activation_conflict`~~ 该错误码不引入——并发不同版本激活不报
+> 409（last-writer-wins）。激活相关的 409 只有 `definition_invalid_transition`
+> （目标不在 `Published` 态）。
+
+**多副本部署**（同 DB 多进程）：last-writer-wins 的正确性依赖 Postgres 事务隔离
+（`READ COMMITTED` + 行级锁即可保证两条 `UPDATE` 串行化，不会出现两个
+Activated）。v1 产品承诺单服务进程（ADR-008 §7 已记录），多副本显式推迟。
 
 ### 4. 旧实例继续运行（不可变版本绑定）
 
 - `ProcessInstance.process_def_id` 在 `ProcessStarted` 时记录带版本号的 id
   （现行行为，不变）。
-- 实例加载定义时按 id 精确加载（`load(id)`），不取"当前 active"——即使该版本已被
-  Deprecated，运行中实例仍加载其绑定的版本继续执行。
-- **回退操作**（N1-4）：将一个 `Deprecated` 的 `Published` 版本重新 `activate`
-  （CAS）。这不改写任何已运行实例的 `process_def_id`——旧实例继续在原版本上跑，
-  新实例从重新激活的版本启动。"回退 = 重新激活旧版本，不改写已运行实例。"
+- 实例加载定义时按 id 精确加载（`load(id)`），不取"当前 active"——即使该版本已不在
+  Activated 态，运行中实例仍加载其绑定的版本继续执行。
+- **回退操作**（N1-4）：重新激活一个 `Published` 版本（`Published → Activated`，
+  §3 的普通跃迁）。被新版本取代的旧版本自动回退为 `Published`（仍在可激活池），
+  因此回退 = 对该旧版本再调一次 activate。这不改写任何已运行实例的
+  `process_def_id`——旧实例继续在原版本上跑，新实例从重新激活的版本启动。
+  "回退 = 重新激活旧版本，不改写已运行实例。"
+- 已 `Deprecated`（显式退役）的版本不可回退（终态）；要恢复其内容需以新版本号
+  重新发布。
 
 ### 5. 失败回滚预期
 
@@ -197,13 +221,20 @@ v1 产品承诺单服务进程（ADR-008 §7 已记录）。多副本显式推�
 |------|--------|------|
 | 快路径 deploy | 编译失败 | 不持久化（现行行为，不变） |
 | 快路径 deploy | 校验失败（Critical finding） | 不持久化（快路径要求校验通过才发布） |
-| 快路径 deploy | publish 成功、activate 失败（CAS 冲突） | 版本留在 `Published`，未 `Activated`；调用方收到 409 + 当前激活版本；重试 activate（单独端点）即可 |
-| 细粒度 publish | 单调性校验失败 | 不持久化版本记录；草稿保持原态 |
-| 细粒度 activate | CAS 冲突 | 版本保持 `Published`，不翻转 |
+| 快路径 deploy | publish 单调性校验失败 | 不持久化（事务回滚，版本记录不落库） |
+| 快路径 deploy | publish + activate | **原子**：单事务（Postgres）/ 单写锁（Memory）内完成；activate 步骤必成功（目标版本在同事务内刚 publish，`WHERE id=$2 AND status='published'` 命中 1 行）。快路径不存在"publish 成功但 activate 失败"的中间态 |
+| 细粒度 publish | 单调性校验失败 | 不持久化版本记录；草稿/已校验态保持原态 |
+| 细粒度 activate | 目标不在 `Published` 态 | 409 `definition_invalid_transition`；版本状态不变 |
+| 细粒度 activate | 正常（目标在 Published） | last-writer-wins（§3）；至多一个 Activated，无中间态 |
 
-**诚实边界**：快路径的 publish+activate 在 Postgres 单事务内原子（要么都成功，
-要么都回滚）；在 Memory 单写锁内原子。细粒度 publish 与 activate 是两次独立操作，
-不原子——这是细粒度 API 的固有取舍，N1-3 的 CAS 激活闭合"激活一步"的并发窗。
+**快路径与细粒度的原子性差异**（诚实取舍）：
+
+- **快路径** publish + activate 在单事务/单写锁内**原子**——要么版本进入
+  `Activated`，要么什么都不变。不存在"已 Published 未 Activated"的快路径中间态。
+- **细粒度** publish 与 activate 是两次独立操作，不原子：publish 后版本持久化为
+  `Published`（即使随后 activate 失败或未调用，版本仍在可激活池）。这是细粒度 API
+  的固有取舍——它显式分离"发布"与"激活"两个决策，允许"发布但不立即激活"。
+  activate 本身是 last-writer-wins（§3），无"败者回滚"。
 
 ### 6. 部署快路径语义（兼容桥）
 
@@ -212,8 +243,8 @@ v1 产品承诺单服务进程（ADR-008 §7 已记录）。多副本显式推�
 1. `parse_and_compile`（编译失败 → 400 `Compile`，现行行为）
 2. `validate_definition`（Critical finding → 400，新增校验门——现行 deploy 不校验，
    本 ADR 将快路径升级为"必须通过校验才发布"）
-3. publish（单调性校验 + 不可变冻结；版本冲突 → 409）
-4. activate（CAS；冲突 → 409，版本留在 Published）
+3. publish（单调性校验 + 不可变冻结；版本号冲突 → 409 `definition_version_not_monotonic` 或 `definition_version_immutable`）
+4. activate（同事务内；目标刚 publish 故 `WHERE status='published'` 必命中，无冲突）
 
 返回值不变（`DeployResponse { process_definition_id }`）。
 
@@ -227,12 +258,12 @@ v1 产品承诺单服务进程（ADR-008 §7 已记录）。多副本显式推�
 
 | 现行端点（E 系列） | N1-1 后语义 | 线缆变化 |
 |---|---|---|
-| `POST /process-definitions/deploy` | 快路径：编译→校验→发布→激活（原子） | 请求不变；新增 409 版本冲突码；`?skip_validation` opt-in（N1-2） |
+| `POST /process-definitions/deploy` | 快路径：编译→校验→发布→激活（原子） | 请求不变；新增 409 `definition_version_not_monotonic`/`definition_version_immutable`；`?skip_validation` opt-in（N1-2） |
 | `GET /process-definitions` | 列出全部版本记录 | `status` 枚举增加 `draft/validated/published/activated`（`active` 兼容别名读入） |
 | `GET /process-definitions/versions/:key` | 同 key 版本列表 | 同上 status 扩展 |
 | `GET /process-definitions/active/:key` | 返回当前 Activated 版本 | 语义不变；status 值 `activated`（兼容 `active` 读入） |
-| `PUT /process-definitions/:id/activate` | CAS 激活 | 新增 409 `definition_activation_conflict` |
-| `PUT /process-definitions/:id/deprecate` | 退役（同现行） | 无变化 |
+| `PUT /process-definitions/:id/activate` | 激活（last-writer-wins，§3） | 新增 409 `definition_invalid_transition`（目标不在 `Published` 态） |
+| `PUT /process-definitions/:id/deprecate` | 退役→Deprecated（终态） | 无变化 |
 | `POST /process-definitions/validate` | 无状态校验（现行） | 无变化（N1-2 增加持久化校验端点） |
 | `POST /process-definitions/dry-run` | 无状态模拟（现行） | 无变化 |
 
@@ -255,18 +286,21 @@ OpenAPI `DefinitionVersionView.status` 枚举（`docs/openapi.yaml:2712`）从
 本 ADR 锁定以下可测断言（实现后进 CI）：
 
 1. **五态跃迁合法性**：Draft→Validated→Published→Activated 全程合法；
-   Published→Draft 非法（`definition_invalid_transition`）。
+   Activated→Published（被新版本取代，自动）合法；Published→Draft 非法
+   （`definition_invalid_transition`）；Deprecated→任何态非法（终态）。
 2. **单调性**：同 key 已有 version=3 Published，publish version=2 →
    `definition_version_not_monotonic`；publish version=4 → 成功。
 3. **不可变性**：对已 Published 的 `order-flow:3` 重新 deploy →
-   `definition_version_immutable`；对 Draft 的 `order-flow:4` 重新上传 → 成功覆盖。
-4. **CAS 激活**：同 key version=3 已 Activated，activate version=2 → version=3
-   自动 Deprecated，version=2 成为 Activated；并发 activate version=4 与 version=5
-   → 一胜一负（负者 409 + 胜者 id）。
+   `definition_version_immutable`；对 Draft/Validated 的 `order-flow:4` 重新上传
+   → 成功（Validated 回退为 Draft，清除校验报告）。
+4. **激活（last-writer-wins）**：同 key version=3 已 Activated，activate version=2
+   → version=3 自动回退为 Published，version=2 成为 Activated；并发 activate
+   version=4 与 version=5 → **两者都 200**，最后提交者的版本成为 Activated，
+   先者回退为 Published（可再激活=回退）；至多一个 Activated（不变式）。
 5. **旧实例继续运行**：version=3 的实例运行中，activate version=4 → 实例仍加载
    version=3 定义继续执行；新实例启动用 version=4。
-6. **快路径兼容**：`POST /deploy` 合法定义 → 编译+校验+发布+激活一步完成，返回
-   definition id（与现行回包同构）。
+6. **快路径兼容**：`POST /deploy` 合法定义 → 编译+校验+发布+激活原子一步完成，
+   返回 definition id（与现行回包同构）；含 Critical finding 的定义 → 400（不持久化）。
 7. **迁移**：0005 迁移后，表中无 `status='active'` 行；`GET /active/:key` 返回
    `status='activated'`。
 
