@@ -48,7 +48,7 @@ async fn e2e_minimal_process_completes() {
     // Deploy minimal BPMN (start → end)
     let bpmn = include_str!("fixtures/minimal.bpmn");
     let def = bpm_engine::bpm_engine_bpmn::parse_and_compile(bpmn).unwrap();
-    def_store.register(def.clone());
+    def_store.register(def.clone(), None);
 
     let mut ctx = bpm_engine::bpm_engine_runtime::EngineContext::builder(
         repo.clone() as Arc<dyn ProcessInstanceStore>,
@@ -80,7 +80,7 @@ async fn e2e_start_instance_with_variables() {
 
     let bpmn = include_str!("fixtures/minimal.bpmn");
     let def = bpm_engine::bpm_engine_bpmn::parse_and_compile(bpmn).unwrap();
-    def_store.register(def.clone());
+    def_store.register(def.clone(), None);
 
     let mut ctx = bpm_engine::bpm_engine_runtime::EngineContext::builder(
         repo.clone() as Arc<dyn ProcessInstanceStore>,
@@ -117,7 +117,7 @@ async fn e2e_service_task_flow_with_external_tasks() {
     // Deploy service task flow (start → task1 → task2 → task3 → end)
     let bpmn = include_str!("fixtures/service_tasks.bpmn");
     let def = bpm_engine::bpm_engine_bpmn::parse_and_compile(bpmn).unwrap();
-    def_store.register(def.clone());
+    def_store.register(def.clone(), None);
 
     let mut ctx = bpm_engine::bpm_engine_runtime::EngineContext::builder(
         repo.clone() as Arc<dyn ProcessInstanceStore>,
@@ -190,7 +190,7 @@ async fn e2e_external_task_fail_and_retry() {
 
     let bpmn = include_str!("fixtures/service_tasks.bpmn");
     let def = bpm_engine::bpm_engine_bpmn::parse_and_compile(bpmn).unwrap();
-    def_store.register(def.clone());
+    def_store.register(def.clone(), None);
 
     let mut ctx = bpm_engine::bpm_engine_runtime::EngineContext::builder(
         repo.clone() as Arc<dyn ProcessInstanceStore>,
@@ -255,7 +255,7 @@ async fn e2e_instance_history_recorded() {
 
     let bpmn = include_str!("fixtures/minimal.bpmn");
     let def = bpm_engine::bpm_engine_bpmn::parse_and_compile(bpmn).unwrap();
-    def_store.register(def.clone());
+    def_store.register(def.clone(), None);
 
     let mut ctx = bpm_engine::bpm_engine_runtime::EngineContext::builder(
         repo.clone() as Arc<dyn ProcessInstanceStore>,
@@ -286,7 +286,7 @@ async fn e2e_parallel_gateway_creates_multiple_tokens() {
 
     let bpmn = include_str!("fixtures/parallel_gateway.bpmn");
     let def = bpm_engine::bpm_engine_bpmn::parse_and_compile(bpmn).unwrap();
-    def_store.register(def.clone());
+    def_store.register(def.clone(), None);
 
     let mut ctx = bpm_engine::bpm_engine_runtime::EngineContext::builder(
         repo.clone() as Arc<dyn ProcessInstanceStore>,
@@ -321,7 +321,7 @@ async fn e2e_exclusive_gateway_takes_default_branch() {
 
     let bpmn = include_str!("fixtures/exclusive_gateway.bpmn");
     let def = bpm_engine::bpm_engine_bpmn::parse_and_compile(bpmn).unwrap();
-    def_store.register(def.clone());
+    def_store.register(def.clone(), None);
 
     let mut ctx = bpm_engine::bpm_engine_runtime::EngineContext::builder(
         repo.clone() as Arc<dyn ProcessInstanceStore>,
@@ -354,7 +354,7 @@ async fn e2e_external_task_complete_merges_variables() {
 
     let bpmn = include_str!("fixtures/service_tasks.bpmn");
     let def = bpm_engine::bpm_engine_bpmn::parse_and_compile(bpmn).unwrap();
-    def_store.register(def.clone());
+    def_store.register(def.clone(), None);
 
     let mut ctx = bpm_engine::bpm_engine_runtime::EngineContext::builder(
         repo.clone() as Arc<dyn ProcessInstanceStore>,

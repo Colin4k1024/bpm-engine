@@ -20,9 +20,11 @@ CREATE TABLE IF NOT EXISTS process_definition (
     version INTEGER NOT NULL DEFAULT 1,
     status TEXT NOT NULL DEFAULT 'activated',
     bpmn_xml TEXT NOT NULL,
-    created_at TEXT
+    created_at TEXT,
+    tenant_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_process_def_key_version ON process_definition (def_key, version);
+CREATE INDEX IF NOT EXISTS idx_process_def_tenant ON process_definition (tenant_id);
 
 -- Process instances
 CREATE TABLE IF NOT EXISTS process_instance (

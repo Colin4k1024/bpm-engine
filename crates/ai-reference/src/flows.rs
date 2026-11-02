@@ -406,7 +406,7 @@ pub fn compile_flow(flow: &FlowSpec) -> anyhow::Result<ProcessDefinition> {
 pub async fn deploy_flow(deployer: &dyn DefinitionDeployer, flow: &FlowSpec) -> anyhow::Result<()> {
     let definition = compile_flow(flow)?;
     deployer
-        .deploy(&definition, &flow.dsl_json)
+        .deploy(&definition, &flow.dsl_json, None)
         .await
         .map_err(|e| anyhow!("flow '{}' failed to deploy: {e}", flow.name))
 }

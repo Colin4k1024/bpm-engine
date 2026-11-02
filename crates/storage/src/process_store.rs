@@ -102,6 +102,10 @@ pub struct ProcessDefinitionRecord {
     pub status: DefinitionStatus,
     /// ISO-8601 creation timestamp.
     pub created_at: String,
+    /// Tenant that owns this definition (N1-3). `None` = global/legacy
+    /// (pre-tenant-isolation definitions, visible to all tenants).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
 }
 
 /// Stores BPMN process definitions (loaded from XML at deploy time).
@@ -167,36 +171,50 @@ pub trait ProcessInstanceStore: Send + Sync {
 /// Definitions are immutable after deploy; only the store id changes.
 #[async_trait]
 pub trait ProcessDefinitionStore: Send + Sync {
-    /// Load a process definition by its unique id.
+    /// Load a process definition by its unique id. Tenant enforcement is at
+    /// the API layer (like instance load).
     async fn load(&self, id: &str) -> anyhow::Result<Option<ProcessDefinition>>;
 
-    /// List all versions of a process definition by key, ordered by version descending.
-    async fn list_versions(&self, key: &str) -> anyhow::Result<Vec<ProcessDefinitionRecord>>;
+    /// List all versions of a process definition key, filtered by tenant
+    /// (N1-3). `None` = global/legacy definitions; `Some(t)` = that tenant's
+    /// definitions plus global ones. Ordered by version descending.
+    async fn list_versions(
+        &self,
+        key: &str,
+        tenant_id: Option<&str>,
+    ) -> anyhow::Result<Vec<ProcessDefinitionRecord>>;
 
-    /// Get the currently active version of a process definition by key.
-    async fn get_active(&self, key: &str) -> anyhow::Result<Option<ProcessDefinitionRecord>>;
+    /// Get the currently active version of a key, filtered by tenant (N1-3).
+    async fn get_active(
+        &self,
+        key: &str,
+        tenant_id: Option<&str>,
+    ) -> anyhow::Result<Option<ProcessDefinitionRecord>>;
 
-    /// Set a specific version as the active one (deactivates previous active).
+    /// Set a specific version as the active one (auto-deactivates prior
+    /// Activated → Published, ADR-009 §3). Tenant enforcement at API layer.
     async fn activate(&self, id: &str) -> anyhow::Result<()>;
 
-    /// Mark a version as deprecated.
+    /// Mark a version as deprecated (terminal). Tenant enforcement at API layer.
     async fn deprecate(&self, id: &str) -> anyhow::Result<()>;
 
-    /// List every version of every process definition key.
-    ///
-    /// Ordered by key ascending, then version descending. Used by management
-    /// APIs that need a full inventory of deployed definitions.
-    async fn list_all(&self) -> anyhow::Result<Vec<ProcessDefinitionRecord>>;
+    /// List every version, filtered by tenant (N1-3). Ordered by key asc,
+    /// version desc.
+    async fn list_all(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> anyhow::Result<Vec<ProcessDefinitionRecord>>;
 }
 
-/// Persists a process definition version at deploy time.
-///
-/// `def` is the already-compiled definition (used for validation/diagnostics
-/// by the caller); `bpmn_xml` is the source that backends persist so the
-/// definition can be recompiled after a restart.
+/// Persists a process definition version at deploy time (N1-3: tenant-scoped).
 #[async_trait]
 pub trait DefinitionDeployer: Send + Sync {
-    /// Persist a definition version. `def` is the already-compiled definition
-    /// (used for validation/diagnostics by the caller); `bpmn_xml` is the source.
-    async fn deploy(&self, def: &ProcessDefinition, bpmn_xml: &str) -> anyhow::Result<()>;
+    /// Persist a definition version. `tenant_id` scopes the definition
+    /// (N1-3); `None` = global/legacy.
+    async fn deploy(
+        &self,
+        def: &ProcessDefinition,
+        bpmn_xml: &str,
+        tenant_id: Option<&str>,
+    ) -> anyhow::Result<()>;
 }

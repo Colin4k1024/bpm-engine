@@ -152,7 +152,7 @@ async fn token_executing_recovered_on_restart() {
     ]);
 
     let def_store = Arc::new(bpm_engine::bpm_engine_adapter_memory::ProcessDefStore::new());
-    def_store.register(minimal_def());
+    def_store.register(minimal_def(), None);
 
     let mut ctx = EngineContext::builder(
         repo.clone() as Arc<_>,
@@ -320,7 +320,7 @@ async fn timer_due_before_crash_fired_after_restart() {
         ]);
 
         let def_store = Arc::new(bpm_engine::bpm_engine_adapter_memory::ProcessDefStore::new());
-        def_store.register(timer_def());
+        def_store.register(timer_def(), None);
 
         let mut ctx = EngineContext::builder(
             repo.clone() as Arc<_>,

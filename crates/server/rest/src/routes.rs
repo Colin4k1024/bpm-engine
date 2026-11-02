@@ -1952,7 +1952,7 @@ async fn audit_definition_view(
     process_def_id: &str,
 ) -> anyhow::Result<AuditDefinitionView> {
     let (key, version) = parse_definition_id_version(process_def_id);
-    let versions = state.storage.def_store.list_versions(&key).await?;
+    let versions = state.storage.def_store.list_versions(&key, None).await?;
     let status = versions
         .iter()
         .find(|r| r.id == process_def_id)
@@ -4540,7 +4540,12 @@ pub async fn deploy_bpmn(
         ));
     }
     let process_definition_id = def.id.to_string();
-    if let Err(e) = state.storage.deployer.deploy(&def, &body).await {
+    if let Err(e) = state
+        .storage
+        .deployer
+        .deploy(&def, &body, identity.tenant())
+        .await
+    {
         tracing::error!(error = %e, "process definition deploy failed");
         // E2-4 review fix: a persistence failure is a DISTINCT 500
         // response with code `deploy_failed` — no longer the Parse (400)
@@ -4832,11 +4837,12 @@ pub struct DefinitionListResponse {
 /// GET /api/v1/process-definitions — list every deployed process definition version.
 pub async fn list_process_definitions(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
 ) -> Result<Json<DefinitionListResponse>, (StatusCode, Json<ErrorResponse>)> {
     let records = state
         .storage
         .def_store
-        .list_all()
+        .list_all(identity.tenant())
         .await
         .map_err(internal_error_tuple)?;
     Ok(Json(DefinitionListResponse {
@@ -4856,12 +4862,13 @@ pub async fn list_process_definitions(
 /// GET /api/v1/process-definitions/versions/:key — list all versions for a key.
 pub async fn list_definition_versions(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(key): Path<String>,
 ) -> Result<Json<VersionListResponse>, (StatusCode, Json<ErrorResponse>)> {
     let versions = state
         .storage
         .def_store
-        .list_versions(&key)
+        .list_versions(&key, identity.tenant())
         .await
         .map_err(internal_error_tuple)?;
     Ok(Json(VersionListResponse {
@@ -4882,12 +4889,13 @@ pub async fn list_definition_versions(
 /// GET /api/v1/process-definitions/active/:key — get the active version for a key.
 pub async fn get_active_definition(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
     Path(key): Path<String>,
 ) -> Result<Json<DefinitionVersionView>, (StatusCode, Json<ErrorResponse>)> {
     let record = state
         .storage
         .def_store
-        .get_active(&key)
+        .get_active(&key, identity.tenant())
         .await
         .map_err(internal_error_tuple)?
         .ok_or_else(|| {

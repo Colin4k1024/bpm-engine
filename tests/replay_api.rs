@@ -126,7 +126,7 @@ fn user_task_def() -> ProcessDefinition {
 fn build_engine_with_history() -> (BpmEngine, EngineContext, Arc<MemoryRepo>) {
     let repo = Arc::new(MemoryRepo::new());
     let def_store = Arc::new(bpm_engine::bpm_engine_adapter_memory::ProcessDefStore::new());
-    def_store.register(minimal_def());
+    def_store.register(minimal_def(), None);
 
     let engine = BpmEngine::new(vec![
         Box::new(ProcessStartHandler),
@@ -230,7 +230,7 @@ async fn replay_step_forward_applies_events_sequentially() {
 
     // Simulate step-forward: apply each event in order using a temp repo
     let def_store = Arc::new(bpm_engine::bpm_engine_adapter_memory::ProcessDefStore::new());
-    def_store.register(minimal_def());
+    def_store.register(minimal_def(), None);
 
     let step_engine = BpmEngine::new(vec![
         Box::new(ProcessStartHandler),
@@ -297,7 +297,7 @@ async fn replay_seek_to_cursor() {
     // Use a process with a UserTask (blocks at "review" node)
     let repo = Arc::new(MemoryRepo::new());
     let def_store = Arc::new(bpm_engine::bpm_engine_adapter_memory::ProcessDefStore::new());
-    def_store.register(user_task_def());
+    def_store.register(user_task_def(), None);
 
     let engine = BpmEngine::new(vec![
         Box::new(ProcessStartHandler),
@@ -344,7 +344,7 @@ async fn replay_seek_to_cursor() {
     let events_to_apply = &replayable[..cursor];
 
     let seek_def_store = Arc::new(bpm_engine::bpm_engine_adapter_memory::ProcessDefStore::new());
-    seek_def_store.register(user_task_def());
+    seek_def_store.register(user_task_def(), None);
     let step_engine = BpmEngine::new(vec![
         Box::new(ProcessStartHandler),
         Box::new(TokenArrivedHandler::new()),
@@ -415,7 +415,7 @@ async fn replay_snapshot_reflects_state() {
 
     // Replay all events
     let def_store = Arc::new(bpm_engine::bpm_engine_adapter_memory::ProcessDefStore::new());
-    def_store.register(minimal_def());
+    def_store.register(minimal_def(), None);
     let step_engine = BpmEngine::new(vec![
         Box::new(ProcessStartHandler),
         Box::new(TokenArrivedHandler::new()),

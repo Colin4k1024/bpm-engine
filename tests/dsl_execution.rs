@@ -83,7 +83,7 @@ async fn run_gateway_flow_until_routed(
     let repo = Arc::new(MemoryRepo::new());
     let def_store = Arc::new(ProcessDefStore::new());
     let def = bpm_engine_dsl::compile(GATEWAY_FLOW).unwrap();
-    def_store.register(def);
+    def_store.register(def, None);
 
     let mut ctx = bpm_engine::bpm_engine_runtime::EngineContext::builder(
         repo.clone() as Arc<dyn ProcessInstanceStore>,
@@ -230,7 +230,7 @@ async fn run_spaced_flow(instance_id: &str, flavor: &str) -> Arc<MemoryRepo> {
     let repo = Arc::new(MemoryRepo::new());
     let def_store = Arc::new(ProcessDefStore::new());
     let def = bpm_engine_dsl::compile(SPACED_FLOW).unwrap();
-    def_store.register(def);
+    def_store.register(def, None);
 
     let mut ctx = bpm_engine::bpm_engine_runtime::EngineContext::builder(
         repo.clone() as Arc<dyn ProcessInstanceStore>,
@@ -329,7 +329,7 @@ async fn dsl_timer_catch_fires_and_completes_process() {
     let repo = Arc::new(MemoryRepo::new());
     let def_store = Arc::new(ProcessDefStore::new());
     let def = bpm_engine_dsl::compile(TIMER_FLOW).unwrap();
-    def_store.register(def);
+    def_store.register(def, None);
 
     let mut ctx = bpm_engine::bpm_engine_runtime::EngineContext::builder(
         repo.clone() as Arc<dyn ProcessInstanceStore>,

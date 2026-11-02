@@ -47,7 +47,7 @@ fn minimal_def() -> ProcessDefinition {
 async fn engine_continues_after_state_persisted() {
     let repo = Arc::new(MemoryRepo::new());
     let def_store = Arc::new(ProcessDefStore::new());
-    def_store.register(minimal_def());
+    def_store.register(minimal_def(), None);
 
     let instance_id = "inst-recover-1".to_string();
     let token_id = "t1".to_string();
