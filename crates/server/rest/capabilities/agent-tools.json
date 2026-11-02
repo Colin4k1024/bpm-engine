@@ -1546,6 +1546,162 @@
       }
     },
     {
+      "name": "deliver_message_by_correlation",
+      "operation": "POST /api/v1/messages",
+      "summary": "Deliver a message by correlation",
+      "description": "Persists a pending message delivery with no target instance\n(N2-3, ADR-010): the runtime matches the delivery to an instance\nwhose variables satisfy the `correlation` predicates. Returns 202\nwith the `delivery_id` and `status: \"pending\"`. Idempotent by\n`delivery_id` or the derived dedup hash.",
+      "classification": "mutating",
+      "side_effects": "Persists a pending message delivery (no target instance) in the event inbox; the runtime matches it to an instance whose variables satisfy the correlation predicates. Idempotent by delivery_id or the derived dedup hash.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "X-Tenant-Id",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Tenant scope for the request (optional). DEPRECATED for\nJWT-authenticated requests (E5-1): the tenant comes from the\nverified `tenant` claim, an absent or agreeing header is accepted,\nand a CONFLICTING header is rejected with 403 `forbidden`. In open\nand API-key modes the header keeps its pre-E5-1 meaning: untrusted\nclient input that scopes listings and instance starts (dev-mode\naffordance)."
+        },
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "schema": {
+            "properties": {
+              "correlation": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "delivery_id": {
+                "type": "string"
+              },
+              "message_name": {
+                "type": "string"
+              },
+              "payload": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "ttl_secs": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "message_name"
+            ],
+            "type": "object"
+          },
+          "content_type": "application/json"
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 202,
+          "description": "Delivery accepted and persisted (pending matching).",
+          "schema": "DeliveryAcceptedResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 422,
+            "code": "invalid_json"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
       "name": "list_process_definitions",
       "operation": "GET /api/v1/process-definitions",
       "summary": "List every deployed definition version",
@@ -2803,6 +2959,64 @@
       }
     },
     {
+      "name": "list_pending_deliveries",
+      "operation": "GET /api/v1/process-instances/{id}/deliveries",
+      "summary": "List pending deliveries for an instance",
+      "description": "Returns the pending (not yet consumed, not expired) message/signal\ndeliveries targeting the instance, oldest first (N2-3). A read —\nevery authenticated role may list deliveries.",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        },
+        {
+          "name": "X-Tenant-Id",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Tenant scope for the request (optional). DEPRECATED for\nJWT-authenticated requests (E5-1): the tenant comes from the\nverified `tenant` claim, an absent or agreeing header is accepted,\nand a CONFLICTING header is rejected with 403 `forbidden`. In open\nand API-key modes the header keeps its pre-E5-1 meaning: untrusted\nclient input that scopes listings and instance starts (dev-mode\naffordance)."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Pending deliveries for the instance.",
+          "schema": "PendingDeliveryList"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
       "name": "get_instance_history",
       "operation": "GET /api/v1/process-instances/{id}/history",
       "summary": "Execution history (auditable timeline)",
@@ -2934,6 +3148,171 @@
           {
             "status": 403,
             "code": "forbidden"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "deliver_message_to_instance",
+      "operation": "POST /api/v1/process-instances/{id}/messages",
+      "summary": "Deliver a message to a process instance",
+      "description": "Persists a pending message delivery targeted at the instance\n(N2-3, ADR-010): the delivery lands in the event inbox as a\n`PendingDelivery` with `target_instance_id` set to the path id and\n`delivery_type = message`. The runtime consumes it when a matching\nmessage-catch token reaches its waiting state; deliveries that\narrive before the catch is ready are buffered. Returns 202 with the\n`delivery_id` and `status: \"pending\"`. Idempotent by the\ncaller-supplied `delivery_id` (or a derived\ntenant/name/instance/payload hash dedup key).",
+      "classification": "mutating",
+      "side_effects": "Persists a pending message delivery targeted at the instance in the event inbox (PendingDelivery, status pending); the runtime consumes it when a matching message-catch token reaches its waiting state. Idempotent by the caller-supplied delivery_id (or a derived tenant/name/instance/payload hash).",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        },
+        {
+          "name": "X-Tenant-Id",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Tenant scope for the request (optional). DEPRECATED for\nJWT-authenticated requests (E5-1): the tenant comes from the\nverified `tenant` claim, an absent or agreeing header is accepted,\nand a CONFLICTING header is rejected with 403 `forbidden`. In open\nand API-key modes the header keeps its pre-E5-1 meaning: untrusted\nclient input that scopes listings and instance starts (dev-mode\naffordance)."
+        },
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "schema": {
+            "properties": {
+              "correlation": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "delivery_id": {
+                "type": "string"
+              },
+              "message_name": {
+                "type": "string"
+              },
+              "payload": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "ttl_secs": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "message_name"
+            ],
+            "type": "object"
+          },
+          "content_type": "application/json"
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 202,
+          "description": "Delivery accepted and persisted (pending consumption).",
+          "schema": "DeliveryAcceptedResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 422,
+            "code": "invalid_json"
           },
           {
             "status": 429,
@@ -3500,6 +3879,162 @@
           {
             "status": 404,
             "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "deliver_signal",
+      "operation": "POST /api/v1/signals",
+      "summary": "Deliver (broadcast) a signal",
+      "description": "Persists a pending signal delivery (broadcast) in the event inbox\n(N2-3, ADR-010): `delivery_type = signal`, `target_instance_id` is\nnull, and the runtime delivers it to every matching signal-catch\ntoken. Returns 202 with the `delivery_id` and\n`status: \"pending\"`. Idempotent by `delivery_id` or the derived\ndedup hash.",
+      "classification": "mutating",
+      "side_effects": "Persists a pending signal delivery (broadcast) in the event inbox; the runtime delivers it to every matching signal-catch token. Idempotent by delivery_id or the derived dedup hash.",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "X-Tenant-Id",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Tenant scope for the request (optional). DEPRECATED for\nJWT-authenticated requests (E5-1): the tenant comes from the\nverified `tenant` claim, an absent or agreeing header is accepted,\nand a CONFLICTING header is rejected with 403 `forbidden`. In open\nand API-key modes the header keeps its pre-E5-1 meaning: untrusted\nclient input that scopes listings and instance starts (dev-mode\naffordance)."
+        },
+        {
+          "name": "body",
+          "in": "body",
+          "required": true,
+          "schema": {
+            "properties": {
+              "correlation": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "delivery_id": {
+                "type": "string"
+              },
+              "payload": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "signal_name": {
+                "type": "string"
+              },
+              "ttl_secs": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "signal_name"
+            ],
+            "type": "object"
+          },
+          "content_type": "application/json"
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 202,
+          "description": "Signal delivery accepted and persisted (pending broadcast).",
+          "schema": "DeliveryAcceptedResponse"
+        },
+        "errors": [
+          {
+            "status": 400,
+            "code": "empty_source"
+          },
+          {
+            "status": 400,
+            "code": "encryption_key_not_configured"
+          },
+          {
+            "status": 400,
+            "code": "invalid_format"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request"
+          },
+          {
+            "status": 400,
+            "code": "invalid_request_body"
+          },
+          {
+            "status": 400,
+            "code": "invalid_retry_category"
+          },
+          {
+            "status": 400,
+            "code": "invariant_violation"
+          },
+          {
+            "status": 400,
+            "code": "lock_expired"
+          },
+          {
+            "status": 400,
+            "code": "missing_required_fields"
+          },
+          {
+            "status": 400,
+            "code": "reserved_variable_key"
+          },
+          {
+            "status": 400,
+            "code": "sensitive_requires_encryption"
+          },
+          {
+            "status": 400,
+            "code": "task_envelope_invalid"
+          },
+          {
+            "status": 400,
+            "code": "task_not_found"
+          },
+          {
+            "status": 400,
+            "code": "task_not_locked"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_artifact_uri"
+          },
+          {
+            "status": 400,
+            "code": "variable_invalid_envelope"
+          },
+          {
+            "status": 400,
+            "code": "variable_too_large"
+          },
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 422,
+            "code": "invalid_json"
           },
           {
             "status": 429,

@@ -23,6 +23,22 @@ const USER_TASK_BPMN: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </process>
 </definitions>"#;
 
+/// BPMN with a message intermediate catch: started instances wait at the
+/// catch node for a message named `order-confirmed` (N2-3 delivery target).
+const MESSAGE_CATCH_BPMN: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL">
+  <message id="msg-confirmed" name="order-confirmed"/>
+  <process id="message-catch-flow" isExecutable="true">
+    <startEvent id="start"/>
+    <intermediateCatchEvent id="await-confirmation">
+      <messageEventDefinition messageRef="msg-confirmed"/>
+    </intermediateCatchEvent>
+    <endEvent id="end"/>
+    <sequenceFlow id="f1" sourceRef="start" targetRef="await-confirmation"/>
+    <sequenceFlow id="f2" sourceRef="await-confirmation" targetRef="end"/>
+  </process>
+</definitions>"#;
+
 struct TestServer {
     base_url: String,
     serve_task: tokio::task::JoinHandle<()>,
@@ -95,6 +111,26 @@ async fn deploy_and_get_id(client: &reqwest::Client, server: &TestServer) -> Str
         ))
         .header("content-type", "application/xml")
         .body(USER_TASK_BPMN.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "deploy should return 201");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    body["process_definition_id"]
+        .as_str()
+        .expect("deploy response has process_definition_id")
+        .to_string()
+}
+
+/// Deploy arbitrary BPMN source and return the resulting definition id.
+async fn deploy_source(client: &reqwest::Client, server: &TestServer, source: &str) -> String {
+    let resp = client
+        .post(format!(
+            "{}/api/v1/process-definitions/deploy",
+            server.base_url
+        ))
+        .header("content-type", "application/xml")
+        .body(source.to_string())
         .send()
         .await
         .unwrap();
@@ -801,6 +837,101 @@ async fn retire_endpoint_works() {
         Some("obsolete"),
         "retire record carries the supplied reason"
     );
+
+    server.stop().await;
+}
+
+// --- Message/signal delivery (N2-3) ------------------------------------------
+
+#[tokio::test]
+async fn deliver_message_to_instance_works() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    // Deploy a flow with a message intermediate catch.
+    let def_id = deploy_source(&client, &server, MESSAGE_CATCH_BPMN).await;
+
+    // Start an instance — it waits at the message-catch node.
+    let resp = client
+        .post(format!("{}/api/v1/process-instances", server.base_url))
+        .json(&serde_json::json!({ "process_def_id": def_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "start should return 201");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let instance_id = body["instance_id"]
+        .as_str()
+        .expect("start response has instance_id")
+        .to_string();
+
+    // Deliver a message targeting the instance.
+    let resp = client
+        .post(format!(
+            "{}/api/v1/process-instances/{}/messages",
+            server.base_url, instance_id
+        ))
+        .json(&serde_json::json!({
+            "message_name": "order-confirmed",
+            "payload": { "order_id": "42" },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "deliver message should return 202");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "pending", "{body}");
+    let delivery_id = body["delivery_id"]
+        .as_str()
+        .expect("deliver response has delivery_id")
+        .to_string();
+
+    // List pending deliveries for the instance — the message is there.
+    let resp = client
+        .get(format!(
+            "{}/api/v1/process-instances/{}/deliveries",
+            server.base_url, instance_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "list deliveries should return 200");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let deliveries = body.as_array().expect("deliveries response is an array");
+    assert_eq!(deliveries.len(), 1, "exactly one pending delivery: {body}");
+    let delivery = &deliveries[0];
+    assert_eq!(delivery["id"].as_str(), Some(delivery_id.as_str()));
+    assert_eq!(delivery["status"].as_str(), Some("pending"));
+    assert_eq!(delivery["delivery_type"].as_str(), Some("message"));
+    assert_eq!(delivery["name"].as_str(), Some("order-confirmed"));
+    assert_eq!(
+        delivery["target_instance_id"].as_str(),
+        Some(instance_id.as_str())
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn deliver_signal_works() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    // Deliver a broadcast signal — no instance needed.
+    let resp = client
+        .post(format!("{}/api/v1/signals", server.base_url))
+        .json(&serde_json::json!({
+            "signal_name": "ship-now",
+            "delivery_id": "sig-1",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "deliver signal should return 202");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "pending", "{body}");
+    // The caller-supplied delivery_id is echoed back.
+    assert_eq!(body["delivery_id"].as_str(), Some("sig-1"));
 
     server.stop().await;
 }

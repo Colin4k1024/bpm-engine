@@ -96,6 +96,8 @@ tags:
   - name: Replay
   - name: DeadLetters
   - name: Invariants
+  - name: Messages
+  - name: Signals
 
 paths:
   /health:
@@ -1306,6 +1308,135 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InvariantCheckResult"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-instances/{id}/messages:
+    post:
+      operationId: deliverMessageToInstance
+      summary: Deliver a message to a process instance
+      description: |
+        Persists a pending message delivery targeted at the instance
+        (N2-3, ADR-010): the delivery lands in the event inbox as a
+        `PendingDelivery` with `target_instance_id` set to the path id and
+        `delivery_type = message`. The runtime consumes it when a matching
+        message-catch token reaches its waiting state; deliveries that
+        arrive before the catch is ready are buffered. Returns 202 with the
+        `delivery_id` and `status: "pending"`. Idempotent by the
+        caller-supplied `delivery_id` (or a derived
+        tenant/name/instance/payload hash dedup key).
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+        - $ref: "#/components/parameters/TenantId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeliverMessageRequest"
+      responses:
+        "202":
+          description: Delivery accepted and persisted (pending consumption).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryAcceptedResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/InvalidJson" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/messages:
+    post:
+      operationId: deliverMessageByCorrelation
+      summary: Deliver a message by correlation
+      description: |
+        Persists a pending message delivery with no target instance
+        (N2-3, ADR-010): the runtime matches the delivery to an instance
+        whose variables satisfy the `correlation` predicates. Returns 202
+        with the `delivery_id` and `status: "pending"`. Idempotent by
+        `delivery_id` or the derived dedup hash.
+      tags: [Messages]
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeliverMessageRequest"
+      responses:
+        "202":
+          description: Delivery accepted and persisted (pending matching).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryAcceptedResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/InvalidJson" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/signals:
+    post:
+      operationId: deliverSignal
+      summary: Deliver (broadcast) a signal
+      description: |
+        Persists a pending signal delivery (broadcast) in the event inbox
+        (N2-3, ADR-010): `delivery_type = signal`, `target_instance_id` is
+        null, and the runtime delivers it to every matching signal-catch
+        token. Returns 202 with the `delivery_id` and
+        `status: "pending"`. Idempotent by `delivery_id` or the derived
+        dedup hash.
+      tags: [Signals]
+      parameters:
+        - $ref: "#/components/parameters/TenantId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeliverSignalRequest"
+      responses:
+        "202":
+          description: Signal delivery accepted and persisted (pending broadcast).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryAcceptedResponse"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/InvalidJson" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-instances/{id}/deliveries:
+    get:
+      operationId: listPendingDeliveries
+      summary: List pending deliveries for an instance
+      description: |
+        Returns the pending (not yet consumed, not expired) message/signal
+        deliveries targeting the instance, oldest first (N2-3). A read —
+        every authenticated role may list deliveries.
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+        - $ref: "#/components/parameters/TenantId"
+      responses:
+        "200":
+          description: Pending deliveries for the instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PendingDeliveryList"
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -3011,6 +3142,127 @@ components:
             $ref: "#/components/schemas/InvariantViolationReport"
         stats:
           $ref: "#/components/schemas/CheckStats"
+
+    # --- Message/signal delivery (N2-3, ADR-010) ---------------------------
+
+    DeliverMessageRequest:
+      type: object
+      required: [message_name]
+      properties:
+        message_name:
+          type: string
+          description: Message name (matches a `messageEventDefinition/@messageRef` name).
+        correlation:
+          type: object
+          additionalProperties: { type: string }
+          default: {}
+          description: Correlation predicates (message only), variable key → expected value.
+        payload:
+          type: object
+          additionalProperties: { type: string }
+          default: {}
+          description: Variables to inject on consumption.
+        delivery_id:
+          type: string
+          description: |
+            Caller-supplied delivery id (idempotency: same id → same dedup
+            key → no duplicate). When absent a UUID is generated.
+        ttl_secs:
+          type: integer
+          description: |
+            TTL in seconds: when set, the delivery expires (and is swept)
+            after `created_at + ttl_secs`. Absent = never expires.
+
+    DeliverSignalRequest:
+      type: object
+      required: [signal_name]
+      properties:
+        signal_name:
+          type: string
+          description: Signal name (matches a `signalEventDefinition/@signalRef` name).
+        correlation:
+          type: object
+          additionalProperties: { type: string }
+          default: {}
+          description: Correlation predicates (usually empty for broadcast signals).
+        payload:
+          type: object
+          additionalProperties: { type: string }
+          default: {}
+          description: Variables to inject on consumption.
+        delivery_id:
+          type: string
+          description: |
+            Caller-supplied delivery id (idempotency). When absent a UUID is
+            generated.
+        ttl_secs:
+          type: integer
+          description: TTL in seconds (absent = never expires).
+
+    DeliveryAcceptedResponse:
+      type: object
+      required: [delivery_id, status]
+      properties:
+        delivery_id:
+          type: string
+          description: The id of the persisted pending delivery.
+        status:
+          type: string
+          enum: [pending]
+          description: The delivery is pending consumption.
+
+    PendingDelivery:
+      type: object
+      required:
+        - id
+        - delivery_type
+        - name
+        - status
+        - dedup_key
+        - created_at
+      properties:
+        id:
+          type: string
+          description: Unique delivery id (caller-supplied or generated).
+        tenant_id:
+          type: string
+          description: Tenant scope (absent = global).
+        target_instance_id:
+          type: string
+          description: Target instance (absent = signal broadcast or unmatched message).
+        delivery_type:
+          type: string
+          enum: [message, signal]
+          description: Whether the delivery is a targeted message or a broadcast signal.
+        name:
+          type: string
+          description: Message or signal name.
+        correlation:
+          type: object
+          additionalProperties: { type: string }
+          description: Correlation predicates (message only), variable key → expected value.
+        payload:
+          type: object
+          additionalProperties: { type: string }
+          description: Variables to inject on consumption.
+        status:
+          type: string
+          enum: [pending, consumed, expired]
+          description: Current status of the delivery.
+        dedup_key:
+          type: string
+          description: Idempotency key (same delivery → same key → no duplicate).
+        created_at:
+          type: string
+          description: ISO-8601 / epoch-seconds creation timestamp.
+        expires_at:
+          type: string
+          description: TTL expiry (absent = never expires).
+
+    PendingDeliveryList:
+      type: array
+      items:
+        $ref: "#/components/schemas/PendingDelivery"
 
     # --- Agent tool catalog (E4-1) -----------------------------------------
     #
