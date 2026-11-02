@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS process_definition (
     id TEXT PRIMARY KEY,
     def_key TEXT NOT NULL DEFAULT '',
     version INTEGER NOT NULL DEFAULT 1,
-    status TEXT NOT NULL DEFAULT 'active',
+    status TEXT NOT NULL DEFAULT 'activated',
     bpmn_xml TEXT NOT NULL,
     created_at TEXT
 );

@@ -38,21 +38,53 @@ use async_trait::async_trait;
 use bpm_engine_core::{ProcessDefinition, ProcessInstance};
 use serde::{Deserialize, Serialize};
 
-/// Version status for process definitions.
+/// Lifecycle status for a process definition version (ADR-009).
+///
+/// The five-state lifecycle: `Draft → Validated → Published → Activated →
+/// Deprecated`. `Activated` is not terminal (auto-returns to `Published`
+/// when another version activates); `Deprecated` is terminal.
+///
+/// `Active` is accepted as a deserialization alias for `Activated` so
+/// pre-migration rows and old clients continue to work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DefinitionStatus {
-    /// Definition is active and can be used to start new instances.
-    Active,
-    /// Definition is deprecated; existing instances continue but no new instances.
+    /// Candidate draft; mutable, not startable.
+    Draft,
+    /// Passed validation; report persisted; mutable (re-upload → Draft).
+    Validated,
+    /// Released immutable version in the activatable pool.
+    Published,
+    /// The key's current active version; the only startable status.
+    #[serde(alias = "active")]
+    Activated,
+    /// Explicitly retired; terminal.
     Deprecated,
 }
 
 impl std::fmt::Display for DefinitionStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DefinitionStatus::Active => write!(f, "active"),
+            DefinitionStatus::Draft => write!(f, "draft"),
+            DefinitionStatus::Validated => write!(f, "validated"),
+            DefinitionStatus::Published => write!(f, "published"),
+            DefinitionStatus::Activated => write!(f, "activated"),
             DefinitionStatus::Deprecated => write!(f, "deprecated"),
+        }
+    }
+}
+
+impl DefinitionStatus {
+    /// Parse from a storage/REST string, accepting legacy `active` as
+    /// `Activated` (N1-2 migration compatibility).
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "draft" => Self::Draft,
+            "validated" => Self::Validated,
+            "published" => Self::Published,
+            "activated" | "active" => Self::Activated,
+            "deprecated" => Self::Deprecated,
+            _ => Self::Activated, // legacy default
         }
     }
 }
@@ -66,7 +98,7 @@ pub struct ProcessDefinitionRecord {
     pub key: String,
     /// Version number, monotonically increasing per key.
     pub version: u32,
-    /// Current status: active or deprecated.
+    /// Current lifecycle status (draft/validated/published/activated/deprecated).
     pub status: DefinitionStatus,
     /// ISO-8601 creation timestamp.
     pub created_at: String,

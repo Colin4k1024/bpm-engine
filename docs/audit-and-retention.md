@@ -98,7 +98,7 @@ Response (see `docs/openapi.yaml` → `AuditResponse`):
   "instance_id": "…",
   "instance": { "state": "COMPLETED", "tenant_id": "acme" },
   "definition": { "id": "order-flow:3", "key": "order-flow",
-                  "version": 3, "status": "active" },
+                  "version": 3, "status": "activated" },
   "events": [
     { "sequence": 0, "id": "…", "event_type": "ProcessStarted",
       "category": "instance", "occurred_at": "1770000000",

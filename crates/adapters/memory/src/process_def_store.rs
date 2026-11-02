@@ -38,16 +38,17 @@ impl ProcessDefStore {
             id: id.clone(),
             key: key.clone(),
             version,
-            status: DefinitionStatus::Active,
+            status: DefinitionStatus::Activated,
             created_at,
         };
 
-        // Deprecate previous active version for the same key
+        // Auto-deactivate prior Activated version for the same key (→ Published,
+        // still in the activatable pool — ADR-009 §3).
         {
             let mut records = self.records.write().unwrap();
             for rec in records.values_mut() {
-                if rec.key == key && rec.status == DefinitionStatus::Active && rec.id != id {
-                    rec.status = DefinitionStatus::Deprecated;
+                if rec.key == key && rec.status == DefinitionStatus::Activated && rec.id != id {
+                    rec.status = DefinitionStatus::Published;
                 }
             }
             records.insert(id, record);
@@ -98,7 +99,7 @@ impl ProcessDefinitionStore for ProcessDefStore {
         let records = self.records.read().unwrap();
         Ok(records
             .values()
-            .filter(|r| r.key == key && r.status == DefinitionStatus::Active)
+            .filter(|r| r.key == key && r.status == DefinitionStatus::Activated)
             .max_by_key(|r| r.version)
             .cloned())
     }
@@ -110,15 +111,16 @@ impl ProcessDefinitionStore for ProcessDefStore {
             .ok_or_else(|| anyhow::anyhow!("process definition not found: {}", id))?;
         let key = target.key.clone();
 
-        // Deprecate all other active versions for the same key
+        // Auto-deactivate prior Activated → Published (ADR-009 §3:
+        // last-writer-wins, prior stays in activatable pool).
         for rec in records.values_mut() {
-            if rec.key == key && rec.status == DefinitionStatus::Active && rec.id != id {
-                rec.status = DefinitionStatus::Deprecated;
+            if rec.key == key && rec.status == DefinitionStatus::Activated && rec.id != id {
+                rec.status = DefinitionStatus::Published;
             }
         }
-        // Activate the target
+        // Activate the target.
         if let Some(rec) = records.get_mut(id) {
-            rec.status = DefinitionStatus::Active;
+            rec.status = DefinitionStatus::Activated;
         }
         Ok(())
     }

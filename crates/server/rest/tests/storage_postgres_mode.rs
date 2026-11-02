@@ -207,7 +207,7 @@ async fn postgres_mode_survives_restart() {
         .iter()
         .find(|d| d["key"] == "restart-probe")
         .expect("restart-probe definition survives the restart");
-    assert_eq!(probe["status"], "active");
+    assert_eq!(probe["status"], "activated");
 
     // Invariants return 200 after the restart with nothing worse than Info
     // (the engine creates instances with version 0, an Info-level finding).

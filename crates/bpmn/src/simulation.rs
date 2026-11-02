@@ -119,6 +119,19 @@ pub enum Terminus {
     },
 }
 
+impl Terminus {
+    /// Short stable label for the terminus variant (N1-2 branch coverage).
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::CompletedAt { .. } => "completed",
+            Self::WaitingAt { .. } => "waiting",
+            Self::StuckAt { .. } => "stuck",
+            Self::UnresolvedBranch { .. } => "unresolved_branch",
+            Self::MaxStepsExceeded { .. } => "max_steps_exceeded",
+        }
+    }
+}
+
 /// Full dry-run result: the walked steps and how the walk ended.
 #[derive(Debug, Clone, Serialize)]
 pub struct DryRunReport {

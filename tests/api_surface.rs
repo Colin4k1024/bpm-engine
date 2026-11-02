@@ -1135,10 +1135,13 @@ fn pin_dsl_error_code_variants() -> String {
 // Storage / runtime: pins
 // ---------------------------------------------------------------------------
 
-/// `DefinitionStatus`: both variants exhaustively matched.
+/// `DefinitionStatus`: all variants exhaustively matched (N1-2 five-state).
 fn pin_definition_status_variants() -> String {
-    match DefinitionStatus::Active {
-        DefinitionStatus::Active => "active".to_string(),
+    match DefinitionStatus::Draft {
+        DefinitionStatus::Draft => "draft".to_string(),
+        DefinitionStatus::Validated => "validated".to_string(),
+        DefinitionStatus::Published => "published".to_string(),
+        DefinitionStatus::Activated => "activated".to_string(),
         DefinitionStatus::Deprecated => "deprecated".to_string(),
     }
 }

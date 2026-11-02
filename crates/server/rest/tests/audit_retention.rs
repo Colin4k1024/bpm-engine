@@ -446,7 +446,7 @@ async fn audit_endpoint_joins_actor_decisions_definition_and_artifacts() {
     assert_eq!(body["definition"]["id"], "audit-approval-flow");
     assert_eq!(body["definition"]["key"], "audit-approval-flow");
     assert_eq!(body["definition"]["version"], 1);
-    assert_eq!(body["definition"]["status"], "active");
+    assert_eq!(body["definition"]["status"], "activated");
     // Instance context: terminal state + tenant.
     assert_eq!(body["instance"]["state"], "COMPLETED");
     assert_eq!(body["instance"]["tenant_id"], TENANT);
