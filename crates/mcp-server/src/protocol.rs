@@ -39,8 +39,10 @@
 //! `-32700` lines built by [`error_line`].
 //! Request ids are echoed verbatim (string | number | null).
 //! Responses are compact single-line JSON (MCP forbids embedded newlines).
-//! Messages are processed sequentially in arrival order; v1 does not
-//! abort in-flight calls on `notifications/cancelled`.
+//! Messages are processed sequentially in arrival order; v1 does not abort
+//! in-flight REST calls on `notifications/cancelled` (the notification is
+//! observed and logged on stderr, but the bounded engine call runs to
+//! completion — full abort tracking is a follow-up).
 
 use crate::allowlist;
 use crate::catalog::{Catalog, Classification, ToolSpec};
@@ -207,6 +209,34 @@ impl McpServer {
     /// ignored quietly rather than answered — a response to a response
     /// would be meaningless).
     pub async fn handle_message(&self, message: &Value) -> Option<Value> {
+        // `notifications/cancelled`: a client asking us to abort a previous
+        // request. v1 does not abort in-flight REST calls (each engine call
+        // is bounded by the configured timeout and runs to completion), but
+        // the intent is logged on stderr so it is observable; full abort
+        // tracking is a follow-up. This runs BEFORE the no-`id` early
+        // return so a well-formed cancellation notification (which carries
+        // no id) is still observed — notifications remain response-less
+        // (handled below), per JSON-RPC.
+        if message.get("method").and_then(Value::as_str) == Some("notifications/cancelled") {
+            let params = message.get("params");
+            let request_id = params
+                .and_then(|p| p.get("requestId"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let reason = params
+                .and_then(|p| p.get("reason"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let suffix = if reason.is_empty() {
+                String::new()
+            } else {
+                format!(": {reason}")
+            };
+            eprintln!(
+                "bpm-engine-mcp-server: notifications/cancelled for request id {request_id}{suffix}"
+            );
+        }
+
         // A message with NO `id` is a NOTIFICATION, and JSON-RPC forbids
         // replying to notifications — so nothing about one (a wrong
         // `jsonrpc` version, a missing or unknown `method`, any other
