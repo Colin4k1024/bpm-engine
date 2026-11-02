@@ -18,6 +18,7 @@ pub mod client;
 pub mod config;
 pub mod handler;
 pub mod idempotency;
+pub mod output_schema;
 pub mod tools;
 pub mod types;
 pub mod worker;
@@ -26,6 +27,9 @@ pub use client::EngineClient;
 pub use config::WorkerConfig;
 pub use handler::{run_with_renewal, LeaseRenewalGuard, TaskContext, TaskHandler};
 pub use idempotency::{derive_key, IdempotencyGuard, DEFAULT_MAX_KEYS};
+pub use output_schema::{
+    validate_json_schema, OutputContract, OutputMapping, SchemaValidationError,
+};
 pub use tools::{
     apply_output_limit, mask_credentials_in, redact_string, redact_variables, CredentialInjector,
     CredentialSource, OutputLimits, RedactionPolicy, Tool, ToolContext, ToolError, ToolExecutor,

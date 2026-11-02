@@ -10,7 +10,10 @@ layout: default
 > value format it rides on is the E2-3 variable contract
 > (`docs/variables-and-artifacts.md`, ADR-007). The engine never interprets
 > schema contents, never dereferences artifact URIs, and does not change
-> retry behavior based on `retry_category` (v1).
+> retry behavior based on `retry_category` (v1). The **worker** validates
+> model output against `output_schema` (N3-2: non-conforming output →
+> `Fail(Permanent, "output_validation_failed")`); the engine records the
+> schema for audit but does not enforce it.
 
 ---
 
