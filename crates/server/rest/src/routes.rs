@@ -4537,6 +4537,7 @@ pub async fn delete_replay_session(
 pub async fn deploy_bpmn(
     State(state): State<Arc<AppState>>,
     Extension(identity): Extension<Identity>,
+    Query(params): Query<DefinitionReasonParam>,
     body: String,
 ) -> Result<(StatusCode, Json<DeployResponse>), (StatusCode, Json<DeployErrorResponse>)> {
     let def = match bpm_engine_bpmn::parse_and_compile(&body) {
@@ -4610,7 +4611,7 @@ pub async fn deploy_bpmn(
             actor: Some(identity.actor().to_string()),
             content_hash: None,
             content_size: Some(body.len() as u64),
-            reason: None,
+            reason: params.reason,
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -4889,6 +4890,17 @@ pub struct DefinitionListResponse {
     pub definitions: Vec<DefinitionVersionView>,
 }
 
+/// Optional `reason` query parameter for definition lifecycle endpoints
+/// (deploy / activate / deprecate / retire, N1-4 review fix B1).
+///
+/// Carries an operator-supplied note into the audit record's `reason`
+/// field. Absent on the query string ⇒ `None` (the audit record records
+/// no reason).
+#[derive(Deserialize)]
+pub struct DefinitionReasonParam {
+    pub reason: Option<String>,
+}
+
 /// GET /api/v1/process-definitions — list every deployed process definition version.
 pub async fn list_process_definitions(
     State(state): State<Arc<AppState>>,
@@ -4980,6 +4992,7 @@ pub async fn activate_definition(
     State(state): State<Arc<AppState>>,
     Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
+    Query(params): Query<DefinitionReasonParam>,
 ) -> Result<Json<ActivateResponse>, (StatusCode, Json<ErrorResponse>)> {
     state
         .storage
@@ -5001,7 +5014,7 @@ pub async fn activate_definition(
             actor: Some(identity.actor().to_string()),
             content_hash: None,
             content_size: None,
-            reason: None,
+            reason: params.reason,
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -5022,6 +5035,7 @@ pub async fn deprecate_definition(
     State(state): State<Arc<AppState>>,
     Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
+    Query(params): Query<DefinitionReasonParam>,
 ) -> Result<Json<ActivateResponse>, (StatusCode, Json<ErrorResponse>)> {
     state
         .storage
@@ -5043,7 +5057,7 @@ pub async fn deprecate_definition(
             actor: Some(identity.actor().to_string()),
             content_hash: None,
             content_size: None,
-            reason: None,
+            reason: params.reason,
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -5066,6 +5080,7 @@ pub async fn retire_definition(
     State(state): State<Arc<AppState>>,
     Extension(identity): Extension<Identity>,
     Path(id): Path<String>,
+    Query(params): Query<DefinitionReasonParam>,
 ) -> Result<Json<ActivateResponse>, (StatusCode, Json<ErrorResponse>)> {
     state
         .storage
@@ -5086,7 +5101,7 @@ pub async fn retire_definition(
             actor: Some(identity.actor().to_string()),
             content_hash: None,
             content_size: None,
-            reason: None,
+            reason: params.reason,
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()

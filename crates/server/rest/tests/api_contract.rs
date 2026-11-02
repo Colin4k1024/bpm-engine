@@ -86,6 +86,26 @@ async fn deploy(client: &reqwest::Client, server: &TestServer) {
     assert_eq!(resp.status(), 201, "deploy should return 201");
 }
 
+/// Deploy USER_TASK_BPMN and return the resulting definition id.
+async fn deploy_and_get_id(client: &reqwest::Client, server: &TestServer) -> String {
+    let resp = client
+        .post(format!(
+            "{}/api/v1/process-definitions/deploy",
+            server.base_url
+        ))
+        .header("content-type", "application/xml")
+        .body(USER_TASK_BPMN.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "deploy should return 201");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    body["process_definition_id"]
+        .as_str()
+        .expect("deploy response has process_definition_id")
+        .to_string()
+}
+
 async fn start(
     client: &reqwest::Client,
     server: &TestServer,
@@ -688,6 +708,98 @@ async fn validate_endpoint_returns_structured_report() {
     assert!(
         perms.iter().any(|p| p == "usertask:complete"),
         "should include usertask:complete permission"
+    );
+
+    server.stop().await;
+}
+
+// --- Definition lifecycle audit trail (N1-4) --------------------------------
+
+#[tokio::test]
+async fn deploy_appends_audit_record() {
+    // N1-4: deploying a definition appends a "deploy" audit record with the
+    // verified actor. The audit endpoint returns the trail for that id.
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let def_id = deploy_and_get_id(&client, &server).await;
+
+    let resp = client
+        .get(format!(
+            "{}/api/v1/process-definitions/{}/audit",
+            server.base_url, def_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "audit endpoint returns 200");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let records = body.as_array().expect("audit response is an array");
+    assert!(
+        !records.is_empty(),
+        "deploy must append at least one audit record"
+    );
+    let deploy = records
+        .iter()
+        .find(|r| r["operation"] == "deploy")
+        .expect("audit trail contains a deploy record");
+    assert!(
+        deploy["actor"].as_str().is_some(),
+        "deploy audit record has an actor: {deploy}"
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn retire_endpoint_works() {
+    // N1-4 (review fix B1): retire accepts an optional `reason` query
+    // parameter that is recorded on the audit trail, and the audit endpoint
+    // shows both the deploy and retire records.
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let def_id = deploy_and_get_id(&client, &server).await;
+
+    // Retire with a reason.
+    let resp = client
+        .put(format!(
+            "{}/api/v1/process-definitions/{}/retire",
+            server.base_url, def_id
+        ))
+        .query(&[("reason", "obsolete")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "retire returns 200");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["status"], "deprecated",
+        "retire sets status to deprecated"
+    );
+
+    // Audit trail now has both a deploy and a retire record.
+    let resp = client
+        .get(format!(
+            "{}/api/v1/process-definitions/{}/audit",
+            server.base_url, def_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let records = body.as_array().expect("audit response is an array");
+    assert!(
+        records.iter().any(|r| r["operation"] == "deploy"),
+        "audit trail has a deploy record"
+    );
+    let retire = records
+        .iter()
+        .find(|r| r["operation"] == "retire")
+        .expect("audit trail contains a retire record");
+    assert_eq!(
+        retire["reason"].as_str(),
+        Some("obsolete"),
+        "retire record carries the supplied reason"
     );
 
     server.stop().await;
