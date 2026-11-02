@@ -1848,7 +1848,7 @@ components:
           type: integer
         status:
           type: string
-          description: Current record status — `active` or `deprecated`;
+          description: Current record status — `activated` | `deprecated` | `draft` | `validated` | `published`;
             absent when the record is gone.
 
     AuditInstanceView:
@@ -2615,6 +2615,12 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ValidationFinding"
+        report:
+          $ref: "#/components/schemas/ValidationReport"
+          description: |
+            Full structured report (N1-2): findings with fix suggestions,
+            required permissions, and summary counts. Absent when
+            compilation failed.
 
     DryRunStep:
       type: object
@@ -2696,6 +2702,80 @@ components:
             $ref: "#/components/schemas/ValidationFinding"
         dry_run:
           $ref: "#/components/schemas/DryRunReport"
+        report:
+          $ref: "#/components/schemas/ValidationReport"
+          description: |
+            Full structured report (N1-2): findings with fix suggestions,
+            required permissions, branch coverage, and summary counts.
+
+    ValidationReport:
+      type: object
+      required: [valid, summary, findings, required_permissions]
+      properties:
+        valid:
+          type: boolean
+          description: True iff no Critical findings.
+        summary:
+          $ref: "#/components/schemas/ReportSummary"
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReportFinding"
+        branch_coverage:
+          $ref: "#/components/schemas/BranchCoverage"
+        required_permissions:
+          type: array
+          items:
+            type: string
+          description: |
+            Capabilities required to deploy/operate (e.g. worker:{task_type},
+            usertask:complete).
+
+    ReportSummary:
+      type: object
+      required: [critical, warnings, info]
+      properties:
+        critical:
+          type: integer
+        warnings:
+          type: integer
+        info:
+          type: integer
+
+    ReportFinding:
+      type: object
+      required: [severity, code, message]
+      properties:
+        severity:
+          type: string
+          enum: [Critical, Warning, Info]
+        code:
+          type: string
+        node_id:
+          type: string
+        message:
+          type: string
+        fix_suggestion:
+          type: string
+          description: Actionable remediation (absent for informational findings).
+
+    BranchCoverage:
+      type: object
+      required: [reached_nodes, unresolved_branches, terminus, step_count]
+      properties:
+        reached_nodes:
+          type: array
+          items:
+            type: string
+        unresolved_branches:
+          type: array
+          items:
+            type: string
+        terminus:
+          type: string
+          description: "completed | waiting | stuck | unresolved_branch | max_steps_exceeded"
+        step_count:
+          type: integer
 
     DefinitionVersionView:
       type: object
@@ -2709,7 +2789,7 @@ components:
           type: integer
         status:
           type: string
-          enum: [active, deprecated]
+          enum: [draft, validated, published, activated, deprecated]
         created_at:
           type: string
 
@@ -2741,7 +2821,7 @@ components:
           type: string
         status:
           type: string
-          enum: [active, deprecated]
+          enum: [draft, validated, published, activated, deprecated]
 
     NodeView:
       type: object

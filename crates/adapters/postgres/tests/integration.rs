@@ -244,9 +244,9 @@ async fn process_def_store_deployer_trait_and_list_all() {
         "list_all should order by key asc, version desc"
     );
 
-    // Deploying v2 deprecated v1 for the same key.
-    assert_eq!(records[0].status.to_string(), "active");
-    assert_eq!(records[1].status.to_string(), "deprecated");
+    // Deploying v2 auto-deactivated v1 to Published (ADR-009 §3).
+    assert_eq!(records[0].status.to_string(), "activated");
+    assert_eq!(records[1].status.to_string(), "published");
 
     // Definitions round-trip through the XML source.
     let def = store.load("deploy-probe:2").await.unwrap().unwrap();

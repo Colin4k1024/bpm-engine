@@ -98,7 +98,7 @@ pub struct ProcessDefinitionRecord {
     pub key: String,
     /// Version number, monotonically increasing per key.
     pub version: u32,
-    /// Current status: active or deprecated.
+    /// Current lifecycle status (draft/validated/published/activated/deprecated).
     pub status: DefinitionStatus,
     /// ISO-8601 creation timestamp.
     pub created_at: String,
