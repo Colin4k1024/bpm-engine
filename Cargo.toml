@@ -72,6 +72,7 @@ worker-sdk = ["bpm-engine-worker-sdk"]
 [dev-dependencies]
 reqwest = { version = "0.11", features = ["json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 # examples/ai_flow.rs (E3-4): the self-contained AI reference flow demo.
 # Dev-deps only — the facade's normal dependency surface is unchanged.
