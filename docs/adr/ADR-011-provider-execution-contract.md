@@ -20,17 +20,18 @@ AI 步骤是 `ExternalTask` 节点（`crates/core/src/node.rs:92-100`：
 原子加锁）交付 worker。
 
 worker（`crates/worker-sdk/src/worker.rs`）poll → fetch → 在独立 `tokio::spawn` 中
-执行 `TaskHandler::handle`（`handler.rs:235-240`）→ `complete`/`fail`。
+执行 `TaskHandler::handle`（`worker.rs:456`；trait 定义 `handler.rs:235-240`）→
+`complete`/`fail`。
 `TaskResult`（`types.rs:26-43`）：`Complete { variables }` 或
 `Fail { error, retry_after, category: Option<RetryCategory> }`。
 
 ### 现行的预算、超时、取消、幂等（均不完整）
 
 **预算**：**无任何预算执行**。`TaskCost`（`crates/core/src/ai_task.rs:226-245`：
-`currency/amount_micros/tokens_in/tokens_out/duration_ms`，全 `Option<u64>`）由
-worker 报告，经信封 → history → `/steps` trace 端到端**报告但从不检查**。无
-`spend_limit`/`max_spend`/`cost_limit`/`budget`。`max_tokens: Option<u32>` 在
-`ModelRequest`（`provider.rs:66`）上是输出 token 上限**提示**（mock 夹住报告数，
+`currency: Option<String>` + `amount_micros/tokens_in/tokens_out/duration_ms` 全
+`Option<u64>`）由 worker 报告，经信封 → history → `/steps` trace 端到端**报告但从不
+检查**。无 `spend_limit`/`max_spend`/`cost_limit`/`budget`。`max_tokens: Option<u32>`
+在 `ModelRequest`（`provider.rs:66`）上是输出 token 上限**提示**（mock 夹住报告数，
 `provider.rs:271-274`），非预算、非引擎强制。
 
 **超时**：双层但未对齐。
@@ -134,8 +135,10 @@ schema。
    已发生。重投后 worker 再次执行——**工具副作用必须幂等**（工具作者责任，引擎
    不回滚副作用，ADR invariants：补偿归 N4）。
 3. worker complete → 引擎处理 `ExternalTaskCompleted` → token 跃迁。若引擎崩溃在
-   token 跃迁后、ack 之前 → worker 重试 complete → 引擎的 complete 是幂等的
-   （`ExternalTaskStore::complete` 检查 state，已 Completed → no-op/200 回放）。
+   token 跃迁后、ack 之前 → worker 重试 complete → 引擎的 `complete` 检查 state：
+   已 Completed（state != Locked）→ `TaskNotLocked` → REST 400 `task_not_locked`
+   （`routes.rs:450`）。重复 complete 被拒绝，token 不二次跃迁——at-most-once 由
+   条件 UPDATE（`WHERE state='Locked'`）保证。
 
 **不变式表述**：外部模型/工具调用至少一次（at-least-once）；token 到达终态至多一次
 （at-most-once，CAS 保证）；副作用幂等是 worker/工具作者责任，引擎不保证
@@ -289,8 +292,9 @@ SHOULD 用它作为 `with_timeout` 值。若 absent，worker 用默认（如 120
 
 1. **至少一次调用**：worker 调用模型后崩溃（未 complete）→ 租约过期 → 重投 →
    模型被调用 ≥2 次；token 最终 Completed 一次。
-2. **至多一次完成**：并发双 worker complete 同任务 → 一者 200、一者 409
-   `task_already_completed`（或 200 回放）；token 跃迁一次。
+2. **至多一次完成**：并发双 worker complete 同任务 → 一者 200（ Locked→Completed，
+   token 跃迁）、一者 400 `task_not_locked`（state 已非 Locked，条件 UPDATE 命中 0 行）；
+   token 跃迁恰好一次。
 3. **预算超限**：累计 cost 超 `max_cost_micros` → worker 不调用模型 →
    `Fail(Permanent, "budget_exceeded")` → Failed + DLQ。
 4. **执行超时**：`with_timeout` 触发 → `Fail(Transient, "execution_timeout")` →
