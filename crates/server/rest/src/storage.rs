@@ -15,12 +15,13 @@
 #[cfg(feature = "postgres")]
 use crate::state::ExtraHealthChecks;
 use bpm_engine_adapter_memory::{
-    DeadLetterRepo, MemoryDefinitionAuditStore, MemoryRepo, ProcessDefStore,
+    DeadLetterRepo, MemoryDefinitionAuditStore, MemoryEventInboxStore, MemoryRepo, ProcessDefStore,
 };
 use bpm_engine_storage::{
     ApprovalStore, CompensationRecordRepo, DeadLetterStore, DefinitionAuditStore,
-    DefinitionDeployer, ExternalTaskStore, HistoryRepo, InvariantChecker, ParallelJoinRepo,
-    ProcessDefinitionStore, ProcessInstanceStore, StoreInvariantChecker, TimerStore, TokenStore,
+    DefinitionDeployer, EventInboxStore, ExternalTaskStore, HistoryRepo, InvariantChecker,
+    ParallelJoinRepo, ProcessDefinitionStore, ProcessInstanceStore, StoreInvariantChecker,
+    TimerStore, TokenStore,
 };
 use std::sync::Arc;
 
@@ -53,6 +54,8 @@ pub struct Storage {
     pub dead_letter_store: Arc<dyn DeadLetterStore>,
     /// Definition lifecycle audit trail (N1-4).
     pub def_audit_store: Arc<dyn DefinitionAuditStore>,
+    /// Persistent event inbox for message/signal delivery (N1-2, ADR-010).
+    pub event_inbox_store: Arc<dyn EventInboxStore>,
     /// Invariant checker over the process instance store.
     pub invariant_checker: Arc<dyn InvariantChecker>,
 }
@@ -83,6 +86,7 @@ impl Storage {
             dead_letter_store: Arc::new(DeadLetterRepo::new()) as Arc<dyn DeadLetterStore>,
             def_audit_store: Arc::new(MemoryDefinitionAuditStore::new())
                 as Arc<dyn DefinitionAuditStore>,
+            event_inbox_store: Arc::new(MemoryEventInboxStore::new()) as Arc<dyn EventInboxStore>,
             invariant_checker: Arc::new(StoreInvariantChecker::new(
                 Arc::clone(&repo) as Arc<dyn ProcessInstanceStore>
             )),
@@ -167,6 +171,7 @@ impl Storage {
             // for a single running server.
             def_audit_store: Arc::new(MemoryDefinitionAuditStore::new())
                 as Arc<dyn DefinitionAuditStore>,
+            event_inbox_store: Arc::new(MemoryEventInboxStore::new()) as Arc<dyn EventInboxStore>,
             invariant_checker: Arc::new(StoreInvariantChecker::new(
                 process_store as Arc<dyn ProcessInstanceStore>,
             )),

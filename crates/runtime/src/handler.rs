@@ -3,8 +3,9 @@
 use async_trait::async_trait;
 use bpm_engine_core::{EngineEvent, HistoryRedactionPolicy};
 use bpm_engine_storage::{
-    ApprovalStore, CompensationRecordRepo, ExternalTaskStore, HistoryRepo, OutboxRepo,
-    ParallelJoinRepo, ProcessDefinitionStore, ProcessInstanceStore, TimerStore, TokenStore,
+    ApprovalStore, CompensationRecordRepo, EventInboxStore, ExternalTaskStore, HistoryRepo,
+    OutboxRepo, ParallelJoinRepo, ProcessDefinitionStore, ProcessInstanceStore, TimerStore,
+    TokenStore,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -46,6 +47,10 @@ pub struct EngineContext {
     /// Engine-owned approval records (optional — enables the E5-2 approval
     /// gate on approval-required external task nodes).
     pub approval_store: Option<Arc<dyn ApprovalStore>>,
+    /// Persistent event inbox for message/signal delivery (optional —
+    /// enables catch events to receive messages/signals that arrive before
+    /// or while the catch token is paused, N1-2/ADR-010).
+    pub event_inbox: Option<Arc<dyn EventInboxStore>>,
     /// Task types whose external tasks require approval before creation
     /// (E5-2, `engine.approval_required_task_types`). The gate only runs
     /// when [`EngineContext::approval_store`] is wired; an empty set (the
@@ -77,6 +82,7 @@ impl EngineContext {
             external_task_store: None,
             history_repo: None,
             approval_store: None,
+            event_inbox: None,
             approval_required_task_types: Arc::new(HashSet::new()),
             history_redaction_policy: HistoryRedactionPolicy::default(),
             tenant_id: None,
@@ -96,6 +102,7 @@ pub struct EngineContextBuilder {
     external_task_store: Option<Arc<dyn ExternalTaskStore>>,
     history_repo: Option<Arc<dyn HistoryRepo>>,
     approval_store: Option<Arc<dyn ApprovalStore>>,
+    event_inbox: Option<Arc<dyn EventInboxStore>>,
     approval_required_task_types: Arc<HashSet<String>>,
     history_redaction_policy: HistoryRedactionPolicy,
     tenant_id: Option<String>,
@@ -144,6 +151,13 @@ impl EngineContextBuilder {
         self
     }
 
+    /// Wire the event inbox store (enables persistent message/signal
+    /// delivery for catch events, N1-2/ADR-010).
+    pub fn event_inbox(mut self, store: Arc<dyn EventInboxStore>) -> Self {
+        self.event_inbox = Some(store);
+        self
+    }
+
     /// Set the approval-required task types (E5-2): external tasks of these
     /// types are created only after an operator approves the persisted
     /// approval record. Defaults to the empty set (no gate).
@@ -179,6 +193,7 @@ impl EngineContextBuilder {
             external_task_store: self.external_task_store,
             history_repo: self.history_repo,
             approval_store: self.approval_store,
+            event_inbox: self.event_inbox,
             approval_required_task_types: self.approval_required_task_types,
             history_redaction_policy: self.history_redaction_policy,
             tenant_id: self.tenant_id,
