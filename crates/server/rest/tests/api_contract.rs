@@ -492,6 +492,81 @@ async fn history_limit_truncates_after_sorting() {
     server.stop().await;
 }
 
+// --- Unified causal timeline (N6-2) ------------------------------------------
+
+#[tokio::test]
+async fn timeline_aggregates_history() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let def_id = deploy_and_get_id(&client, &server).await;
+
+    // Start an instance — it records ProcessStarted + token history.
+    let resp = client
+        .post(format!("{}/api/v1/process-instances", server.base_url))
+        .json(&serde_json::json!({ "process_def_id": def_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "start should return 201");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let instance_id = body["instance_id"]
+        .as_str()
+        .expect("start response has instance_id")
+        .to_string();
+
+    // GET /timeline — the unified, redacted, chronological view.
+    let resp = client
+        .get(format!(
+            "{}/api/v1/process-instances/{}/timeline",
+            server.base_url, instance_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "timeline should return 200");
+    let timeline: serde_json::Value = resp.json().await.unwrap();
+
+    // The response carries the definition context.
+    assert_eq!(timeline["instance_id"].as_str(), Some(instance_id.as_str()));
+    assert_eq!(
+        timeline["definition_id"].as_str(),
+        Some(def_id.as_str()),
+        "definition_id is the instance's process_def_id: {timeline}"
+    );
+    assert!(
+        timeline["definition_version"].as_u64().is_some(),
+        "definition_version is present: {timeline}"
+    );
+
+    // The timeline aggregates at least the history category: a started
+    // instance emits ProcessStarted/TokenArrived events.
+    let entries = timeline["entries"]
+        .as_array()
+        .expect("timeline entries is an array");
+    assert!(
+        !entries.is_empty(),
+        "a started instance has a non-empty timeline: {timeline}"
+    );
+    let has_history = entries
+        .iter()
+        .any(|e| e["category"].as_str() == Some("history"));
+    assert!(
+        has_history,
+        "timeline includes at least one history entry: {timeline}"
+    );
+
+    // Entries are sequentially numbered from 0 in chronological order.
+    for (i, entry) in entries.iter().enumerate() {
+        assert_eq!(
+            entry["sequence"].as_u64(),
+            Some(i as u64),
+            "sequence is the 0-based chronological index: {timeline}"
+        );
+    }
+
+    server.stop().await;
+}
+
 // --- Typed error contract (E2-4) --------------------------------------------
 
 #[tokio::test]

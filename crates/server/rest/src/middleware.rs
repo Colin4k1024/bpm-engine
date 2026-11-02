@@ -552,6 +552,8 @@ const PERMISSIONS: &[(&str, &[&str], &[Role])] = &[
     ("GET", &["process-instances", ANY, "trace"], ROLES),
     ("GET", &["process-instances", ANY, "history"], ROLES),
     ("GET", &["process-instances", ANY, "steps"], ROLES),
+    // N6-2: the unified causal timeline is a read (every authenticated role).
+    ("GET", &["process-instances", ANY, "timeline"], ROLES),
     // E5-3: the audit view is a read (the auditor role's primary tool;
     // every authenticated role may read).
     ("GET", &["process-instances", ANY, "audit"], ROLES),

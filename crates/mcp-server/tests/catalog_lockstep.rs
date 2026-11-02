@@ -48,8 +48,9 @@ fn embedded_catalog_equals_the_server_crates_embed() {
 fn embedded_catalog_parses_and_covers_the_v1_surface() {
     let catalog = Catalog::embedded().expect("embedded catalog parses");
     // 35 (E4-1) → 40 (E5-2 approvals) → 41 (E5-3 audit) → 43 (N1-4 retire + def audit)
-    // → 47 (N2-3 message/signal delivery) → 51 (N4-2 compensation executor).
-    assert_eq!(catalog.tools.len(), 51);
+    // → 47 (N2-3 message/signal delivery) → 51 (N4-2 compensation executor)
+    // → 52 (N6-2 unified causal timeline).
+    assert_eq!(catalog.tools.len(), 52);
     let names: Vec<&str> = catalog.tools.iter().map(|t| t.name.as_str()).collect();
     for name in bpm_engine_mcp_server::allowlist::V1_SURFACE {
         assert!(names.contains(name), "v1 surface tool {name} missing");

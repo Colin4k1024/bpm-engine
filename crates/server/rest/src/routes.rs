@@ -2229,6 +2229,305 @@ pub async fn get_instance_steps(
     )))
 }
 
+// --- Unified causal timeline (N6-2) -------------------------------------------
+
+/// One entry of the unified causal timeline (N6-2): a chronologically
+/// sorted, redacted cross-source record. The `category` names the source
+/// store; `summary` is a human-readable, variable-free one-liner; `detail`
+/// carries structured, redacted metadata (no variable values, no
+/// credentials — secrecy by construction, mirroring ADR-011 §7).
+#[derive(Debug, Serialize)]
+pub struct TimelineEntry {
+    /// 0-based position in the unified, chronologically sorted timeline.
+    pub sequence: u64,
+    /// Source category: `history` | `step` | `approval` | `compensation` |
+    /// `delivery`.
+    pub category: String,
+    /// Event/record type, e.g. `ProcessStarted`, `approval_decided`,
+    /// `compensation_pending`, `delivery_pending`.
+    pub event_type: String,
+    /// Timestamp (unix-seconds string, the stores' native form).
+    pub timestamp: String,
+    /// Redacted one-line summary — event type and actor when present; NEVER
+    /// variable values or credential data.
+    pub summary: String,
+    /// Structured, redacted detail (variable maps stripped); absent when the
+    /// record carries no extra metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
+}
+
+/// Response of `GET /api/v1/process-instances/:id/timeline` (N6-2): the
+/// unified causal timeline joining history, approvals, compensation, and
+/// pending deliveries into one chronological, redacted view.
+#[derive(Debug, Serialize)]
+pub struct TimelineResponse {
+    pub instance_id: String,
+    pub definition_id: String,
+    pub definition_version: u32,
+    pub entries: Vec<TimelineEntry>,
+}
+
+/// Keys whose values are variable maps or otherwise sensitive — stripped
+/// from a history payload before it is surfaced as timeline `detail`.
+const TIMELINE_SENSITIVE_PAYLOAD_KEYS: &[&str] =
+    &["variables", "initial_variables", "payload", "correlation"];
+
+/// Build a redacted, scalar-only `detail` object from a history event
+/// payload: variable maps and nested structures are dropped, so no variable
+/// value or credential can leak (ADR-011 §7). Returns `None` when nothing
+/// safe survives.
+fn redacted_history_detail(payload: &serde_json::Value) -> Option<serde_json::Value> {
+    let obj = payload.as_object()?;
+    let mut out = serde_json::Map::new();
+    for (k, v) in obj {
+        if TIMELINE_SENSITIVE_PAYLOAD_KEYS.contains(&k.as_str()) {
+            continue;
+        }
+        match v {
+            serde_json::Value::String(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::Bool(_) => {
+                out.insert(k.clone(), v.clone());
+            }
+            serde_json::Value::Null => {
+                out.insert(k.clone(), serde_json::Value::Null);
+            }
+            // Drop nested objects/arrays — they may carry variable values.
+            _ => {}
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(out))
+    }
+}
+
+/// Category-relative sort rank for same-timestamp tie-breaking (stable,
+/// deterministic across stores): history < approval < compensation < delivery.
+fn timeline_category_rank(category: &str) -> u16 {
+    match category {
+        "history" => 0,
+        "approval" => 1,
+        "compensation" => 2,
+        "delivery" => 3,
+        _ => 4,
+    }
+}
+
+/// Parse a unix-seconds timestamp string numerically; non-numeric values
+/// sort as 0 (the stores' `occurred_at`/`created_at` are epoch seconds).
+fn timeline_timestamp_rank(ts: &str) -> u64 {
+    ts.parse::<u64>().unwrap_or(0)
+}
+
+/// GET /api/v1/process-instances/:id/timeline — the unified causal timeline
+/// (N6-2): history events, approval records, compensation records, and
+/// pending deliveries joined into one chronological, redacted view.
+///
+/// Read-only aggregation over the existing instance, history, approval,
+/// compensation, and event-inbox stores — no new stores, no new writes.
+/// Sensitive-by-default (ADR-011 §7): the `summary` carries only the event
+/// type and actor; the `detail` strips variable maps and nested structures,
+/// so no variable value, credential, or correlation predicate is surfaced.
+/// History payloads were already redacted at write time by the E2-3 policy
+/// (`__truncated:` markers, `__encrypted:` ciphertext); this endpoint adds a
+/// second, structural redaction layer. RBAC: a read — every authenticated
+/// role may call it; cross-tenant access is rejected as 404 like every
+/// instance-scoped read. Errors: 404 `not_found` for an unknown instance,
+/// 500 `internal` on storage failures.
+pub async fn get_instance_timeline(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    Path(id): Path<String>,
+) -> Result<Json<TimelineResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // E5-1: an instance of another tenant is reported like a missing one
+    // (no existence leak) — the same gate shape as every instance read.
+    let inst = state
+        .storage
+        .process_store
+        .load(&id)
+        .await
+        .map_err(internal_error_tuple)?
+        .ok_or_else(|| tenant_gate_not_found(&id))?;
+    if tenant_denied(&identity, &inst) {
+        return Err(tenant_gate_not_found(&id));
+    }
+
+    let (_, version) = parse_definition_id_version(&inst.process_def_id);
+
+    // Collect entries from every source with a unified (timestamp, category,
+    // source-index) sort key; the final `sequence` is assigned after the
+    // stable sort. Source-index preserves each store's native order so
+    // same-timestamp ties within one source stay deterministic.
+    let mut sortable: Vec<((u64, u16, usize), TimelineEntry)> = Vec::new();
+
+    // 1. History events → category "history".
+    let mut history =
+        HistoryRepo::list_by_instance(state.storage.history_repo.as_ref(), &id, None, None)
+            .await
+            .map_err(internal_error_tuple)?;
+    // Causal order within history (same key the /steps endpoint uses).
+    crate::step_trace::sort_history_causally(&mut history);
+    for (i, ev) in history.iter().enumerate() {
+        let actor = audit_event_actor(&ev.payload);
+        let summary = match &actor {
+            Some(a) => format!("{} by {}", ev.event_type, a),
+            None => ev.event_type.clone(),
+        };
+        let detail = redacted_history_detail(&ev.payload);
+        let rank = timeline_timestamp_rank(&ev.occurred_at);
+        let entry = TimelineEntry {
+            sequence: 0,
+            category: "history".to_string(),
+            event_type: ev.event_type.clone(),
+            timestamp: ev.occurred_at.clone(),
+            summary,
+            detail,
+        };
+        sortable.push(((rank, timeline_category_rank("history"), i), entry));
+    }
+
+    // 2. Approval records → category "approval".
+    let approvals = state
+        .storage
+        .approval_store
+        .list_by_instance(&id)
+        .await
+        .map_err(internal_error_tuple)?;
+    for (i, record) in approvals.iter().enumerate() {
+        let status_str = match record.status {
+            bpm_engine_core::ApprovalStatus::Pending => "PENDING",
+            bpm_engine_core::ApprovalStatus::Approved => "APPROVED",
+            bpm_engine_core::ApprovalStatus::Rejected => "REJECTED",
+        };
+        let event_type = match record.status {
+            bpm_engine_core::ApprovalStatus::Pending => "approval_created",
+            _ => "approval_decided",
+        };
+        let ts = record
+            .decided_at
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| record.created_at.clone());
+        let summary = match (&record.decided_by, record.status) {
+            (Some(actor), bpm_engine_core::ApprovalStatus::Approved) => {
+                format!("approval approved by {}", actor)
+            }
+            (Some(actor), bpm_engine_core::ApprovalStatus::Rejected) => {
+                format!("approval rejected by {}", actor)
+            }
+            _ => format!("approval {}", status_str.to_lowercase()),
+        };
+        let detail = serde_json::json!({
+            "approval_id": record.id,
+            "node_id": record.node_id,
+            "token_id": record.token_id,
+            "task_type": record.task_type,
+            "status": status_str,
+            "decided_by": record.decided_by,
+            "note": record.note,
+        });
+        let rank = timeline_timestamp_rank(&ts);
+        let entry = TimelineEntry {
+            sequence: 0,
+            category: "approval".to_string(),
+            event_type: event_type.to_string(),
+            timestamp: ts,
+            summary,
+            detail: Some(detail),
+        };
+        sortable.push(((rank, timeline_category_rank("approval"), i), entry));
+    }
+
+    // 3. Compensation records → category "compensation".
+    let compensations = state.storage.compensation_repo.list_by_instance(&id).await;
+    for (i, record) in compensations.iter().enumerate() {
+        let status_lower = record.status.to_lowercase();
+        let event_type = format!("compensation_{}", status_lower);
+        let summary = format!(
+            "compensation {} ({}, order {})",
+            status_lower, record.handler_ref, record.order
+        );
+        let detail = serde_json::json!({
+            "record_id": record.id,
+            "node_id": record.node_id,
+            "handler_ref": record.handler_ref,
+            "order": record.order,
+            "status": record.status,
+        });
+        let rank = timeline_timestamp_rank(&record.created_at);
+        let entry = TimelineEntry {
+            sequence: 0,
+            category: "compensation".to_string(),
+            event_type,
+            timestamp: record.created_at.clone(),
+            summary,
+            detail: Some(detail),
+        };
+        sortable.push(((rank, timeline_category_rank("compensation"), i), entry));
+    }
+
+    // 4. Pending deliveries → category "delivery".
+    let deliveries = state
+        .storage
+        .event_inbox_store
+        .list_pending_for_instance(&id)
+        .await
+        .map_err(internal_error_tuple)?;
+    for (i, delivery) in deliveries.iter().enumerate() {
+        let delivery_type = match delivery.delivery_type {
+            DeliveryType::Message => "message",
+            DeliveryType::Signal => "signal",
+        };
+        let status = match delivery.status {
+            DeliveryStatus::Pending => "pending",
+            DeliveryStatus::Consumed => "consumed",
+            DeliveryStatus::Expired => "expired",
+        };
+        let event_type = format!("delivery_{}", status);
+        let summary = format!("{} delivery '{}' {}", delivery_type, delivery.name, status);
+        // NOTE: `payload` and `correlation` are deliberately omitted — they
+        // carry variable values / predicates that may be sensitive.
+        let detail = serde_json::json!({
+            "delivery_id": delivery.id,
+            "delivery_type": delivery_type,
+            "name": delivery.name,
+            "status": status,
+            "expires_at": delivery.expires_at,
+        });
+        let rank = timeline_timestamp_rank(&delivery.created_at);
+        let entry = TimelineEntry {
+            sequence: 0,
+            category: "delivery".to_string(),
+            event_type,
+            timestamp: delivery.created_at.clone(),
+            summary,
+            detail: Some(detail),
+        };
+        sortable.push(((rank, timeline_category_rank("delivery"), i), entry));
+    }
+
+    // Stable chronological sort, then assign the final sequence numbers.
+    sortable.sort_by_key(|a| a.0);
+    let entries = sortable
+        .into_iter()
+        .enumerate()
+        .map(|(seq, (_, mut entry))| {
+            entry.sequence = seq as u64;
+            entry
+        })
+        .collect();
+
+    Ok(Json(TimelineResponse {
+        instance_id: id,
+        definition_id: inst.process_def_id,
+        definition_version: version,
+        entries,
+    }))
+}
+
 /// GET /api/v1/tasks?type=user|external
 ///
 /// Optional route-level pagination (E2-4): `limit`/`offset` query
@@ -6222,6 +6521,14 @@ fn api_v1_router(
         GET,
         "/process-instances/:id/steps",
         get_instance_steps
+    );
+    // Unified causal timeline (N6-2): history + approvals + compensation +
+    // deliveries in one chronological, redacted view. A read — all roles.
+    let router = api_route!(
+        router,
+        GET,
+        "/process-instances/:id/timeline",
+        get_instance_timeline
     );
     // Audit view (E5-3, issue #25): actor-attributed timeline + decisions
     // + artifact references. A read — all authenticated roles.
