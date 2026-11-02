@@ -148,9 +148,10 @@ pub fn compute_backoff(attempt: u32, base_secs: u64, cap_secs: u64) -> Duration 
 /// (ADR-011 §5). Returns (category, retry_after).
 ///
 /// Error code prefixes:
-/// - `rate_limited` → Transient, backoff from the error
-/// - `provider_error` / `execution_timeout` → Transient, exponential backoff
-/// - `bad_input` / `output_validation_failed` / `budget_exceeded` → Permanent
+/// - `rate_limited` → Transient, backoff (2s base, 120s cap)
+/// - `provider_error` / `execution_timeout` → Transient, exponential backoff (1s base, 60s cap)
+/// - `bad_input` / `output_validation_failed` / `budget_exceeded` / `cancelled` → Permanent
+/// - Unknown errors → Transient (provider errors are likely transient)
 pub fn classify_provider_error(
     error: &str,
     attempt: u32,
@@ -166,9 +167,19 @@ pub fn classify_provider_error(
             RetryCategory::Transient,
             Some(compute_backoff(attempt, 1, 60)),
         )
-    } else {
-        // bad_input, output_validation_failed, budget_exceeded, etc.
+    } else if error.starts_with("bad_input")
+        || error.starts_with("output_validation_failed")
+        || error.starts_with("budget_exceeded")
+        || error.starts_with("cancelled")
+    {
         (RetryCategory::Permanent, None)
+    } else {
+        // Unknown provider error — default to transient (network issues,
+        // temporary unavailability, etc. are likely retriable).
+        (
+            RetryCategory::Transient,
+            Some(compute_backoff(attempt, 1, 60)),
+        )
     }
 }
 

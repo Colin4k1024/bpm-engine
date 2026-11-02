@@ -214,10 +214,11 @@ impl ReferenceHandler {
             Ok(Ok(response)) => response,
             Ok(Err(e)) => {
                 // N3-3 fault classification (ADR-011 §5): classify the
-                // provider error by its stable code prefix.
+                // raw provider error by its stable code prefix.
                 // `rate_limited` / `provider_error` / `execution_timeout`
-                // are transient with backoff; everything else is permanent.
-                let error = format!("provider_error: {e}");
+                // are transient with backoff; `bad_input` / `budget_exceeded`
+                // are permanent; unknown errors default to transient.
+                let error = format!("{e}");
                 let (category, retry_after) = classify_provider_error(&error, 0);
                 return TaskResult::Fail {
                     error,
