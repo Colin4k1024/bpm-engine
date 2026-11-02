@@ -35,26 +35,34 @@ start → retrieve → infer → gateway ──(verdict=approved)──→ act �
 No API keys, no network — the mock provider is the default:
 
 ```bash
-# 1. Build the engine + worker
+# 1. Build the engine
 cargo build -p bpm-engine-server-rest
-cargo build -p ai-worker-template
 
 # 2. Start the engine (memory mode, open auth)
 cargo run -p bpm-engine-server-rest &
 sleep 2
 
-# 3. Deploy the production flow
+# 3. Validate the production flow (DSL compiles + passes validation gate)
+curl -s -X POST http://127.0.0.1:3000/api/v1/process-definitions/validate \
+  -H 'content-type: application/json' \
+  -d "{\"format\":\"dsl\",\"source\":$(cat templates/flows/production-worker-flow.json | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')}"
+# → {"valid":true,...}
+
+# 4. Deploy via BPMN XML (the deploy endpoint accepts BPMN XML;
+#    for DSL, compile with cargo run -p bpm-engine-dsl --example compile_flow
+#    or use the BPMN XML from templates/flows/ai-approval-flow.json as a starting point)
 curl -s -X POST http://127.0.0.1:3000/api/v1/process-definitions/deploy \
   -H 'content-type: application/xml' \
-  -d @templates/flows/production-worker-flow.json
-
-# 4. Start the worker (mock provider, no env vars needed)
-BPM_BASE_URL=http://127.0.0.1:3000 cargo run -p ai-worker-template
+  -d '<your-bpmn-xml-here>'
 
 # 5. Start an instance
 curl -s -X POST http://127.0.0.1:3000/api/v1/process-instances \
   -H 'content-type: application/json' \
   -d '{"process_def_id": "production-worker:1"}'
+
+# 6. Run the ai-worker template (from templates/ai-worker/)
+cd templates/ai-worker
+BPM_BASE_URL=http://127.0.0.1:3000 cargo run
 ```
 
 ## Real provider via environment
