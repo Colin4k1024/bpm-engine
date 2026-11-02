@@ -21,12 +21,11 @@ impl ProcessDefStore {
         }
     }
 
-    /// Register a compiled process definition. Creates a new version record.
-    pub fn register(&self, def: ProcessDefinition) {
+    /// Register a compiled process definition under a tenant (N1-3).
+    pub fn register(&self, def: ProcessDefinition, tenant_id: Option<String>) {
         let id = def.id.to_string();
         self.defs.write().unwrap().insert(id.clone(), def);
 
-        // Parse key and version from id (e.g. "order-flow:3" -> key="order-flow", version=3)
         let (key, version) = parse_id_and_version(&id);
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -40,14 +39,18 @@ impl ProcessDefStore {
             version,
             status: DefinitionStatus::Activated,
             created_at,
+            tenant_id,
         };
 
-        // Auto-deactivate prior Activated version for the same key (→ Published,
-        // still in the activatable pool — ADR-009 §3).
+        // Auto-deactivate prior Activated version for the same key AND tenant.
         {
             let mut records = self.records.write().unwrap();
             for rec in records.values_mut() {
-                if rec.key == key && rec.status == DefinitionStatus::Activated && rec.id != id {
+                if rec.key == key
+                    && rec.status == DefinitionStatus::Activated
+                    && rec.id != id
+                    && rec.tenant_id == record.tenant_id
+                {
                     rec.status = DefinitionStatus::Published;
                 }
             }
@@ -55,12 +58,27 @@ impl ProcessDefStore {
         }
     }
 
-    /// Return metadata for every registered definition version.
+    /// Return metadata for every registered definition version (all tenants).
     pub fn list_all_records(&self) -> Vec<ProcessDefinitionRecord> {
         let mut records: Vec<ProcessDefinitionRecord> =
             self.records.read().unwrap().values().cloned().collect();
         records.sort_by(|a, b| a.key.cmp(&b.key).then_with(|| b.version.cmp(&a.version)));
         records
+    }
+
+    /// Filter records by tenant: `None` returns all; `Some(t)` returns
+    /// tenant `t`'s records plus global (tenant_id=None) ones (N1-3).
+    fn tenant_filter(
+        records: Vec<ProcessDefinitionRecord>,
+        tenant_id: Option<&str>,
+    ) -> Vec<ProcessDefinitionRecord> {
+        match tenant_id {
+            None => records,
+            Some(t) => records
+                .into_iter()
+                .filter(|r| r.tenant_id.as_deref() == Some(t) || r.tenant_id.is_none())
+                .collect(),
+        }
     }
 }
 
@@ -70,8 +88,6 @@ impl Default for ProcessDefStore {
     }
 }
 
-/// Parse key and version from a definition id like "order-flow:3".
-/// If no colon, version defaults to 1.
 fn parse_id_and_version(id: &str) -> (String, u32) {
     if let Some((key, ver_str)) = id.rsplit_once(':') {
         if let Ok(v) = ver_str.parse::<u32>() {
@@ -87,21 +103,35 @@ impl ProcessDefinitionStore for ProcessDefStore {
         Ok(self.defs.read().unwrap().get(id).cloned())
     }
 
-    async fn list_versions(&self, key: &str) -> anyhow::Result<Vec<ProcessDefinitionRecord>> {
+    async fn list_versions(
+        &self,
+        key: &str,
+        tenant_id: Option<&str>,
+    ) -> anyhow::Result<Vec<ProcessDefinitionRecord>> {
         let records = self.records.read().unwrap();
-        let mut versions: Vec<ProcessDefinitionRecord> =
-            records.values().filter(|r| r.key == key).cloned().collect();
+        let mut versions: Vec<ProcessDefinitionRecord> = Self::tenant_filter(
+            records.values().filter(|r| r.key == key).cloned().collect(),
+            tenant_id,
+        );
         versions.sort_by_key(|b| std::cmp::Reverse(b.version));
         Ok(versions)
     }
 
-    async fn get_active(&self, key: &str) -> anyhow::Result<Option<ProcessDefinitionRecord>> {
+    async fn get_active(
+        &self,
+        key: &str,
+        tenant_id: Option<&str>,
+    ) -> anyhow::Result<Option<ProcessDefinitionRecord>> {
         let records = self.records.read().unwrap();
-        Ok(records
-            .values()
-            .filter(|r| r.key == key && r.status == DefinitionStatus::Activated)
-            .max_by_key(|r| r.version)
-            .cloned())
+        let candidates: Vec<_> = Self::tenant_filter(
+            records
+                .values()
+                .filter(|r| r.key == key && r.status == DefinitionStatus::Activated)
+                .cloned()
+                .collect(),
+            tenant_id,
+        );
+        Ok(candidates.into_iter().max_by_key(|r| r.version))
     }
 
     async fn activate(&self, id: &str) -> anyhow::Result<()> {
@@ -110,15 +140,17 @@ impl ProcessDefinitionStore for ProcessDefStore {
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("process definition not found: {}", id))?;
         let key = target.key.clone();
+        let tenant = target.tenant_id.clone();
 
-        // Auto-deactivate prior Activated → Published (ADR-009 §3:
-        // last-writer-wins, prior stays in activatable pool).
         for rec in records.values_mut() {
-            if rec.key == key && rec.status == DefinitionStatus::Activated && rec.id != id {
+            if rec.key == key
+                && rec.status == DefinitionStatus::Activated
+                && rec.id != id
+                && rec.tenant_id == tenant
+            {
                 rec.status = DefinitionStatus::Published;
             }
         }
-        // Activate the target.
         if let Some(rec) = records.get_mut(id) {
             rec.status = DefinitionStatus::Activated;
         }
@@ -134,16 +166,25 @@ impl ProcessDefinitionStore for ProcessDefStore {
         Ok(())
     }
 
-    async fn list_all(&self) -> anyhow::Result<Vec<ProcessDefinitionRecord>> {
-        Ok(self.list_all_records())
+    async fn list_all(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> anyhow::Result<Vec<ProcessDefinitionRecord>> {
+        let mut records = Self::tenant_filter(self.list_all_records(), tenant_id);
+        records.sort_by(|a, b| a.key.cmp(&b.key).then_with(|| b.version.cmp(&a.version)));
+        Ok(records)
     }
 }
 
 #[async_trait]
 impl DefinitionDeployer for ProcessDefStore {
-    async fn deploy(&self, def: &ProcessDefinition, _bpmn_xml: &str) -> anyhow::Result<()> {
-        // The memory store keeps the compiled graph; the XML source is not persisted.
-        self.register(def.clone());
+    async fn deploy(
+        &self,
+        def: &ProcessDefinition,
+        _bpmn_xml: &str,
+        tenant_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.register(def.clone(), tenant_id.map(String::from));
         Ok(())
     }
 }

@@ -78,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 2. Deploy to the in-memory stores and wire the engine context.
     let repo = Arc::new(MemoryRepo::new());
     let def_store = Arc::new(ProcessDefStore::new());
-    def_store.register(def);
+    def_store.register(def, None);
 
     let mut ctx = bpm_engine::bpm_engine_runtime::EngineContext::builder(
         repo.clone() as Arc<dyn ProcessInstanceStore>,

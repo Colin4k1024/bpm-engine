@@ -189,7 +189,7 @@ async fn process_def_store_deploy_and_load() {
   </process>
 </definitions>"#;
 
-    store.deploy("simple-1", bpmn_xml).await.unwrap();
+    store.deploy("simple-1", bpmn_xml, None).await.unwrap();
 
     let def = store.load("simple-1").await.unwrap();
     assert!(def.is_some(), "should load deployed definition");
@@ -232,11 +232,11 @@ async fn process_def_store_deployer_trait_and_list_all() {
         let xml = bpmn(id);
         let def = bpm_engine_bpmn::parse_and_compile(&xml).unwrap();
         assert_eq!(def.id, id);
-        deployer.deploy(&def, &xml).await.unwrap();
+        deployer.deploy(&def, &xml, None).await.unwrap();
     }
 
     // list_all: every version of every key, key asc then version desc.
-    let records = store.list_all().await.unwrap();
+    let records = store.list_all(None).await.unwrap();
     let ids: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(
         ids,

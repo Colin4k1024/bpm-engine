@@ -393,7 +393,7 @@ impl EventHandler for TokenArrivedHandler {
             NodeType::CallActivity { called_process_key } => {
                 // Look up the called process definition by key
                 let active = process_def_store
-                    .get_active(called_process_key)
+                    .get_active(called_process_key, ctx.tenant_id.as_deref())
                     .await
                     .ok()
                     .flatten();
@@ -596,7 +596,7 @@ mod tests {
     async fn setup() -> TestSetup {
         let repo = Arc::new(MemoryRepo::new());
         let def_store = Arc::new(ProcessDefStore::new());
-        def_store.register(approval_flow_def());
+        def_store.register(approval_flow_def(), None);
         let instance = bpm_engine_core::ProcessInstance {
             id: "inst-1".into(),
             process_def_id: "approval-flow".to_string(),

@@ -108,7 +108,7 @@ fn build_engine_and_ctx(
     ]);
 
     let def_store = Arc::new(bpm_engine::bpm_engine_adapter_memory::ProcessDefStore::new());
-    def_store.register(def);
+    def_store.register(def, None);
 
     let ctx = EngineContext::builder(
         repo.clone() as Arc<_>,

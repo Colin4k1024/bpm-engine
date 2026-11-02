@@ -170,8 +170,8 @@ async fn build_storage(config: &BpmConfig) -> anyhow::Result<(Storage, Option<Ex
     match config.database.driver.as_str() {
         "memory" => {
             let def_store = Arc::new(ProcessDefStore::new());
-            def_store.register(minimal_process());
-            def_store.register(payment_process());
+            def_store.register(minimal_process(), None);
+            def_store.register(payment_process(), None);
             info!(
                 driver = "memory",
                 "storage backend: memory (bootstrap definitions: minimal, payment-flow)"

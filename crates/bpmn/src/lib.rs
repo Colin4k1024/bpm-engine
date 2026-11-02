@@ -817,9 +817,9 @@ mod tests {
         let store = ProcessDefStore::new();
         let def = parse_and_compile(MINIMAL_BPMN).unwrap();
         let id = def.id.to_string();
-        store.register(def);
+        store.register(def, None);
 
-        let versions = store.list_versions(&id).await.unwrap();
+        let versions = store.list_versions(&id, None).await.unwrap();
         assert_eq!(versions.len(), 1);
         assert_eq!(versions[0].id, id);
         assert_eq!(versions[0].status, DefinitionStatus::Activated);
@@ -840,7 +840,7 @@ mod tests {
           </process>
         </definitions>"#;
         let def1 = parse_and_compile(xml_v1).unwrap();
-        store.register(def1);
+        store.register(def1, None);
 
         // Register v2 (same key)
         let xml_v2 = r#"<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL">
@@ -851,9 +851,9 @@ mod tests {
           </process>
         </definitions>"#;
         let def2 = parse_and_compile(xml_v2).unwrap();
-        store.register(def2);
+        store.register(def2, None);
 
-        let versions = store.list_versions("order-flow").await.unwrap();
+        let versions = store.list_versions("order-flow", None).await.unwrap();
         assert_eq!(versions.len(), 2);
 
         // v2 should be activated, v1 auto-deactivated to Published (ADR-009 §3)
@@ -877,9 +877,9 @@ mod tests {
           </process>
         </definitions>"#;
         let def = parse_and_compile(xml).unwrap();
-        store.register(def);
+        store.register(def, None);
 
-        let active = store.get_active("my-flow").await.unwrap();
+        let active = store.get_active("my-flow", None).await.unwrap();
         assert!(active.is_some());
         assert_eq!(active.unwrap().id, "my-flow:1");
     }
@@ -898,7 +898,7 @@ mod tests {
             <sequenceFlow id="f1" sourceRef="start" targetRef="end"/>
           </process>
         </definitions>"#;
-        store.register(parse_and_compile(xml_v1).unwrap());
+        store.register(parse_and_compile(xml_v1).unwrap(), None);
 
         // Register v2
         let xml_v2 = r#"<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL">
@@ -908,17 +908,17 @@ mod tests {
             <sequenceFlow id="f1" sourceRef="start" targetRef="end"/>
           </process>
         </definitions>"#;
-        store.register(parse_and_compile(xml_v2).unwrap());
+        store.register(parse_and_compile(xml_v2).unwrap(), None);
 
         // Activate v1
         store.activate("flow:1").await.unwrap();
 
-        let active = store.get_active("flow").await.unwrap().unwrap();
+        let active = store.get_active("flow", None).await.unwrap().unwrap();
         assert_eq!(active.id, "flow:1");
         assert_eq!(active.status, DefinitionStatus::Activated);
 
         // v2 auto-deactivated to Published (ADR-009 §3: prior Activated → Published)
-        let versions = store.list_versions("flow").await.unwrap();
+        let versions = store.list_versions("flow", None).await.unwrap();
         let v2 = versions.iter().find(|v| v.id == "flow:2").unwrap();
         assert_eq!(v2.status, DefinitionStatus::Published);
     }
@@ -936,15 +936,15 @@ mod tests {
             <sequenceFlow id="f1" sourceRef="start" targetRef="end"/>
           </process>
         </definitions>"#;
-        store.register(parse_and_compile(xml).unwrap());
+        store.register(parse_and_compile(xml).unwrap(), None);
 
         store.deprecate("dep-flow:1").await.unwrap();
 
-        let versions = store.list_versions("dep-flow").await.unwrap();
+        let versions = store.list_versions("dep-flow", None).await.unwrap();
         assert_eq!(versions[0].status, DefinitionStatus::Deprecated);
 
         // get_active should return None
-        let active = store.get_active("dep-flow").await.unwrap();
+        let active = store.get_active("dep-flow", None).await.unwrap();
         assert!(active.is_none());
     }
 

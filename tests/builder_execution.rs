@@ -77,7 +77,7 @@ fn build_gateway_flow() -> bpm_engine_core::ProcessDefinition {
 async fn run_until_routed(instance_id: &str, approved: &str) -> Arc<MemoryRepo> {
     let repo = Arc::new(MemoryRepo::new());
     let def_store = Arc::new(ProcessDefStore::new());
-    def_store.register(build_gateway_flow());
+    def_store.register(build_gateway_flow(), None);
 
     let mut ctx = bpm_engine::bpm_engine_runtime::EngineContext::builder(
         repo.clone() as Arc<dyn ProcessInstanceStore>,
@@ -156,7 +156,7 @@ async fn builder_flow_routes_exclusive_gateway_on_matching_variable() {
         .find(|t| t.node_id == "task-yes")
         .unwrap();
     let def_store = Arc::new(ProcessDefStore::new());
-    def_store.register(build_gateway_flow());
+    def_store.register(build_gateway_flow(), None);
     let mut ctx = bpm_engine::bpm_engine_runtime::EngineContext::builder(
         repo2.clone() as Arc<dyn ProcessInstanceStore>,
         repo2.clone() as Arc<dyn TokenStore>,
@@ -201,7 +201,7 @@ async fn builder_flow_worker_variables_drive_gateway_routing() {
     // routes the gateway (same semantics as the DSL/BPMN entries).
     let repo = Arc::new(MemoryRepo::new());
     let def_store = Arc::new(ProcessDefStore::new());
-    def_store.register(build_gateway_flow());
+    def_store.register(build_gateway_flow(), None);
 
     let mut ctx = bpm_engine::bpm_engine_runtime::EngineContext::builder(
         repo.clone() as Arc<dyn ProcessInstanceStore>,
@@ -268,6 +268,7 @@ async fn builder_history_is_recorded() {
             .edge("start", "end")
             .build()
             .unwrap(),
+        None,
     );
 
     let mut ctx = bpm_engine::bpm_engine_runtime::EngineContext::builder(

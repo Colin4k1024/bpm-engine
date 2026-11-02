@@ -60,6 +60,11 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         "0005_definition_lifecycle",
         include_str!("../migrations/0005_definition_lifecycle.sql"),
     ),
+    (
+        6,
+        "0006_definition_tenant",
+        include_str!("../migrations/0006_definition_tenant.sql"),
+    ),
 ];
 
 /// Snapshot of migration state, for health checks and startup validation.
@@ -255,14 +260,14 @@ mod tests {
         let s = status(&[]);
         assert!(s.applied.is_empty());
         assert_eq!(s.latest, 0);
-        assert_eq!(s.pending, vec![1, 2, 3, 4, 5]);
+        assert_eq!(s.pending, vec![1, 2, 3, 4, 5, 6]);
     }
 
     #[test]
     fn fully_applied_db_reports_nothing_pending() {
-        let s = status(&[1, 2, 3, 4, 5]);
-        assert_eq!(s.applied, vec![1, 2, 3, 4, 5]);
-        assert_eq!(s.latest, 5);
+        let s = status(&[1, 2, 3, 4, 5, 6]);
+        assert_eq!(s.applied, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(s.latest, 6);
         assert!(s.pending.is_empty());
     }
 
@@ -271,12 +276,12 @@ mod tests {
         let s = status(&[1]);
         assert_eq!(s.applied, vec![1]);
         assert_eq!(s.latest, 1);
-        assert_eq!(s.pending, vec![2, 3, 4, 5]);
+        assert_eq!(s.pending, vec![2, 3, 4, 5, 6]);
     }
 
     #[test]
     fn validate_up_to_date_accepts_current_schema() {
-        assert!(validate_up_to_date(&status(&[1, 2, 3, 4, 5])).is_ok());
+        assert!(validate_up_to_date(&status(&[1, 2, 3, 4, 5, 6])).is_ok());
     }
 
     #[test]
@@ -310,10 +315,13 @@ mod tests {
             assert!(version > prev, "migrations must be strictly ascending");
             prev = version;
             assert!(!name.is_empty());
-            // Schema migrations contain CREATE; data migrations (e.g. 0005
-            // status rename) contain UPDATE/INSERT. Both are valid.
+            // Schema migrations contain CREATE/ALTER; data migrations
+            // contain UPDATE/INSERT. All are valid DDL/DML.
             assert!(
-                sql.contains("CREATE") || sql.contains("UPDATE") || sql.contains("INSERT"),
+                sql.contains("CREATE")
+                    || sql.contains("UPDATE")
+                    || sql.contains("INSERT")
+                    || sql.contains("ALTER"),
                 "migration {name} should contain DDL"
             );
         }
