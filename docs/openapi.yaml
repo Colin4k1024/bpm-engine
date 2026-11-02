@@ -895,6 +895,54 @@ paths:
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /api/v1/process-definitions/{id}/retire:
+    put:
+      operationId: retireDefinition
+      summary: Retire a version (→ Deprecated, terminal)
+      description: |
+        N1-4: explicitly take a version out of the activatable pool.
+        Unlike deprecate (legacy name), retire records the actor and
+        reason in the audit trail.
+      tags: [ProcessDefinitions]
+      parameters:
+        - $ref: "#/components/parameters/DefinitionId"
+      responses:
+        "200":
+          description: Version retired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivateResponse"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-definitions/{id}/audit:
+    get:
+      operationId: getDefinitionAudit
+      summary: Lifecycle audit trail for a definition
+      description: |
+        N1-4: returns audit records (actor, version, time, content summary,
+        reason) for every deploy/activate/deprecate/retire operation.
+      tags: [ProcessDefinitions]
+      parameters:
+        - $ref: "#/components/parameters/DefinitionId"
+      responses:
+        "200":
+          description: Audit records ordered by sequence.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DefinitionAuditRecord"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /api/v1/tasks:
     get:
       operationId: listTasks

@@ -448,6 +448,13 @@ const PERMISSIONS: &[(&str, &[&str], &[Role])] = &[
         &["process-definitions", ANY, "deprecate"],
         &[Role::Deployer],
     ),
+    (
+        "PUT",
+        &["process-definitions", ANY, "retire"],
+        &[Role::Deployer],
+    ),
+    // Definition audit trail: all roles can read (N1-4).
+    ("GET", &["process-definitions", ANY, "audit"], ROLES),
     // Instance/task operations: operator only.
     ("POST", &["process-instances"], &[Role::Operator]),
     (

@@ -2116,6 +2116,54 @@
       }
     },
     {
+      "name": "get_definition_audit",
+      "operation": "GET /api/v1/process-definitions/{id}/audit",
+      "summary": "Lifecycle audit trail for a definition",
+      "description": "N1-4: returns audit records (actor, version, time, content summary,\nreason) for every deploy/activate/deprecate/retire operation.",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process definition version id (e.g. `order-flow:3`)."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Audit records ordered by sequence."
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
       "name": "deprecate_definition",
       "operation": "PUT /api/v1/process-definitions/{id}/deprecate",
       "summary": "Mark a version as deprecated",
@@ -2151,6 +2199,59 @@
           {
             "status": 403,
             "code": "forbidden"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
+      "name": "retire_definition",
+      "operation": "PUT /api/v1/process-definitions/{id}/retire",
+      "summary": "Retire a version (→ Deprecated, terminal)",
+      "description": "N1-4: explicitly take a version out of the activatable pool.\nUnlike deprecate (legacy name), retire records the actor and\nreason in the audit trail.",
+      "classification": "mutating",
+      "side_effects": "Persists the deprecated (terminal) status and appends an audit record with actor and timestamp (N1-4).",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process definition version id (e.g. `order-flow:3`)."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "Version retired.",
+          "schema": "ActivateResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
           },
           {
             "status": 429,

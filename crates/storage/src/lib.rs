@@ -9,6 +9,7 @@
 pub mod approval_store;
 pub mod compensation;
 pub mod dead_letter_store;
+pub mod definition_audit;
 pub mod event_store;
 pub mod external_task_store;
 pub mod history;
@@ -22,6 +23,7 @@ pub mod token_store;
 pub use approval_store::*;
 pub use compensation::*;
 pub use dead_letter_store::*;
+pub use definition_audit::*;
 pub use event_store::*;
 pub use external_task_store::*;
 pub use history::*;
