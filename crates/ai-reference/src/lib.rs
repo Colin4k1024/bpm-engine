@@ -97,7 +97,7 @@ pub use handler::{task_type, ReferenceHandler};
 #[cfg(feature = "http")]
 pub use openai::{OpenAiCompatProvider, DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_MODEL};
 pub use provider::{
-    MockModelProvider, ModelProvider, ModelRequest, ModelResponse, ProviderConfig,
+    FaultConfig, MockModelProvider, ModelProvider, ModelRequest, ModelResponse, ProviderConfig,
     UnconfiguredProvider, MOCK_APPROVED, MOCK_REJECTED, MOCK_SUMMARY_TEXT,
 };
 pub use runner::{

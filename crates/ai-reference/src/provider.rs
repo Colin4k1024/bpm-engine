@@ -195,6 +195,44 @@ pub const MOCK_MODEL_NAME: &str = "mock-model-v1";
 /// The mock provider's model version.
 pub const MOCK_MODEL_VERSION: &str = "1";
 
+/// Fault injection config for the mock provider (N3-3): the mock fails on
+/// the configured call number with the configured error message. The
+/// error's code prefix drives the retry classification produced by
+/// `classify_provider_error`.
+#[derive(Debug, Clone)]
+pub struct FaultConfig {
+    /// Fail on this 0-indexed call number (0 = first call).
+    pub fail_on_call: u32,
+    /// The error message to return (prefix determines retry classification).
+    pub error: String,
+}
+
+impl FaultConfig {
+    /// Fail on the first call with a rate-limited error.
+    pub fn rate_limited() -> Self {
+        Self {
+            fail_on_call: 0,
+            error: "rate_limited: 429 Too Many Requests".to_string(),
+        }
+    }
+
+    /// Fail on the first call with a provider error (5xx).
+    pub fn provider_error() -> Self {
+        Self {
+            fail_on_call: 0,
+            error: "provider_error: 500 Internal Server Error".to_string(),
+        }
+    }
+
+    /// Fail on the first call with a timeout.
+    pub fn timeout() -> Self {
+        Self {
+            fail_on_call: 0,
+            error: "execution_timeout: model call exceeded 30s".to_string(),
+        }
+    }
+}
+
 /// Deterministic, offline model provider: the reference suite's default.
 ///
 /// A pure function of the request — no randomness, no clock, no I/O. Routing
@@ -207,9 +245,11 @@ pub const MOCK_MODEL_VERSION: &str = "1";
 /// | anything else | `echo: {prompt}` | (16, 8) |
 ///
 /// `max_tokens` clamps the reported output-token count.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct MockModelProvider {
     config: ProviderConfig,
+    fault: Option<FaultConfig>,
+    call_count: std::sync::atomic::AtomicU32,
 }
 
 impl MockModelProvider {
@@ -217,12 +257,25 @@ impl MockModelProvider {
     pub fn new() -> Self {
         Self {
             config: ProviderConfig::mock(),
+            fault: None,
+            call_count: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
     /// The mock provider reporting a custom identity/pricing in envelopes.
     pub fn with_config(config: ProviderConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            fault: None,
+            call_count: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    /// Configure fault injection (N3-3): the mock will fail on the specified
+    /// call number with the configured error.
+    pub fn with_fault(mut self, fault: FaultConfig) -> Self {
+        self.fault = Some(fault);
+        self
     }
 
     /// The identity and price table recorded in task envelopes.
@@ -240,6 +293,15 @@ impl Default for MockModelProvider {
 #[async_trait]
 impl ModelProvider for MockModelProvider {
     async fn generate(&self, request: ModelRequest) -> anyhow::Result<ModelResponse> {
+        // N3-3 fault injection: fail on the configured call number.
+        if let Some(fault) = &self.fault {
+            let call = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if call == fault.fail_on_call {
+                return Err(anyhow::anyhow!("{}", fault.error));
+            }
+        }
         let prompt = request.prompt.as_str();
         let (text, tokens_in, tokens_out) = if prompt.contains("summar") {
             (
