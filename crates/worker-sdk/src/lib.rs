@@ -14,6 +14,7 @@
 //! idempotency keys. See `docs/worker-context.md`.
 
 pub mod ai_task;
+pub mod budget;
 pub mod client;
 pub mod config;
 pub mod handler;
@@ -23,6 +24,7 @@ pub mod tools;
 pub mod types;
 pub mod worker;
 
+pub use budget::{classify_provider_error, compute_backoff, Budget, BudgetTracker};
 pub use client::EngineClient;
 pub use config::WorkerConfig;
 pub use handler::{run_with_renewal, LeaseRenewalGuard, TaskContext, TaskHandler};

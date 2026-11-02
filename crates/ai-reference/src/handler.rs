@@ -48,8 +48,8 @@ use bpm_engine_core::{RetryCategory, ToolRef};
 use bpm_engine_worker_sdk::ai_task::{new_envelope, TaskInput, TaskOutput};
 use bpm_engine_worker_sdk::tools::{CredentialInjector, ToolContext, ToolError, ToolExecutor};
 use bpm_engine_worker_sdk::{
-    derive_key, run_with_renewal, with_timeout, ExternalTask, OutputContract, OutputMapping,
-    TaskContext, TaskHandler, TaskResult,
+    classify_provider_error, derive_key, run_with_renewal, with_timeout, Budget, BudgetTracker,
+    ExternalTask, OutputContract, OutputMapping, TaskContext, TaskHandler, TaskResult,
 };
 
 use crate::provider::{ModelProvider, ModelRequest, ProviderConfig};
@@ -106,6 +106,11 @@ pub struct HandlerDeps {
     /// Schema and only declared fields are mapped to variables. When absent,
     /// the raw response text is placed in the output variable (legacy).
     output_contract: Option<OutputContract>,
+    /// Optional per-task budget (N3-3, ADR-011 §2). When present,
+    /// `handle_model` increments the attempt counter and checks cumulative
+    /// limits before each provider call, then records the response cost
+    /// afterward; exceeding any dimension is a permanent failure.
+    budget: Option<Budget>,
 }
 
 impl HandlerDeps {
@@ -119,6 +124,7 @@ impl HandlerDeps {
             injector: CredentialInjector::new()
                 .source(reference_credential_source(&options.tool_env_var)),
             output_contract: None,
+            budget: None,
         }
     }
 
@@ -127,6 +133,14 @@ impl HandlerDeps {
     /// and maps only declared fields to process variables.
     pub fn with_output_contract(mut self, contract: OutputContract) -> Self {
         self.output_contract = Some(contract);
+        self
+    }
+
+    /// Set a per-task budget (N3-3). When set, `handle_model` enforces the
+    /// budget before each provider call (incrementing the attempt counter and
+    /// checking cumulative limits) and records the response cost afterward.
+    pub fn with_budget(mut self, budget: Budget) -> Self {
+        self.budget = Some(budget);
         self
     }
 }
@@ -175,6 +189,22 @@ impl ReferenceHandler {
             max_tokens: None,
         };
 
+        // N3-3 budget enforcement (ADR-011 §2): if a budget is configured,
+        // increment the attempt counter and check cumulative limits BEFORE
+        // the provider call. Exceeding any dimension is a permanent failure
+        // — no retry can fix an exhausted budget.
+        let mut tracker = self.deps.budget.clone().map(BudgetTracker::new);
+        if let Some(tracker) = tracker.as_mut() {
+            tracker.increment_attempt();
+            if let Err(exceeded) = tracker.check() {
+                return TaskResult::Fail {
+                    error: exceeded.message(),
+                    retry_after: None,
+                    category: Some(RetryCategory::Permanent),
+                };
+            }
+        }
+
         // E3-2 ergonomics: a real model call can outlive a lease tick, so
         // wrap it in the timeout helper (a hung provider fails transient
         // with the stable `task_timeout:` code).
@@ -183,15 +213,32 @@ impl ReferenceHandler {
         let response = match with_timeout(self.deps.model_timeout, generate).await {
             Ok(Ok(response)) => response,
             Ok(Err(e)) => {
+                // N3-3 fault classification (ADR-011 §5): classify the
+                // raw provider error by its stable code prefix.
+                // `rate_limited` / `provider_error` / `execution_timeout`
+                // are transient with backoff; `bad_input` / `budget_exceeded`
+                // are permanent; unknown errors default to transient.
+                let error = format!("{e}");
+                let (category, retry_after) = classify_provider_error(&error, 0);
                 return TaskResult::Fail {
-                    error: format!("provider_error: {e}"),
-                    retry_after: None,
-                    // A provider outage may resolve on retry: transient.
-                    category: Some(RetryCategory::Transient),
+                    error,
+                    retry_after,
+                    category: Some(category),
                 };
             }
             Err(timeout) => return timeout,
         };
+
+        // N3-3: record the completed call's cost against the budget (if any)
+        // so the next attempt's `check()` sees cumulative spending.
+        if let Some(tracker) = tracker.as_mut() {
+            let cost = self.deps.pricing.cost_for(&response);
+            tracker.record(
+                cost.amount_micros.unwrap_or(0),
+                cost.tokens_in.unwrap_or(0),
+                cost.tokens_out.unwrap_or(0),
+            );
+        }
 
         // E3-1 envelope: model ref + cost from the price table, execution
         // id, deterministic idempotency key over (task, prompt).
@@ -634,6 +681,78 @@ mod tests {
                 assert_eq!(category, Some(RetryCategory::Permanent));
             }
             TaskResult::Complete { .. } => panic!("unknown type must fail"),
+        }
+    }
+
+    /// A HandlerDeps wired with a custom provider (for fault-injection tests
+    /// that need a non-default MockModelProvider).
+    fn deps_with_provider(provider: Arc<dyn ModelProvider>) -> Arc<HandlerDeps> {
+        Arc::new(HandlerDeps::new(provider, &FlowOptions::default()))
+    }
+
+    // N3-3 fault-injection + budget-enforcement integration tests. The mock
+    // provider's `FaultConfig` drives the provider-error path through the
+    // handler's `classify_provider_error` classification; the budget path is
+    // exercised directly through `HandlerDeps::with_budget`.
+
+    #[tokio::test]
+    async fn fault_injection_rate_limited_classifies_transient() {
+        let provider: Arc<dyn ModelProvider> = Arc::new(
+            crate::provider::MockModelProvider::new()
+                .with_fault(crate::provider::FaultConfig::rate_limited()),
+        );
+        let handler = ReferenceHandler::new(task_type::SUMMARIZE, deps_with_provider(provider));
+        let task = external_task(task_type::SUMMARIZE, &[("documents", "doc-a;doc-b")]);
+        let result = handler.handle(task, dead_ctx("task-x")).await;
+        match result {
+            TaskResult::Fail {
+                error, category, ..
+            } => {
+                assert!(error.contains("rate_limited"), "{error}");
+                assert_eq!(category, Some(RetryCategory::Transient));
+            }
+            TaskResult::Complete { .. } => panic!("rate-limited fault must fail"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fault_injection_provider_error_classifies_transient() {
+        let provider: Arc<dyn ModelProvider> = Arc::new(
+            crate::provider::MockModelProvider::new()
+                .with_fault(crate::provider::FaultConfig::provider_error()),
+        );
+        let handler = ReferenceHandler::new(task_type::SUMMARIZE, deps_with_provider(provider));
+        let task = external_task(task_type::SUMMARIZE, &[("documents", "doc-a;doc-b")]);
+        let result = handler.handle(task, dead_ctx("task-x")).await;
+        match result {
+            TaskResult::Fail {
+                error, category, ..
+            } => {
+                assert!(error.contains("provider_error"), "{error}");
+                assert_eq!(category, Some(RetryCategory::Transient));
+            }
+            TaskResult::Complete { .. } => panic!("provider-error fault must fail"),
+        }
+    }
+
+    #[tokio::test]
+    async fn budget_exceeded_blocks_call_with_permanent_failure() {
+        // max_attempts(0): the tracker increments to 1, then `1 >= 0`
+        // exceeds the attempts limit before the provider is ever called.
+        let provider: Arc<dyn ModelProvider> = Arc::new(crate::provider::MockModelProvider::new());
+        let deps = HandlerDeps::new(provider, &FlowOptions::default())
+            .with_budget(Budget::new().max_attempts(0));
+        let handler = ReferenceHandler::new(task_type::SUMMARIZE, Arc::new(deps));
+        let task = external_task(task_type::SUMMARIZE, &[("documents", "doc-a;doc-b")]);
+        let result = handler.handle(task, dead_ctx("task-x")).await;
+        match result {
+            TaskResult::Fail {
+                error, category, ..
+            } => {
+                assert!(error.contains("budget_exceeded"), "{error}");
+                assert_eq!(category, Some(RetryCategory::Permanent));
+            }
+            TaskResult::Complete { .. } => panic!("exhausted budget must fail"),
         }
     }
 }
