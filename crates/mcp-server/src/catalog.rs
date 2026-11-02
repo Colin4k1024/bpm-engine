@@ -218,8 +218,9 @@ mod tests {
         // approval endpoints took it to 40; E5-3's audit endpoint to 41;
         // N1-4's retire + definition-audit endpoints took it to 43;
         // N2-3's message/signal delivery endpoints took it to 47;
-        // N4-2's compensation executor endpoints took it to 51).
-        assert_eq!(catalog.tools.len(), 51);
+        // N4-2's compensation executor endpoints took it to 51;
+        // N6-2's unified causal timeline endpoint took it to 52).
+        assert_eq!(catalog.tools.len(), 52);
     }
 
     #[test]

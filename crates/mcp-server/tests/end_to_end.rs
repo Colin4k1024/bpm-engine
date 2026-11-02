@@ -463,9 +463,9 @@ async fn full_workflow_through_mcp() {
     // capabilities: the catalog itself is reachable as a tool.
     let body = tool_ok(&mcp, next_id(), "get_capabilities", json!({})).await;
     assert_eq!(body["catalog_version"], json!("1"), "{body}");
-    // 51 = 35 (E4-1) + 5 (E5-2) + 1 (E5-3) + 2 (N1-4 retire + def audit)
-    //    + 4 (N2-3 delivery) + 4 (N4-2 compensation executor).
-    assert_eq!(body["tools"].as_array().map(Vec::len), Some(51));
+    // 52 = 35 (E4-1) + 5 (E5-2) + 1 (E5-3) + 2 (N1-4 retire + def audit)
+    //    + 4 (N2-3 delivery) + 4 (N4-2 compensation executor) + 1 (N6-2 timeline).
+    assert_eq!(body["tools"].as_array().map(Vec::len), Some(52));
 
     engine.stop().await;
 }

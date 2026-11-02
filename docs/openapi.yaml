@@ -418,6 +418,50 @@ paths:
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /api/v1/process-instances/{id}/timeline:
+    get:
+      operationId: getInstanceTimeline
+      summary: Unified causal timeline (N6-2)
+      description: |
+        The UNIFIED causal timeline of one process instance (N6-2): history
+        events, approval records, compensation records, and pending
+        deliveries joined into one chronological, redacted view. Read-only
+        aggregation over the existing instance, history, approval,
+        compensation, and event-inbox stores — no new stores, no new writes.
+
+        - **entries**: chronologically sorted records, each tagged with a
+          `category` (`history` | `approval` | `compensation` |
+          `delivery`), an `event_type`, a `timestamp`, a variable-free
+          `summary`, and a redacted, structured `detail`.
+        - **definition_id** / **definition_version**: the instance's
+          versioned `process_def_id` (`key:version`) and the parsed version.
+
+        Sensitive-by-default (ADR-011 §7): the `summary` carries only the
+        event type and actor (when present) — NEVER variable values,
+        credentials, or correlation predicates. The `detail` strips variable
+        maps (`variables`, `initial_variables`, `payload`, `correlation`)
+        and nested structures, so no variable value can leak; history
+        payloads were already redacted at write time by the E2-3 policy
+        (`__truncated:` markers, `__encrypted:` ciphertext). Read operation
+        (all roles); cross-tenant access is rejected as 404 like every
+        instance-scoped read.
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+        - $ref: "#/components/parameters/TenantId"
+      responses:
+        "200":
+          description: The unified causal timeline of the instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TimelineResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
   /api/v1/process-instances/{id}/approvals:
     get:
       operationId: listInstanceApprovals
@@ -2195,6 +2239,63 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/HistoryEventView"
+
+    TimelineResponse:
+      type: object
+      required: [instance_id, definition_id, definition_version, entries]
+      description: |
+        The unified causal timeline of one process instance (N6-2): history
+        events, approval records, compensation records, and pending
+        deliveries joined into one chronological, redacted view. Sensitive
+        by construction (ADR-011 §7) — no variable values, credentials, or
+        correlation predicates are surfaced.
+      properties:
+        instance_id:
+          type: string
+        definition_id:
+          type: string
+          description: The instance's versioned `process_def_id` (`key:version`).
+        definition_version:
+          type: integer
+          description: Version number parsed from the definition id (`1` when none).
+        entries:
+          type: array
+          description: Entries in chronological order (0-based `sequence`).
+          items:
+            $ref: "#/components/schemas/TimelineEntry"
+
+    TimelineEntry:
+      type: object
+      required: [sequence, category, event_type, timestamp, summary]
+      description: |
+        One entry of the unified causal timeline (N6-2): a redacted,
+        cross-source record. The `summary` is variable-free; the `detail`
+        strips variable maps and nested structures (secrecy by construction).
+      properties:
+        sequence:
+          type: integer
+          description: 0-based position in the unified chronological timeline.
+        category:
+          type: string
+          enum: [history, step, approval, compensation, delivery]
+          description: Source store of the entry.
+        event_type:
+          type: string
+          description: |
+            Event/record type, e.g. `ProcessStarted`, `approval_decided`,
+            `compensation_pending`, `delivery_pending`.
+        timestamp:
+          type: string
+          description: Unix-seconds timestamp (the stores' native form).
+        summary:
+          type: string
+          description: |
+            Redacted one-line summary — event type and actor when present;
+            NEVER variable values or credential data.
+        detail:
+          description: |
+            Structured, redacted detail (variable maps and nested structures
+            stripped); absent when the record carries no extra metadata.
 
     StepsResponse:
       type: object

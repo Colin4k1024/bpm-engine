@@ -3860,6 +3860,68 @@
       }
     },
     {
+      "name": "get_instance_timeline",
+      "operation": "GET /api/v1/process-instances/{id}/timeline",
+      "summary": "Unified causal timeline (N6-2)",
+      "description": "The UNIFIED causal timeline of one process instance (N6-2): history\nevents, approval records, compensation records, and pending\ndeliveries joined into one chronological, redacted view. Read-only\naggregation over the existing instance, history, approval,\ncompensation, and event-inbox stores — no new stores, no new writes.\n\n- **entries**: chronologically sorted records, each tagged with a\n  `category` (`history` | `approval` | `compensation` |\n  `delivery`), an `event_type`, a `timestamp`, a variable-free\n  `summary`, and a redacted, structured `detail`.\n- **definition_id** / **definition_version**: the instance's\n  versioned `process_def_id` (`key:version`) and the parsed version.\n\nSensitive-by-default (ADR-011 §7): the `summary` carries only the\nevent type and actor (when present) — NEVER variable values,\ncredentials, or correlation predicates. The `detail` strips variable\nmaps (`variables`, `initial_variables`, `payload`, `correlation`)\nand nested structures, so no variable value can leak; history\npayloads were already redacted at write time by the E2-3 policy\n(`__truncated:` markers, `__encrypted:` ciphertext). Read operation\n(all roles); cross-tenant access is rejected as 404 like every\ninstance-scoped read.",
+      "classification": "read_only",
+      "side_effects": "none",
+      "auth_required": true,
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Process instance id."
+        },
+        {
+          "name": "X-Tenant-Id",
+          "in": "header",
+          "required": false,
+          "schema": {
+            "type": "string"
+          },
+          "description": "Tenant scope for the request (optional). DEPRECATED for\nJWT-authenticated requests (E5-1): the tenant comes from the\nverified `tenant` claim, an absent or agreeing header is accepted,\nand a CONFLICTING header is rejected with 403 `forbidden`. In open\nand API-key modes the header keeps its pre-E5-1 meaning: untrusted\nclient input that scopes listings and instance starts (dev-mode\naffordance)."
+        }
+      ],
+      "responses": {
+        "success": {
+          "status": 200,
+          "description": "The unified causal timeline of the instance.",
+          "schema": "TimelineResponse"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "code": "invalid_token"
+          },
+          {
+            "status": 401,
+            "code": "unauthorized"
+          },
+          {
+            "status": 403,
+            "code": "forbidden"
+          },
+          {
+            "status": 404,
+            "code": "not_found"
+          },
+          {
+            "status": 429,
+            "code": "rate_limited"
+          },
+          {
+            "status": 500,
+            "code": "internal"
+          }
+        ]
+      }
+    },
+    {
       "name": "get_instance_trace",
       "operation": "GET /api/v1/process-instances/{id}/trace",
       "summary": "Aggregated execution trace",
