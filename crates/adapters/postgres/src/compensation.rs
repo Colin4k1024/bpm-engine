@@ -72,4 +72,22 @@ impl CompensationRecordRepo for PostgresCompensationRepo {
             })
             .collect()
     }
+
+    async fn update_status(&self, id: &str, status: &str) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        let affected = client
+            .execute(
+                r#"
+                UPDATE compensation_record
+                SET status = $2
+                WHERE id = $1
+                "#,
+                &[&id, &status],
+            )
+            .await?;
+        if affected == 0 {
+            anyhow::bail!("compensation record not found: {}", id);
+        }
+        Ok(())
+    }
 }

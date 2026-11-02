@@ -19,9 +19,9 @@ use bpm_engine_core::{
 use bpm_engine_runtime::EngineContext;
 use bpm_engine_storage::{
     ApprovalDecideOutcome, ApprovalError, ApprovalStore, CompensationRecordRepo,
-    DefinitionAuditOperation, DefinitionAuditRecord, DeliveryStatus, DeliveryType,
-    ExternalTaskStore, HistoryRepo, ParallelJoinRepo, PendingDelivery, ProcessDefinitionStore,
-    ProcessInstanceStore, TimerStore, TokenStore,
+    CompensationRecordRow, DefinitionAuditOperation, DefinitionAuditRecord, DeliveryStatus,
+    DeliveryType, ExternalTaskStore, HistoryRepo, ParallelJoinRepo, PendingDelivery,
+    ProcessDefinitionStore, ProcessInstanceStore, TimerStore, TokenStore,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
@@ -5691,6 +5691,288 @@ pub async fn list_pending_deliveries(
     Ok(Json(deliveries))
 }
 
+// --- Compensation executor (N4-2, ADR-012) -----------------------------------
+
+/// Summary returned by `POST /process-instances/:id/compensation/trigger`.
+#[derive(Serialize)]
+pub struct CompensationTriggerResponse {
+    /// Number of compensation records actually triggered (moved to Running).
+    pub triggered: u32,
+    /// The triggered records (status now "Running"), in compensation order
+    /// (highest `order` first — last completed is compensated first).
+    pub records: Vec<CompensationRecordRow>,
+}
+
+/// POST /api/v1/process-instances/:id/compensation/trigger — trigger
+/// compensation for an instance (N4-2, ADR-012).
+///
+/// Operator action: materializes every Pending compensation record as an
+/// external task (task_type = `handler_ref`, carrying
+/// `__compensation_record_id`) and flips each record to Running. Records are
+/// processed in reverse completion order (highest `order` first — last
+/// completed is compensated first, the saga rollback invariant). An instance
+/// with no Pending records answers 200 with `triggered: 0`.
+pub async fn trigger_compensation(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    Path(id): Path<String>,
+) -> Result<Json<CompensationTriggerResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let inst = state
+        .storage
+        .process_store
+        .load(&id)
+        .await
+        .map_err(internal_error_tuple)?;
+    let Some(inst) = inst else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found(format!(
+                "process instance not found: {}",
+                id
+            ))),
+        ));
+    };
+    if tenant_denied(&identity, &inst) {
+        return Err(tenant_gate_not_found(&id));
+    }
+    // Reverse completion order: highest order first (last completed is
+    // compensated first — the saga rollback invariant).
+    let mut records = state.storage.compensation_repo.list_by_instance(&id).await;
+    records.retain(|r| r.status == "Pending");
+    records.sort_by_key(|r| std::cmp::Reverse(r.order));
+    let mut triggered_records = Vec::with_capacity(records.len());
+    for record in &records {
+        let mut vars = HashMap::new();
+        vars.insert("__compensation_record_id".to_string(), record.id.clone());
+        ExternalTaskStore::create(
+            state.storage.external_task_store.as_ref(),
+            // Compensation-driven: no source token.
+            "",
+            &id,
+            &record.handler_ref,
+            3,
+            60,
+            vars,
+        )
+        .await
+        .map_err(internal_error_tuple)?;
+        state
+            .storage
+            .compensation_repo
+            .update_status(&record.id, "Running")
+            .await
+            .map_err(internal_error_tuple)?;
+        let mut view = record.clone();
+        view.status = "Running".to_string();
+        triggered_records.push(view);
+    }
+    let triggered = triggered_records.len() as u32;
+    let occurred_at = occurred_at_now();
+    let _ = HistoryRepo::append(
+        state.storage.history_repo.as_ref(),
+        &id,
+        "CompensationTriggered",
+        &serde_json::json!({
+            "instance_id": id,
+            "actor": identity.actor(),
+            "triggered": triggered,
+        }),
+        &occurred_at,
+    )
+    .await;
+    info!(
+        instance_id = %id,
+        actor = identity.actor(),
+        triggered = triggered,
+        "compensation triggered"
+    );
+    Ok(Json(CompensationTriggerResponse {
+        triggered,
+        records: triggered_records,
+    }))
+}
+
+/// GET /api/v1/process-instances/:id/compensation — list compensation records
+/// for an instance (N4-2). A read — every authenticated role.
+pub async fn list_compensation(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<CompensationRecordRow>>, (StatusCode, Json<ErrorResponse>)> {
+    let inst = state
+        .storage
+        .process_store
+        .load(&id)
+        .await
+        .map_err(internal_error_tuple)?;
+    let Some(inst) = inst else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found(format!(
+                "process instance not found: {}",
+                id
+            ))),
+        ));
+    };
+    if tenant_denied(&identity, &inst) {
+        return Err(tenant_gate_not_found(&id));
+    }
+    let records = state.storage.compensation_repo.list_by_instance(&id).await;
+    Ok(Json(records))
+}
+
+/// POST /api/v1/process-instances/:id/compensation/retry/:record_id — retry a
+/// Failed compensation record (N4-2, ADR-012).
+///
+/// Operator action: flips a Failed record back to Pending so a subsequent
+/// trigger can re-materialize its external task. The optional `reason` query
+/// parameter is recorded in history for audit.
+pub async fn retry_compensation(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    Path((id, record_id)): Path<(String, String)>,
+    Query(params): Query<DefinitionReasonParam>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let inst = state
+        .storage
+        .process_store
+        .load(&id)
+        .await
+        .map_err(internal_error_tuple)?;
+    let Some(inst) = inst else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found(format!(
+                "process instance not found: {}",
+                id
+            ))),
+        ));
+    };
+    if tenant_denied(&identity, &inst) {
+        return Err(tenant_gate_not_found(&id));
+    }
+    // Verify the record belongs to this instance and is currently Failed.
+    let records = state.storage.compensation_repo.list_by_instance(&id).await;
+    let record = records.iter().find(|r| r.id == record_id);
+    let Some(record) = record else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found(format!(
+                "compensation record not found: {}",
+                record_id
+            ))),
+        ));
+    };
+    if record.status != "Failed" {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::with_code(
+                format!(
+                    "compensation record {} is {} and cannot be retried \
+                     (only Failed records can be retried)",
+                    record_id, record.status
+                ),
+                error_codes::INVALID_REQUEST,
+            )),
+        ));
+    }
+    state
+        .storage
+        .compensation_repo
+        .update_status(&record_id, "Pending")
+        .await
+        .map_err(internal_error_tuple)?;
+    let occurred_at = occurred_at_now();
+    let _ = HistoryRepo::append(
+        state.storage.history_repo.as_ref(),
+        &id,
+        "CompensationRetried",
+        &serde_json::json!({
+            "instance_id": id,
+            "record_id": record_id,
+            "actor": identity.actor(),
+            "reason": params.reason,
+        }),
+        &occurred_at,
+    )
+    .await;
+    info!(
+        instance_id = %id,
+        record_id = %record_id,
+        actor = identity.actor(),
+        "compensation record retried"
+    );
+    Ok(StatusCode::OK)
+}
+
+/// POST /api/v1/process-instances/:id/compensation/skip/:record_id — skip a
+/// compensation record (N4-2, ADR-012).
+///
+/// Operator action: marks a record as Skipped (terminal in the ADR-012 state
+/// machine) so it is excluded from future triggers. Used when a compensation
+/// handler is unavailable or the side effect is deemed unnecessary.
+pub async fn skip_compensation(
+    State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
+    Path((id, record_id)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let inst = state
+        .storage
+        .process_store
+        .load(&id)
+        .await
+        .map_err(internal_error_tuple)?;
+    let Some(inst) = inst else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found(format!(
+                "process instance not found: {}",
+                id
+            ))),
+        ));
+    };
+    if tenant_denied(&identity, &inst) {
+        return Err(tenant_gate_not_found(&id));
+    }
+    // Verify the record belongs to this instance.
+    let records = state.storage.compensation_repo.list_by_instance(&id).await;
+    if !records.iter().any(|r| r.id == record_id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::not_found(format!(
+                "compensation record not found: {}",
+                record_id
+            ))),
+        ));
+    }
+    state
+        .storage
+        .compensation_repo
+        .update_status(&record_id, "Skipped")
+        .await
+        .map_err(internal_error_tuple)?;
+    let occurred_at = occurred_at_now();
+    let _ = HistoryRepo::append(
+        state.storage.history_repo.as_ref(),
+        &id,
+        "CompensationSkipped",
+        &serde_json::json!({
+            "instance_id": id,
+            "record_id": record_id,
+            "actor": identity.actor(),
+        }),
+        &occurred_at,
+    )
+    .await;
+    info!(
+        instance_id = %id,
+        record_id = %record_id,
+        actor = identity.actor(),
+        "compensation record skipped"
+    );
+    Ok(StatusCode::OK)
+}
+
 // --- Route registration registry (E2-4 review fix) ---------------------------
 //
 // The OpenAPI route-consistency contract must compare the spec against
@@ -6008,6 +6290,30 @@ fn api_v1_router(
         GET,
         "/process-instances/:id/deliveries",
         list_pending_deliveries
+    );
+    let router = api_route!(
+        router,
+        POST,
+        "/process-instances/:id/compensation/trigger",
+        trigger_compensation
+    );
+    let router = api_route!(
+        router,
+        GET,
+        "/process-instances/:id/compensation",
+        list_compensation
+    );
+    let router = api_route!(
+        router,
+        POST,
+        "/process-instances/:id/compensation/retry/:record_id",
+        retry_compensation
+    );
+    let router = api_route!(
+        router,
+        POST,
+        "/process-instances/:id/compensation/skip/:record_id",
+        skip_compensation
     );
     router
         .layer(axum_mw::from_fn(middleware::authenticate))

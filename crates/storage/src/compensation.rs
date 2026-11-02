@@ -28,7 +28,7 @@
 use async_trait::async_trait;
 
 /// A compensation record row from the storage layer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct CompensationRecordRow {
     /// Unique record identifier.
     pub id: String,
@@ -40,7 +40,8 @@ pub struct CompensationRecordRow {
     pub handler_ref: String,
     /// Execution order (higher = completed later = compensated first).
     pub order: u32,
-    /// Current status: "Pending", "Completed", or "Failed".
+    /// Current status: "Pending", "Running", "Completed", "Failed", or "Skipped"
+    /// (ADR-012 compensation state machine).
     pub status: String,
     /// ISO 8601 creation timestamp.
     pub created_at: String,
@@ -57,4 +58,7 @@ pub trait CompensationRecordRepo: Send + Sync {
 
     /// List compensation records for an instance, sorted by `order` ascending.
     async fn list_by_instance(&self, instance_id: &str) -> Vec<CompensationRecordRow>;
+
+    /// Update the status of a compensation record (e.g. Pending→Running→Completed).
+    async fn update_status(&self, id: &str, status: &str) -> anyhow::Result<()>;
 }

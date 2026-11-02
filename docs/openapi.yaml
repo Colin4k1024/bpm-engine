@@ -1442,6 +1442,113 @@ paths:
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/InternalError" }
 
+  /api/v1/process-instances/{id}/compensation/trigger:
+    post:
+      operationId: triggerCompensation
+      summary: Trigger compensation for a process instance
+      description: |
+        Operator action (N4-2, ADR-012): materializes every Pending
+        compensation record of the instance as an external task
+        (`task_type` = the record's `handler_ref`, carrying a
+        `__compensation_record_id` variable) and flips each record to
+        Running. Records are processed in reverse completion order (highest
+        `order` first — last completed is compensated first, the saga
+        rollback invariant). An instance with no Pending records answers 200
+        with `triggered: 0`. Records a `CompensationTriggered` history event.
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+      responses:
+        "200":
+          description: Compensation trigger summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompensationTriggerResponse"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-instances/{id}/compensation:
+    get:
+      operationId: listCompensation
+      summary: List compensation records for an instance
+      description: |
+        Returns every compensation record of the instance, sorted by `order`
+        ascending (N4-2). A read — every authenticated role may list
+        compensation records.
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+        - $ref: "#/components/parameters/TenantId"
+      responses:
+        "200":
+          description: Compensation records for the instance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompensationRecordList"
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-instances/{id}/compensation/retry/{record_id}:
+    post:
+      operationId: retryCompensation
+      summary: Retry a Failed compensation record
+      description: |
+        Operator action (N4-2, ADR-012): flips a Failed compensation record
+        back to Pending so a subsequent trigger can re-materialize its
+        external task. Only records currently in the Failed state can be
+        retried (a non-Failed record answers 400 `invalid_request`). The
+        optional `reason` query parameter is recorded in history for audit.
+        Records a `CompensationRetried` history event.
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+        - $ref: "#/components/parameters/CompensationRecordId"
+        - name: reason
+          in: query
+          required: false
+          schema: { type: string }
+          description: Operator-supplied reason, recorded in the audit history.
+      responses:
+        "200":
+          description: Record flipped back to Pending.
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /api/v1/process-instances/{id}/compensation/skip/{record_id}:
+    post:
+      operationId: skipCompensation
+      summary: Skip a compensation record
+      description: |
+        Operator action (N4-2, ADR-012): marks a compensation record as
+        Skipped (terminal in the ADR-012 state machine) so it is excluded
+        from future triggers. Used when a compensation handler is unavailable
+        or the side effect is deemed unnecessary. Records a
+        `CompensationSkipped` history event.
+      tags: [ProcessInstances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceId"
+        - $ref: "#/components/parameters/CompensationRecordId"
+      responses:
+        "200":
+          description: Record marked as Skipped.
+        "404": { $ref: "#/components/responses/NotFound" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
 components:
   securitySchemes:
     BearerAuth:
@@ -1556,6 +1663,12 @@ components:
       required: true
       schema: { type: string }
       description: Dead letter entry id.
+    CompensationRecordId:
+      name: record_id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Compensation record id.
 
   responses:
     BadRequest:
@@ -3263,6 +3376,51 @@ components:
       type: array
       items:
         $ref: "#/components/schemas/PendingDelivery"
+
+    # --- Compensation executor (N4-2, ADR-012) --------------------------------
+
+    CompensationRecordView:
+      type: object
+      description: |
+        A compensation record row (ADR-012 state machine). `status` is one
+        of `Pending`, `Running`, `Completed`, `Failed`, or `Skipped`.
+      required:
+        - id
+        - instance_id
+        - node_id
+        - handler_ref
+        - order
+        - status
+        - created_at
+      properties:
+        id: { type: string }
+        instance_id: { type: string }
+        node_id: { type: string }
+        handler_ref: { type: string }
+        order: { type: integer }
+        status: { type: string }
+        created_at: { type: string }
+
+    CompensationRecordList:
+      type: array
+      items:
+        $ref: "#/components/schemas/CompensationRecordView"
+
+    CompensationTriggerResponse:
+      type: object
+      description: |
+        Summary of a compensation trigger (N4-2): how many records were
+        moved to Running, plus the triggered records in compensation order
+        (highest `order` first).
+      required:
+        - triggered
+        - records
+      properties:
+        triggered: { type: integer }
+        records:
+          type: array
+          items:
+            $ref: "#/components/schemas/CompensationRecordView"
 
     # --- Agent tool catalog (E4-1) -----------------------------------------
     #

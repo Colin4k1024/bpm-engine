@@ -218,6 +218,26 @@ const SIDE_EFFECT_NOTES: &[(&str, &str)] = &[
          Idempotent by delivery_id or the derived dedup hash.",
     ),
     (
+        "triggerCompensation",
+        "Materializes every Pending compensation record of the instance as an \
+         external task (task_type = handler_ref, carrying \
+         __compensation_record_id) and flips each record to Running, in \
+         reverse completion order (highest order first). Records a \
+         CompensationTriggered history event.",
+    ),
+    (
+        "retryCompensation",
+        "Flips a Failed compensation record back to Pending so a subsequent \
+         trigger can re-materialize its external task; records a \
+         CompensationRetried history event with the actor and optional reason.",
+    ),
+    (
+        "skipCompensation",
+        "Marks a compensation record as Skipped (terminal in the ADR-012 \
+         state machine) so it is excluded from future triggers; records a \
+         CompensationSkipped history event.",
+    ),
+    (
         "createReplaySession",
         "Ephemeral only: snapshots the instance history into an in-memory \
          session that expires on inactivity; nothing is persisted and no \

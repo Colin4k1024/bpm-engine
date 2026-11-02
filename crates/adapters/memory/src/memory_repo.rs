@@ -457,6 +457,16 @@ impl CompensationRecordRepo for MemoryRepo {
         out.sort_by_key(|r| r.order);
         out
     }
+
+    async fn update_status(&self, id: &str, status: &str) -> anyhow::Result<()> {
+        let mut guard = self.compensation.write().unwrap();
+        let record = guard
+            .iter_mut()
+            .find(|r| r.id == id)
+            .ok_or_else(|| anyhow::anyhow!("compensation record not found: {}", id))?;
+        record.status = status.to_string();
+        Ok(())
+    }
 }
 
 #[async_trait]
