@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "process": { "id": "production-worker:1", "name": "Production AI Worker Flow (N3-4 template)" },
+  "nodes": [
+    { "id": "start", "type": "start" },
+    {
+      "id": "retrieve",
+      "name": "Retrieve input materials",
+      "type": "serviceTask",
+      "task_type": "prod-retrieve",
+      "retries": 3,
+      "timeout_secs": 30
+    },
+    {
+      "id": "infer",
+      "name": "Model inference with structured output validation",
+      "type": "serviceTask",
+      "task_type": "prod-infer",
+      "retries": 3,
+      "timeout_secs": 60
+    },
+    { "id": "gateway", "type": "exclusiveGateway" },
+    {
+      "id": "act",
+      "name": "Side-effect tool behind approval gate (budget-checked)",
+      "type": "serviceTask",
+      "task_type": "prod-act",
+      "retries": 2,
+      "timeout_secs": 45
+    },
+    { "id": "end-done", "name": "Completed", "type": "end" },
+    { "id": "end-rejected", "name": "Rejected", "type": "end" }
+  ],
+  "edges": [
+    { "source": "start", "target": "retrieve" },
+    { "source": "retrieve", "target": "infer" },
+    { "source": "infer", "target": "gateway" },
+    {
+      "source": "gateway",
+      "target": "act",
+      "condition": { "kind": "variableEq", "variable": "verdict", "value": "approved" }
+    },
+    { "source": "gateway", "target": "end-rejected", "default": true },
+    { "source": "act", "target": "end-done" }
+  ]
+}

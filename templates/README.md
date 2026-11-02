@@ -6,8 +6,9 @@ Copyable starting points for the three things new users build first: a
 
 | Template | What it is | Start at |
 |---|---|---|
-| [`flows/`](flows/README.md) | Machine-readable DSL v1 flow documents (basic gateway, AI approval, timer wait), compiled by a workspace test | `flows/README.md` |
+| [`flows/`](flows/README.md) | Machine-readable DSL v1 flow documents (basic gateway, AI approval, timer wait, production worker), compiled by a workspace test | `flows/README.md` |
 | [`ai-worker/`](ai-worker/README.md) | A standalone, compiling worker crate: Worker SDK poll loop + E3-3 tool security boundary + E3-1 AI task envelope | `ai-worker/README.md` |
+| [`production-worker-README.md`](production-worker-README.md) | N3-4 production template: ties approval + structured output + tool allowlist + budget + idempotency + artifacts into one flow | `production-worker-README.md` |
 | [`mcp-config.json`](mcp-config.json) | MCP client configuration for the E4-2 server (`bpm-engine-mcp-server`) | field reference below |
 
 Companion guides: [15-minute quickstart](../docs/quickstart.md),
