@@ -47,16 +47,18 @@ pub struct DatabaseConfig {
     pub migrate_on_start: bool,
 }
 
-/// Authentication configuration (E5-1).
+/// Authentication configuration (E5-1, N5-2/ADR-013).
 ///
-/// The two credentials define three runtime modes (see `docs/rbac.md`):
+/// The credentials define three runtime modes (see `docs/rbac.md`):
 ///
-/// - **JWT mode** — `jwt_secret` set (env `BPM_AUTH__JWT_SECRET`, synced to
-///   `BPM_JWT_SECRET`): `/api/v1` requests must carry
-///   `Authorization: Bearer <jwt>` (HS256, claims `{sub, tenant, role, exp}`);
-///   identity, tenant scope, and role-based permissions are derived from the
-///   VERIFIED claims. The client `X-Tenant-Id` header is deprecated in this
-///   mode (a header conflicting with the claim is rejected with 403).
+/// - **JWT mode** — at least one signing secret is set (`jwt_secret` and/or
+///   `jwt_secrets`; env `BPM_AUTH__JWT_SECRET` / `BPM_AUTH__JWT_SECRETS`,
+///   synced to `BPM_JWT_SECRET` / `BPM_JWT_SECRETS`): `/api/v1` requests
+///   must carry `Authorization: Bearer <jwt>` (HS256, claims
+///   `{sub, tenant, role, exp [, iat, iss, aud]}`); identity, tenant scope,
+///   and role-based permissions are derived from the VERIFIED claims. The
+///   client `X-Tenant-Id` header is deprecated in this mode (a header
+///   conflicting with the claim is rejected with 403).
 /// - **API-key mode** — `api_key` set (env `BPM_AUTH__API_KEY`, synced to
 ///   `BPM_API_KEY`): the legacy admin/bootstrap credential with FULL access
 ///   (no role checks); `X-Tenant-Id` is honored as untrusted input. When
@@ -64,15 +66,39 @@ pub struct DatabaseConfig {
 ///   the API key is the fallback.
 /// - **Open mode** — neither set: every request is accepted (PoC) and
 ///   `X-Tenant-Id` remains a dev-mode affordance.
+///
+/// # JWT trust boundary (N5-2, ADR-013)
+///
+/// - `jwt_issuer` / `jwt_audience` — when set, the token's `iss` / `aud`
+///   claim MUST match (else 401 `invalid_token`). Unset = not validated
+///   (backward compatible).
+/// - `jwt_secrets` — comma-separated accepted secrets for key rotation.
+///   Signature verification tries each (plus `jwt_secret` when also set);
+///   any match → valid. Rotation: add the new secret, mint new tokens with
+///   it, remove the old one after the transition window.
+/// - `jwt_secret` — the single-secret shorthand (equivalent to a one-element
+///   `jwt_secrets`). When both are set, the single secret is appended to the
+///   rotation list (de-duplicated).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
-    /// HS256 secret for JWT signing/verification (E5-1). Empty = JWT auth
-    /// disabled.
+    /// HS256 secret for JWT signing/verification (E5-1). Empty = no single
+    /// secret. Combined with `jwt_secrets` for rotation (N5-2).
     pub jwt_secret: String,
     /// Legacy admin API key (`X-API-Key`). Empty = the API-key layer is
     /// disabled.
     pub api_key: String,
+    /// Expected JWT `iss` claim (N5-2, ADR-013). Empty = `iss` not validated.
+    /// Env `BPM_AUTH__JWT_ISSUER` (synced to `BPM_JWT_ISSUER`).
+    pub jwt_issuer: String,
+    /// Expected JWT `aud` claim (N5-2, ADR-013). Empty = `aud` not validated.
+    /// Env `BPM_AUTH__JWT_AUDIENCE` (synced to `BPM_JWT_AUDIENCE`).
+    pub jwt_audience: String,
+    /// Comma-separated accepted JWT signing secrets for key rotation (N5-2,
+    /// ADR-013). Empty = no rotation list. Env `BPM_AUTH__JWT_SECRETS`
+    /// (synced to `BPM_JWT_SECRETS`). `jwt_secret` (when also set) is
+    /// appended to this list, de-duplicated.
+    pub jwt_secrets: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,6 +329,9 @@ impl BpmConfig {
             database.migrate_on_start = self.database.migrate_on_start,
             auth.jwt_secret = %mask_secret(&self.auth.jwt_secret),
             auth.api_key = %mask_secret(&self.auth.api_key),
+            auth.jwt_issuer = %self.auth.jwt_issuer,
+            auth.jwt_audience = %self.auth.jwt_audience,
+            auth.jwt_secrets = %mask_secret(&self.auth.jwt_secrets),
             engine.timer_poll_interval_ms = self.engine.timer_poll_interval_ms,
             engine.timer_batch_size = self.engine.timer_batch_size,
             engine.variable_max_bytes = self.engine.variable_max_bytes,
@@ -350,6 +379,10 @@ mod tests {
         assert_eq!(cfg.rate_limit.requests_per_minute, 100);
         assert_eq!(cfg.auth.jwt_secret, String::new());
         assert_eq!(cfg.auth.api_key, String::new());
+        // N5-2: iss/aud/secrets default empty (not configured → not validated).
+        assert_eq!(cfg.auth.jwt_issuer, String::new());
+        assert_eq!(cfg.auth.jwt_audience, String::new());
+        assert_eq!(cfg.auth.jwt_secrets, String::new());
         assert!(
             cfg.engine.approval_required_task_types.is_empty(),
             "no task types require approval by default (pre-E5-2 behavior)"
@@ -564,5 +597,24 @@ migrate_on_start = true
 "#;
         let cfg: BpmConfig = toml::from_str(toml_str).unwrap();
         assert!(cfg.database.migrate_on_start);
+    }
+
+    #[test]
+    fn auth_jwt_iss_aud_secrets_toml_override() {
+        // N5-2 (ADR-013): the new JWT trust-boundary fields load from TOML.
+        let toml_str = r#"
+[auth]
+jwt_secret = "primary"
+jwt_issuer = "bpm-engine"
+jwt_audience = "bpm-api"
+jwt_secrets = "primary,secondary"
+"#;
+        let cfg: BpmConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.auth.jwt_secret, "primary");
+        assert_eq!(cfg.auth.jwt_issuer, "bpm-engine");
+        assert_eq!(cfg.auth.jwt_audience, "bpm-api");
+        assert_eq!(cfg.auth.jwt_secrets, "primary,secondary");
+        // The api_key stays at its default (empty) under a partial [auth].
+        assert_eq!(cfg.auth.api_key, String::new());
     }
 }

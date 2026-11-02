@@ -195,6 +195,7 @@ fn config() -> BpmConfig {
         auth: AuthConfig {
             jwt_secret: TEST_SECRET.to_string(),
             api_key: String::new(),
+            ..Default::default()
         },
         engine: EngineConfig {
             approval_required_task_types: vec!["payment_charge".to_string()],
@@ -251,7 +252,7 @@ fn soon() -> u64 {
 fn bearer(role: &str, tenant: &str, sub: &str) -> String {
     format!(
         "Bearer {}",
-        mint_jwt(TEST_SECRET, sub, tenant, role, soon()).expect("mint token")
+        mint_jwt(TEST_SECRET, sub, tenant, role, soon(), None, None).expect("mint token")
     )
 }
 
@@ -1948,6 +1949,7 @@ mod postgres_mode {
             auth: AuthConfig {
                 jwt_secret: TEST_SECRET.to_string(),
                 api_key: String::new(),
+                ..Default::default()
             },
             engine: EngineConfig {
                 approval_required_task_types: vec!["payment_charge".to_string()],

@@ -97,6 +97,7 @@ fn engine_config() -> BpmConfig {
         auth: AuthConfig {
             jwt_secret: TEST_SECRET.to_string(),
             api_key: TEST_API_KEY.to_string(),
+            ..Default::default()
         },
         rate_limit: RateLimitConfig {
             requests_per_minute: 1_000_000,
@@ -161,7 +162,8 @@ async fn mcp_admin(engine: &TestServer) -> McpServer {
 
 /// An MCP server (full v1 surface) authenticating as a role-scoped JWT.
 async fn mcp_with_role(engine: &TestServer, role: &str, tenant: &str) -> McpServer {
-    let token = mint_jwt(TEST_SECRET, "mcp-e2e", tenant, role, soon()).expect("mint token");
+    let token =
+        mint_jwt(TEST_SECRET, "mcp-e2e", tenant, role, soon(), None, None).expect("mint token");
     let config = McpConfig {
         base_url: engine.base_url.clone(),
         credential: Credential::Bearer(token),

@@ -62,6 +62,7 @@ fn engine_config() -> BpmConfig {
         auth: AuthConfig {
             jwt_secret: "mcp-stdio-secret".to_string(),
             api_key: TEST_API_KEY.to_string(),
+            ..Default::default()
         },
         rate_limit: RateLimitConfig {
             requests_per_minute: 1_000_000,

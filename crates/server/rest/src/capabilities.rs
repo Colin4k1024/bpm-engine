@@ -647,19 +647,22 @@ fn build_catalog(spec: &Value) -> Catalog {
 }
 
 const AUTH_NOTES: &str = "Optional at the protocol level: the runtime mode depends on the server \
-configuration (docs/rbac.md). JWT mode — when auth.jwt_secret / BPM_AUTH__JWT_SECRET is set, \
-/api/v1 requests must carry \"Authorization: Bearer <jwt>\" (HS256, claims {sub: actor, tenant, \
-role, exp}); signature/expiry/claims are verified, failures answer 401 \"invalid_token\", and \
-the verified claims drive tenancy and the roles matrix (403 \"forbidden\"). The tenant comes \
-FROM THE CLAIM — the X-Tenant-Id header is deprecated in this mode and a header conflicting \
-with the claim is rejected with 403 \"forbidden\". API-key mode — X-API-Key (auth.api_key / \
-BPM_API_KEY) is the legacy admin/bootstrap credential with FULL access (no role checks) and \
-X-Tenant-Id honored as untrusted input; a missing or invalid key answers 401 \"unauthorized\". \
-When both are configured, a presented JWT takes precedence (the API key is the fallback when \
-no bearer token is sent). Open mode — with neither configured every request is accepted (PoC) \
-and X-Tenant-Id remains a dev-mode affordance. Tools with auth_required=false (health, \
-readiness, capabilities) sit outside the auth layer entirely. Mint tokens with: cargo run -p \
-bpm-engine-server-rest --example mint_jwt -- --sub <actor> --tenant <tenant> --role <role>.";
+configuration (docs/rbac.md). JWT mode — when auth.jwt_secret / BPM_AUTH__JWT_SECRET (and/or \
+auth.jwt_secrets / BPM_AUTH__JWT_SECRETS for key rotation, N5-2) is set, /api/v1 requests must \
+carry \"Authorization: Bearer <jwt>\" (HS256, claims {sub: actor, tenant, role, exp [, iss, aud]}); \
+signature/expiry/claims are verified, failures answer 401 \"invalid_token\", and the verified \
+claims drive tenancy and the roles matrix (403 \"forbidden\"). When auth.jwt_issuer / \
+auth.jwt_audience are configured (N5-2), the token's iss/aud claim must match (absent or \
+mismatched → 401 \"invalid_token\"). The tenant comes FROM THE CLAIM — the X-Tenant-Id header is \
+deprecated in this mode and a header conflicting with the claim is rejected with 403 \
+\"forbidden\". API-key mode — X-API-Key (auth.api_key / BPM_API_KEY) is the legacy \
+admin/bootstrap credential with FULL access (no role checks) and X-Tenant-Id honored as \
+untrusted input; a missing or invalid key answers 401 \"unauthorized\". When both are \
+configured, a presented JWT takes precedence (the API key is the fallback when no bearer token \
+is sent). Open mode — with neither configured every request is accepted (PoC) and X-Tenant-Id \
+remains a dev-mode affordance. Tools with auth_required=false (health, readiness, capabilities) \
+sit outside the auth layer entirely. Mint tokens with: cargo run -p bpm-engine-server-rest \
+--example mint_jwt -- --sub <actor> --tenant <tenant> --role <role> [--iss <issuer>] [--aud <aud>].";
 
 const ROLES_CONVENTION: &str = "E5-1 role→permission matrix, enforced for JWT-authenticated \
 requests only (the admin API key bypasses role checks; open mode has no credentials to \

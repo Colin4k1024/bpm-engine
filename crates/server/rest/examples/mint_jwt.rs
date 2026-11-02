@@ -2,27 +2,31 @@
 //!
 //! Reads the signing secret from `BPM_JWT_SECRET` (the same value the
 //! server gets from `auth.jwt_secret` / `BPM_AUTH__JWT_SECRET`) and prints
-//! an HS256 token with the claims `{ sub, tenant, role, exp }` to stdout.
+//! an HS256 token with the claims `{ sub, tenant, role, exp [, iss, aud] }`
+//! to stdout.
 //!
 //! Usage:
 //!
 //! ```sh
 //! cargo run -p bpm-engine-server-rest --example mint_jwt -- \
-//!     --sub alice --tenant acme --role operator [--exp 1735689600 | --exp-in 3600]
+//!     --sub alice --tenant acme --role operator [--exp 1735689600 | --exp-in 3600] \
+//!     [--iss bpm-engine] [--aud bpm-api]
 //! ```
 //!
 //! `--exp` is an absolute unix-seconds expiry; `--exp-in` is seconds from
-//! now (default 3600). Roles: deployer | operator | worker | auditor. Send
-//! the printed token as `Authorization: Bearer <token>` on `/api/v1`
-//! requests — see `docs/rbac.md` for the role→permission matrix, the
-//! tenant semantics, and the X-Tenant-Id deprecation.
+//! now (default 3600). Roles: deployer | operator | worker | auditor. `--iss`
+//! / `--aud` (N5-2, ADR-013) set the `iss` / `aud` claims the server validates
+//! when `auth.jwt_issuer` / `auth.jwt_audience` are configured. Send the
+//! printed token as `Authorization: Bearer <token>` on `/api/v1` requests —
+//! see `docs/rbac.md` for the role→permission matrix, the tenant semantics,
+//! and the X-Tenant-Id deprecation.
 
 use bpm_engine_server_rest::middleware::mint_jwt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const USAGE: &str = "Usage:
   mint_jwt --sub <actor> --tenant <tenant> --role <deployer|operator|worker|auditor> \
-[--exp <unix-secs> | --exp-in <secs-from-now>]
+[--exp <unix-secs> | --exp-in <secs-from-now>] [--iss <issuer>] [--aud <audience>]
 
 Options:
   --sub      Actor (subject) claim, e.g. \"alice\"     (required)
@@ -31,6 +35,8 @@ Options:
   --exp      Absolute expiry, unix seconds              (default: none)
   --exp-in   Expiry seconds from now                    (default: 3600; ignored \
 when --exp is given)
+  --iss      Issuer claim (N5-2): must match auth.jwt_issuer when configured
+  --aud      Audience claim (N5-2): must match auth.jwt_audience when configured
   --help     Show this usage
 
 The signing secret comes from BPM_JWT_SECRET (the same value the server reads \
@@ -61,6 +67,8 @@ struct Args {
     role: Option<String>,
     exp: Option<u64>,
     exp_in: Option<u64>,
+    iss: Option<String>,
+    aud: Option<String>,
 }
 
 fn parse_args(raw: &mut std::env::Args) -> Result<Args, String> {
@@ -70,6 +78,8 @@ fn parse_args(raw: &mut std::env::Args) -> Result<Args, String> {
         role: None,
         exp: None,
         exp_in: None,
+        iss: None,
+        aud: None,
     };
     while let Some(flag) = raw.next() {
         match flag.as_str() {
@@ -84,6 +94,8 @@ fn parse_args(raw: &mut std::env::Args) -> Result<Args, String> {
                 let value = next_value(raw, "--exp-in")?;
                 args.exp_in = Some(parse_u64(&value, "--exp-in")?);
             }
+            "--iss" => args.iss = Some(next_value(raw, "--iss")?),
+            "--aud" => args.aud = Some(next_value(raw, "--aud")?),
             "--help" | "-h" => return Err(String::new()),
             other => return Err(format!("unknown argument {other:?} (see --help)")),
         }
@@ -136,7 +148,15 @@ fn main() {
         .exp
         .unwrap_or_else(|| now_secs() + args.exp_in.unwrap_or(3600));
 
-    match mint_jwt(&secret, &sub, &tenant, &role, exp) {
+    match mint_jwt(
+        &secret,
+        &sub,
+        &tenant,
+        &role,
+        exp,
+        args.iss.as_deref(),
+        args.aud.as_deref(),
+    ) {
         Ok(token) => println!("{token}"),
         Err(err) => {
             eprintln!("{err}");

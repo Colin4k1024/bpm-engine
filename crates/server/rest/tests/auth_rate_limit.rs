@@ -35,6 +35,7 @@ fn config(api_key: &str, requests_per_minute: u64) -> BpmConfig {
         auth: AuthConfig {
             jwt_secret: String::new(),
             api_key: api_key.to_string(),
+            ..Default::default()
         },
         rate_limit: RateLimitConfig {
             requests_per_minute,
