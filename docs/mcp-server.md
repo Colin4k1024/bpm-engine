@@ -81,11 +81,63 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
   | BPM_BASE_URL=http://127.0.0.1:3000 cargo run -p bpm-engine-mcp-server
 ```
 
+### HTTP+SSE transport (N5-1)
+
+Besides the default stdio subprocess model, the server speaks the MCP
+**HTTP+SSE transport**: one long-lived SSE stream for server→client
+responses and `POST` for client→server requests. This is the transport
+network-attached MCP clients use (a remote agent, a browser-based client,
+or a gateway that proxies several engines).
+
+Select it with `BPM_MCP_TRANSPORT=http`:
+
+```sh
+# Terminal 1: the engine
+cargo run -p bpm-engine-server-rest
+
+# Terminal 2: the MCP server over HTTP+SSE (loopback, port 9100)
+BPM_BASE_URL=http://127.0.0.1:3000 \
+BPM_MCP_TOKEN=$(cargo run -p bpm-engine-server-rest --example mint_jwt -- \
+    --sub mcp-agent --tenant acme --role operator) \
+BPM_MCP_TRANSPORT=http \
+BPM_MCP_HTTP_BIND=127.0.0.1:9100 \
+cargo run -p bpm-engine-mcp-server
+```
+
+Endpoints (the same JSON-RPC methods as stdio; only the wire differs):
+
+- `GET /sse` — opens the SSE stream. The server mints a session id and
+  emits an `endpoint` event whose data is the POST URL
+  (`/messages?session_id=<id>`), then holds the connection open streaming
+  `message` events. Each client gets its own session.
+- `POST /messages?session_id=<id>` — receives one JSON-RPC message in the
+  body. Requests' replies come back as `message` SSE events on the
+  client's stream; notifications get none (per JSON-RPC). The POST itself
+  answers `202 Accepted` with an empty body — the JSON-RPC reply travels
+  over SSE, not the HTTP response. A missing `session_id` answers `400`;
+  an unknown/expired one answers `404`.
+
+A minimal client flow: open `GET /sse`, read the `endpoint` event to learn
+the POST URL, then `POST` JSON-RPC messages to it and read `message`
+events off the SSE stream. `Ctrl-C` stops the server gracefully. Sessions
+are cleaned up when the SSE connection closes (a disconnect drops the
+session from the registry, so abandoned sessions do not accumulate).
+
+The HTTP transport **adds a listening surface** (unlike stdio, which binds
+nothing). The default bind is loopback (`127.0.0.1:9100`) — safe for local
+agents. To expose it remotely, bind a non-loopback address **only behind a
+reverse proxy** that terminates TLS and enforces auth; the MCP layer itself
+authenticates only to the engine (via `BPM_MCP_TOKEN`), not to its own HTTP
+clients. `notifications/cancelled` is observed and logged but, as with
+stdio, v1 does not abort in-flight REST calls.
+
 ### Environment variables
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `BPM_BASE_URL` | Engine REST base URL | `http://127.0.0.1:3000` |
+| `BPM_MCP_TRANSPORT` | MCP transport: `stdio` \| `http` (HTTP+SSE) | `stdio` |
+| `BPM_MCP_HTTP_BIND` | Bind address for the HTTP+SSE transport (loopback by default) | `127.0.0.1:9100` |
 | `BPM_MCP_TOKEN` | Bearer credential (`Authorization: Bearer …`) — a role-scoped JWT minted with `mint_jwt` (**preferred**) | unset |
 | `BPM_MCP_API_KEY` | Legacy admin API key (`X-API-Key`) — full engine access | unset |
 | `BPM_MCP_TIMEOUT_MS` | Per-call engine REST timeout | `10000` |
@@ -165,8 +217,12 @@ newlines).
 **Not implemented in v1** (documented deviations): the
 per-request-metadata / `server/discover` era of MCP (revision
 2026-07-28+) — a modern-era client falling back to `initialize` works
-unchanged; server-initiated requests, resources, prompts, sampling,
-progress notifications, and HTTP transports.
+unchanged; server-initiated requests, resources, prompts, sampling, and
+progress notifications. Full in-flight-call abort on
+`notifications/cancelled` (the notification is logged, but the bounded
+engine call runs to completion). The newer **streamable HTTP** transport
+(revision 2025-06-18+) is not yet supported — the HTTP+SSE transport above
+covers network-attached clients today.
 
 ## 4. The tool surface (v1, decided)
 
@@ -324,6 +380,15 @@ true stdio pipes — no external MCP client is needed:
   fallback, allowlist resolution, and the cleartext-credential guard's
   fail-closed matrix: http+credential+remote refused, https/loopback
   allowed, `BPM_MCP_ALLOW_INSECURE_HTTP=1` override).
+- `tests/http_transport.rs` (N5-1) — **MCP over HTTP+SSE**: the real axum
+  router (`serve_on`) on an ephemeral listener driven by a real reqwest
+  streaming SSE client. The `endpoint` event names the POST URL with a
+  session id; `POST /messages` answers `202` and the JSON-RPC reply
+  (`initialize`, `tools/list`, `ping`) arrives as a `message` SSE event;
+  the tool list is non-empty and equals the default read-only surface;
+  notifications produce no SSE event (id pinning proves the silence); a
+  POST with no/unknown `session_id` is rejected (400/404). No engine is
+  spawned (the exercised requests never dispatch to the REST client).
 
 ## 8. Security notes
 
@@ -332,8 +397,12 @@ true stdio pipes — no external MCP client is needed:
 - Proxies are disabled on the HTTP client: engine credentials must not
   ride an ambient `HTTP_PROXY`, and loopback calls must not be
   intercepted.
-- The server binds nothing and listens nowhere; it is a subprocess of
-  the MCP client.
+- In stdio mode the server binds nothing and listens nowhere; it is a
+  subprocess of the MCP client. In HTTP mode (`BPM_MCP_TRANSPORT=http`) it
+  binds `BPM_MCP_HTTP_BIND` (loopback by default); expose a non-loopback
+  bind only behind a reverse proxy that terminates TLS and enforces auth —
+  the MCP layer authenticates only to the engine, not to its own HTTP
+  clients.
 - Recommended production setup: JWT mode on the engine
   (`BPM_AUTH__JWT_SECRET`), a dedicated minted token per MCP
   deployment (`--sub mcp --tenant <tenant> --role <role>`), and

@@ -45,6 +45,7 @@ pub mod http;
 pub mod protocol;
 pub mod stdio;
 pub mod tools;
+pub mod transport_http;
 
 pub use catalog::{Catalog, Classification, ToolSpec, AGENT_TOOLS_JSON};
 pub use config::{Credential, McpConfig, DEFAULT_BASE_URL, DEFAULT_REST_TIMEOUT};
