@@ -174,6 +174,15 @@ pub enum ToolError {
     /// rejected downstream by the envelope's tool validation.
     #[error("tool name must not be empty or whitespace-only")]
     InvalidToolName,
+    /// The tool input failed JSON Schema validation (N3-2: default-deny
+    /// parameter overreach). The detail lists the validation errors.
+    #[error("tool '{tool}' input failed schema validation: {detail}")]
+    ToolInputInvalid {
+        /// The tool whose input was invalid.
+        tool: String,
+        /// Validation error details (stable codes + paths).
+        detail: String,
+    },
 }
 
 impl ToolError {
@@ -186,6 +195,7 @@ impl ToolError {
             ToolError::ToolExecutionFailed { .. } => "tool_execution_failed",
             ToolError::ToolAlreadyRegistered { .. } => "tool_already_registered",
             ToolError::InvalidToolName => "invalid_tool_name",
+            ToolError::ToolInputInvalid { .. } => "tool_input_invalid",
         }
     }
 }
@@ -212,6 +222,7 @@ impl From<ToolError> for TaskResult {
             ToolError::ToolAlreadyRegistered { .. } | ToolError::InvalidToolName => {
                 Some(bpm_engine_core::RetryCategory::Permanent)
             }
+            ToolError::ToolInputInvalid { .. } => Some(bpm_engine_core::RetryCategory::Permanent),
         };
         TaskResult::Fail {
             error: format!("{}: {}", err.code(), err),
@@ -239,7 +250,7 @@ impl From<ToolError> for TaskResult {
 /// Side-effectful tools must also be **idempotent**: execution is
 /// at-least-once (redelivery after lease expiry or worker crash —
 /// `docs/recovery.md` §8).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ToolSpec {
     /// Tool name (non-empty; the key the executor dispatches on).
     pub name: String,
@@ -250,6 +261,11 @@ pub struct ToolSpec {
     pub has_side_effects: bool,
     /// The tool requires approval even without side effects.
     pub requires_approval: bool,
+    /// Optional JSON Schema for the tool's input (N3-2: default-deny
+    /// parameter overreach). When present, `ToolExecutor::execute`
+    /// validates the input string as JSON against this schema before
+    /// dispatch. `None` = no structural validation (legacy).
+    pub input_schema: Option<serde_json::Value>,
 }
 
 impl ToolSpec {
@@ -260,6 +276,7 @@ impl ToolSpec {
             version: version.into(),
             has_side_effects: false,
             requires_approval: false,
+            input_schema: None,
         }
     }
 
@@ -275,6 +292,15 @@ impl ToolSpec {
     /// Force the approval gate even for a side-effect-free tool.
     pub fn requires_approval(mut self) -> Self {
         self.requires_approval = true;
+        self
+    }
+
+    /// Declare a JSON Schema for the tool's input (N3-2). When set,
+    /// `ToolExecutor::execute` validates the input against this schema;
+    /// non-conforming input is rejected with `tool_input_invalid`
+    /// (permanent — bad input is not retriable).
+    pub fn input_schema(mut self, schema: serde_json::Value) -> Self {
+        self.input_schema = Some(schema);
         self
     }
 }
@@ -550,14 +576,41 @@ impl ToolExecutor {
                 tool: name.to_string(),
             });
         };
-        // 2. Approval gate: side effects always require approval, and
+        // 2. Input schema validation (N3-2: default-deny parameter
+        //    overreach). If the tool declares an input_schema, validate the
+        //    input string as JSON against it before any further checks.
+        //    Non-conforming input is permanent (bad input is not retriable).
+        if let Some(schema) = &spec.input_schema {
+            let parsed: serde_json::Value = match serde_json::from_str(input) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(ToolError::ToolInputInvalid {
+                        tool: spec.name.clone(),
+                        detail: format!("input is not valid JSON: {e}"),
+                    });
+                }
+            };
+            let errors = crate::output_schema::validate_json_schema(&parsed, schema);
+            if !errors.is_empty() {
+                let detail = errors
+                    .iter()
+                    .map(|e| format!("{}: {} ({})", e.code, e.detail, e.path))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(ToolError::ToolInputInvalid {
+                    tool: spec.name.clone(),
+                    detail,
+                });
+            }
+        }
+        // 3. Approval gate: side effects always require approval, and
         //    `requires_approval` additionally gates side-effect-free tools.
         if (spec.requires_approval || spec.has_side_effects) && !ctx.approved {
             return Err(ToolError::ToolRequiresApproval {
                 tool: spec.name.clone(),
             });
         }
-        // 3. Dispatch. (Unreachable while register_tool is the only way in;
+        // 4. Dispatch. (Unreachable while register_tool is the only way in;
         //    fail closed regardless.)
         let Some(tool) = self.tools.get(name) else {
             return Err(ToolError::ToolExecutionFailed {
@@ -1070,6 +1123,7 @@ mod tests {
                     version: "1.0".into(),
                     has_side_effects: true,
                     requires_approval: false,
+                    input_schema: None,
                 },
                 embed_credential: false,
             }))

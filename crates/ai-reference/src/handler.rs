@@ -48,7 +48,8 @@ use bpm_engine_core::{RetryCategory, ToolRef};
 use bpm_engine_worker_sdk::ai_task::{new_envelope, TaskInput, TaskOutput};
 use bpm_engine_worker_sdk::tools::{CredentialInjector, ToolContext, ToolError, ToolExecutor};
 use bpm_engine_worker_sdk::{
-    derive_key, run_with_renewal, with_timeout, ExternalTask, TaskContext, TaskHandler, TaskResult,
+    derive_key, run_with_renewal, with_timeout, ExternalTask, OutputContract, OutputMapping,
+    TaskContext, TaskHandler, TaskResult,
 };
 
 use crate::provider::{ModelProvider, ModelRequest, ProviderConfig};
@@ -100,6 +101,11 @@ pub struct HandlerDeps {
     model_timeout: Duration,
     executor: ToolExecutor,
     injector: CredentialInjector,
+    /// Optional structured-output contract for model tasks (N3-2). When
+    /// present, the model's response text is validated against the JSON
+    /// Schema and only declared fields are mapped to variables. When absent,
+    /// the raw response text is placed in the output variable (legacy).
+    output_contract: Option<OutputContract>,
 }
 
 impl HandlerDeps {
@@ -112,7 +118,16 @@ impl HandlerDeps {
             executor: crate::tools::reference_executor(),
             injector: CredentialInjector::new()
                 .source(reference_credential_source(&options.tool_env_var)),
+            output_contract: None,
         }
+    }
+
+    /// Set a structured-output contract for model tasks (N3-2). When set,
+    /// `handle_model` validates the model response against the JSON Schema
+    /// and maps only declared fields to process variables.
+    pub fn with_output_contract(mut self, contract: OutputContract) -> Self {
+        self.output_contract = Some(contract);
+        self
     }
 }
 
@@ -184,6 +199,38 @@ impl ReferenceHandler {
         envelope.model = Some(self.deps.pricing.model.clone());
         envelope.cost = Some(self.deps.pricing.cost_for(&response));
         envelope.idempotency_key = Some(derive_key(&task.task_id, &prompt));
+
+        // N3-2: structured output validation. If an output contract is
+        // configured, validate the model response against its JSON Schema
+        // and map only declared fields to variables. Non-conforming output
+        // is a permanent failure (ADR-011 §5: output_validation_failed).
+        if let Some(contract) = &self.deps.output_contract {
+            envelope.output_schema = contract.schema.clone();
+            match contract.validate_and_map(&response.text) {
+                OutputMapping::Mapped(vars) => {
+                    let mut output = TaskOutput::new().envelope(envelope);
+                    for (name, value) in vars {
+                        output = output.variable(&name, value);
+                    }
+                    return finish(output);
+                }
+                OutputMapping::NoMapping { .. } => {
+                    // Schema was None inside the contract — fall through to
+                    // the legacy path.
+                }
+                OutputMapping::Invalid(errors) => {
+                    let details: Vec<String> = errors
+                        .iter()
+                        .map(|e| format!("{}: {}", e.code, e.detail))
+                        .collect();
+                    return TaskResult::Fail {
+                        error: format!("output_validation_failed: {}", details.join("; ")),
+                        retry_after: None,
+                        category: Some(RetryCategory::Permanent),
+                    };
+                }
+            }
+        }
 
         let output = TaskOutput::new()
             .variable(output_var, response.text)
