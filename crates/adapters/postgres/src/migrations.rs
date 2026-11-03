@@ -70,6 +70,11 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         "0007_event_inbox",
         include_str!("../migrations/0007_event_inbox.sql"),
     ),
+    (
+        8,
+        "0008_definition_audit",
+        include_str!("../migrations/0008_definition_audit.sql"),
+    ),
 ];
 
 /// Snapshot of migration state, for health checks and startup validation.
@@ -265,14 +270,14 @@ mod tests {
         let s = status(&[]);
         assert!(s.applied.is_empty());
         assert_eq!(s.latest, 0);
-        assert_eq!(s.pending, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(s.pending, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
     fn fully_applied_db_reports_nothing_pending() {
-        let s = status(&[1, 2, 3, 4, 5, 6, 7]);
-        assert_eq!(s.applied, vec![1, 2, 3, 4, 5, 6, 7]);
-        assert_eq!(s.latest, 7);
+        let s = status(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(s.applied, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(s.latest, 8);
         assert!(s.pending.is_empty());
     }
 
@@ -281,12 +286,12 @@ mod tests {
         let s = status(&[1]);
         assert_eq!(s.applied, vec![1]);
         assert_eq!(s.latest, 1);
-        assert_eq!(s.pending, vec![2, 3, 4, 5, 6, 7]);
+        assert_eq!(s.pending, vec![2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
     fn validate_up_to_date_accepts_current_schema() {
-        assert!(validate_up_to_date(&status(&[1, 2, 3, 4, 5, 6, 7])).is_ok());
+        assert!(validate_up_to_date(&status(&[1, 2, 3, 4, 5, 6, 7, 8])).is_ok());
     }
 
     #[test]
