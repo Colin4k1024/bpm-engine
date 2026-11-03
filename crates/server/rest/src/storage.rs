@@ -17,6 +17,8 @@ use crate::state::ExtraHealthChecks;
 use bpm_engine_adapter_memory::{
     DeadLetterRepo, MemoryDefinitionAuditStore, MemoryEventInboxStore, MemoryRepo, ProcessDefStore,
 };
+#[cfg(feature = "postgres")]
+use bpm_engine_adapter_postgres::{PostgresDefinitionAuditStore, PostgresEventInboxStore};
 use bpm_engine_storage::{
     ApprovalStore, CompensationRecordRepo, DeadLetterStore, DefinitionAuditStore,
     DefinitionDeployer, EventInboxStore, ExternalTaskStore, HistoryRepo, InvariantChecker,
@@ -162,16 +164,10 @@ impl Storage {
             history_repo: Arc::new(PostgresHistoryRepo::new(pool.clone())),
             approval_store: Arc::new(PostgresApprovalStore::new(pool.clone())),
             dead_letter_store: Arc::new(PostgresDeadLetterStore::new(pool.clone())),
-            // N1-4 v1 limitation: the definition audit trail is kept in an
-            // in-memory store even under the postgres driver. Audit records
-            // therefore do NOT survive a restart in postgres mode (they are
-            // lost when the process exits). Postgres-backed audit
-            // persistence (table + migration) is a tracked follow-up; until
-            // then the memory store preserves the API contract and ordering
-            // for a single running server.
-            def_audit_store: Arc::new(MemoryDefinitionAuditStore::new())
+            def_audit_store: Arc::new(PostgresDefinitionAuditStore::new(pool.clone()))
                 as Arc<dyn DefinitionAuditStore>,
-            event_inbox_store: Arc::new(MemoryEventInboxStore::new()) as Arc<dyn EventInboxStore>,
+            event_inbox_store: Arc::new(PostgresEventInboxStore::new(pool.clone()))
+                as Arc<dyn EventInboxStore>,
             invariant_checker: Arc::new(StoreInvariantChecker::new(
                 process_store as Arc<dyn ProcessInstanceStore>,
             )),

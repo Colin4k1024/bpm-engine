@@ -200,3 +200,42 @@ CREATE INDEX IF NOT EXISTS idx_approval_instance
 ON approval_record(instance_id);
 CREATE INDEX IF NOT EXISTS idx_approval_pending_effect
 ON approval_record(effect) WHERE effect = 'Pending';
+
+-- event_inbox (migration 0007): persistent message/signal deliveries
+CREATE TABLE IF NOT EXISTS event_inbox (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT,
+    target_instance_id TEXT,
+    delivery_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    correlation JSONB NOT NULL DEFAULT '{}',
+    payload JSONB NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    dedup_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_event_inbox_pending
+ON event_inbox (name, tenant_id, status) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_event_inbox_instance
+ON event_inbox (target_instance_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_event_inbox_dedup
+ON event_inbox (dedup_key);
+
+-- definition_audit (migration 0008): lifecycle audit trail
+CREATE TABLE IF NOT EXISTS definition_audit (
+    id BIGSERIAL PRIMARY KEY,
+    definition_id TEXT NOT NULL,
+    definition_key TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    operation TEXT NOT NULL,
+    actor TEXT,
+    content_hash TEXT,
+    content_size BIGINT,
+    reason TEXT,
+    timestamp TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_def_audit_definition
+ON definition_audit (definition_id);
+CREATE INDEX IF NOT EXISTS idx_def_audit_key
+ON definition_audit (definition_key);
